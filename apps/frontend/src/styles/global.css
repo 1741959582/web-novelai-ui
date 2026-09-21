@@ -1,0 +1,98 @@
+:root {
+  color-scheme: dark;
+  --bg0: #0e0f21;
+  --bg1: #13152c;
+  --bg2: #191b31;
+  --bg3: #22253f;
+  --heading: #f5f3c2;
+  --text: #ffffff;
+  --muted: rgba(255, 255, 255, 0.55);
+  --chip: #e8e4f0;
+  --danger: #ff7878;
+  --bg: var(--bg0);
+  --bg-2: var(--bg2);
+  --bg-3: var(--bg1);
+  --line: var(--bg3);
+  --accent: var(--heading);
+  --accent-2: var(--chip);
+  --ok: #34d399;
+  font-family: "Source Sans 3", "Source Sans Pro", "Segoe UI", "Microsoft YaHei UI", sans-serif;
+}
+
+* { box-sizing: border-box; }
+html, body, #app { height: 100%; margin: 0; background: var(--bg0); color: var(--text); }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; font-weight: 600; }
+a { color: var(--text); text-decoration: none; font-weight: 600; }
+a:hover { color: var(--heading); }
+h1, h2, h3, h4 {
+  margin: 0 0 0.4rem;
+  color: var(--heading);
+  font-family: Eczar, "Times New Roman", serif;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+input, textarea, select {
+  background: var(--bg0);
+  border: 0;
+  color: var(--text);
+  font-size: 0.875rem;
+  border-radius: 4px;
+}
+input::placeholder, textarea::placeholder { color: #ffffff77; }
+::-webkit-scrollbar { width: 14px; height: 14px; }
+::-webkit-scrollbar-thumb {
+  background-color: var(--bg3);
+  border: 5px solid transparent;
+  background-clip: padding-box;
+  border-radius: 15px;
+}
+::-webkit-scrollbar-track { background: none; }
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  background: var(--bg3);
+  border-radius: 99px;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  border: 0;
+}
+
+.btn {
+  background: var(--bg1);
+  border: 1px solid var(--bg3);
+  border-radius: 4px;
+  padding: 8px 12px;
+}
+.btn:hover { border-color: var(--heading); }
+.btn.primary {
+  background: var(--heading);
+  border-color: var(--heading);
+  color: var(--bg0);
+}
+.btn.primary:disabled { opacity: 0.55; cursor: wait; }
+.btn.danger { color: var(--danger); border-color: #7f1d1d; }
+.field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+.field label { font-size: 12px; color: var(--muted); }
+.field input, .field select, .field textarea {
+  background: var(--bg0);
+  border: 1px solid var(--bg3);
+  border-radius: 4px;
+  padding: 8px 10px;
+  width: 100%;
+}
+.row { display: flex; gap: 10px; }
+.row > * { flex: 1; }
+.hint { color: var(--muted); font-size: 13px; line-height: 1.6; }
+.card {
+  background: var(--bg2);
+  border: 1px solid var(--bg3);
+  border-radius: 8px;
+  padding: 16px;
+}

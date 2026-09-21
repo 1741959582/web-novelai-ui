@@ -1,0 +1,14 @@
+{
+  "identifier": "default",
+  "description": "Default capability set for the main window",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-close",
+    "core:window:allow-hide",
+    "core:window:allow-set-focus",
+    "core:window:allow-show",
+    "core:window:allow-unminimize",
+    "dialog:default"
+  ]
+}
