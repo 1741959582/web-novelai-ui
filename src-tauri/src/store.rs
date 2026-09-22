@@ -774,8 +774,9 @@ fn cleaned_stem(source_path: &str) -> String {
 }
 
 #[tauri::command]
-pub fn file_cleaned_images(items: Vec<FiledImage>) -> Result<FiledImagesResult, String> {
-    let data = load_file();
+pub fn file_cleaned_images(items: Vec<FiledImage>, dest_dir: Option<String>) -> Result<FiledImagesResult, String> {
+    let chosen = dest_dir.as_deref().map(str::trim).filter(|dir| !dir.is_empty()).map(PathBuf::from);
+    let data = if chosen.is_some() { None } else { Some(load_file()) };
     let mut moved = 0u32;
     let mut skipped = 0u32;
     let mut paths = Vec::with_capacity(items.len());
@@ -786,7 +787,11 @@ pub fn file_cleaned_images(items: Vec<FiledImage>) -> Result<FiledImagesResult, 
             paths.push(item.path);
             continue;
         }
-        let dest_dir = folder_for_source(&data, &item.source_path);
+        let dest_dir = if let Some(dir) = &chosen {
+            dir.clone()
+        } else {
+            folder_for_source(data.as_ref().expect("history"), &item.source_path)
+        };
         fs::create_dir_all(&dest_dir)
             .map_err(|e| format!("无法创建文件夹 {}：{e}", dest_dir.display()))?;
         let dest = unique_path(&dest_dir, &cleaned_stem(&item.source_path), "png");

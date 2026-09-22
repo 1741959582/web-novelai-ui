@@ -9,6 +9,7 @@ import {
   fileCleanedImages,
   copyImageFiles,
   pickImages,
+  pickOutputDir,
   type SavedImage,
 } from "@/api/tauri";
 import { useApngStore, type ApngItem } from "@/stores/apng";
@@ -20,6 +21,8 @@ const busy = ref(false);
 type QueueImage = SavedImage & { sourcePath?: string };
 const extra = ref<QueueImage[]>([]);
 const readyToFile = ref(false);
+const saveDir = ref(localStorage.getItem("nai-clean-save-dir") || "");
+const saveDirLabel = computed(() => saveDir.value.split(/[/\\]/).filter(Boolean).pop() || saveDir.value);
 const coverPreview = ref("");
 const frameIndex = ref(0);
 const nameDraft = ref("");
@@ -405,7 +408,16 @@ async function strip() {
   });
   extra.value = outs;
   readyToFile.value = outs.length > 0;
-  app.status = outs.length > 1 ? `已清除 ${outs.length} 张元数据，可以保存到对应文件夹` : `已清除元数据：${outs[0]?.path || ""}`;
+  app.status = outs.length > 1 ? `已清除 ${outs.length} 张元数据，选择位置后可以保存` : `已清除元数据：${outs[0]?.path || ""}`;
+}
+
+async function chooseSaveDir() {
+  const picked = await pickOutputDir();
+  if (!picked) return "";
+  saveDir.value = picked;
+  localStorage.setItem("nai-clean-save-dir", picked);
+  app.status = `保存位置：${picked}`;
+  return picked;
 }
 
 async function saveToFolders() {
@@ -414,8 +426,16 @@ async function saveToFolders() {
     app.status = "没有可保存的图片";
     return;
   }
+  const dest = saveDir.value || (await chooseSaveDir());
+  if (!dest) {
+    app.status = "先选择保存位置";
+    return;
+  }
   await run(async () => {
-    const result = await fileCleanedImages(queued.map((item) => ({ path: item.path, sourcePath: item.sourcePath || item.path })));
+    const result = await fileCleanedImages(
+      queued.map((item) => ({ path: item.path, sourcePath: item.sourcePath || item.path })),
+      dest,
+    );
     const next = [...extra.value];
     let cursor = 0;
     for (let i = 0; i < next.length; i += 1) {
@@ -425,8 +445,8 @@ async function saveToFolders() {
     }
     extra.value = next;
     app.status = result.moved
-      ? `已把 ${result.moved} 张保存到对应文件夹`
-      : "这些图片已经在对应文件夹里";
+      ? `已把 ${result.moved} 张保存到 ${dest}`
+      : "这些图片已经在所选位置";
     if (result.skipped) app.status += `，${result.skipped} 张没保存`;
   });
 }
@@ -575,10 +595,12 @@ onUnmounted(() => {
         <button v-else-if="store.tab === 'meta'" type="button" class="primary" :disabled="busy" @click="strip">
           {{ extra.length > 1 ? `清除全部 ${extra.length}` : "清除并保存" }}
         </button>
+        <button v-if="store.tab === 'meta'" type="button" :disabled="busy" @click="chooseSaveDir">选择保存位置</button>
+        <span v-if="store.tab === 'meta'" class="save-dir" :title="saveDir">{{ saveDir ? saveDirLabel : "未选择" }}</span>
         <button v-if="store.tab === 'meta'" type="button" :disabled="busy || !readyToFile" @click="saveToFolders">
-          保存到对应文件夹
+          保存到此位置
         </button>
-        <button v-else type="button" class="primary" :disabled="busy" @click="mosaic">
+        <button v-else-if="store.tab === 'mosaic'" type="button" class="primary" :disabled="busy" @click="mosaic">
           {{ extra.length > 1 ? `打码全部 ${extra.length}` : "打马赛克" }}
         </button>
       </div>
@@ -633,6 +655,13 @@ onUnmounted(() => {
 .tabs { padding: 10px 12px 0; }
 .toolbar, .queue-bar { padding: 8px 12px; overflow-x: auto; flex-wrap: nowrap; }
 .toolbar > *, .queue-bar > * { flex: none; white-space: nowrap; }
+.save-dir {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #f5f3c2;
+  font-size: 12px;
+}
 button, .file, label {
   border: 0;
   border-radius: 8px;

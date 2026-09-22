@@ -547,8 +547,12 @@ export function apngStrip(image: string) {
   return invoke<SavedImage>("apng_strip", { image });
 }
 
-export function fileCleanedImages(items: { path: string; sourcePath: string }[]) {
-  return invoke<{ moved: number; skipped: number; paths: string[] }>("file_cleaned_images", { items });
+export function fileCleanedImages(items: { path: string; sourcePath: string }[], destDir: string) {
+  return invoke<{ moved: number; skipped: number; paths: string[] }>("file_cleaned_images", {
+    items,
+    destDir,
+    dest_dir: destDir,
+  });
 }
 
 export function apngMosaic(image: string, block = 16) {
