@@ -6,6 +6,7 @@ import {
   apngMosaic,
   apngRestore,
   apngStrip,
+  fileCleanedImages,
   copyImageFiles,
   pickImages,
   type SavedImage,
@@ -16,7 +17,9 @@ import { useAppStore } from "@/stores/app";
 const store = useApngStore();
 const app = useAppStore();
 const busy = ref(false);
-const extra = ref<SavedImage[]>([]);
+type QueueImage = SavedImage & { sourcePath?: string };
+const extra = ref<QueueImage[]>([]);
+const readyToFile = ref(false);
 const coverPreview = ref("");
 const frameIndex = ref(0);
 const nameDraft = ref("");
@@ -180,7 +183,10 @@ async function fromPicker(target: "cover" | "reals" | "gif" | "restore" | "meta"
   }
   if (target === "restore") extra.value = files;
   if (target === "meta" || target === "mosaic") {
-    const cleaned = await Promise.all(files.map(async (file) => ({ ...file, dataUrl: await cleanPreview(file.dataUrl) })));
+    readyToFile.value = false;
+    const cleaned = await Promise.all(
+      files.map(async (file) => ({ ...file, sourcePath: file.path, dataUrl: await cleanPreview(file.dataUrl) })),
+    );
     extra.value = cleaned;
   }
 }
@@ -206,7 +212,10 @@ async function fromFiles(files: FileList | null, target: "cover" | "reals" | "gi
     if (target === "cover") await store.setCover(dataUrl);
     if (target === "reals") await store.addReal(dataUrl, file.name);
     if (target === "gif") await store.addGif(dataUrl, file.name);
-    if (target === "meta" || target === "mosaic") extra.value = [{ path: file.name, dataUrl: await cleanPreview(dataUrl) }];
+    if (target === "meta" || target === "mosaic") {
+      readyToFile.value = false;
+      extra.value = [{ path: file.name, sourcePath: file.name, dataUrl: await cleanPreview(dataUrl) }];
+    }
   }
   if (target === "reals") app.status = `已加入 ${list.length} 张，提示词和隐写已清掉`;
 }
@@ -361,7 +370,10 @@ async function applyPending() {
     return;
   }
   if (store.tab === "meta" || store.tab === "mosaic") {
-    extra.value = await Promise.all(batch.map(async (file) => ({ ...file, dataUrl: await cleanPreview(file.dataUrl) })));
+    readyToFile.value = false;
+    extra.value = await Promise.all(
+      batch.map(async (file) => ({ ...file, sourcePath: file.path, dataUrl: await cleanPreview(file.dataUrl) })),
+    );
   }
 }
 
@@ -384,12 +396,39 @@ async function restore() {
 
 async function strip() {
   if (!extra.value.length) return;
-  const outs: SavedImage[] = [];
+  const outs: QueueImage[] = [];
   await run(async () => {
-    for (const src of extra.value) outs.push(await apngStrip(src.dataUrl));
+    for (const src of extra.value) {
+      const saved = await apngStrip(src.dataUrl);
+      outs.push({ ...saved, sourcePath: src.sourcePath || src.path });
+    }
   });
   extra.value = outs;
-  app.status = outs.length > 1 ? `已清除 ${outs.length} 张元数据` : `已清除元数据：${outs[0]?.path || ""}`;
+  readyToFile.value = outs.length > 0;
+  app.status = outs.length > 1 ? `已清除 ${outs.length} 张元数据，可以保存到对应文件夹` : `已清除元数据：${outs[0]?.path || ""}`;
+}
+
+async function saveToFolders() {
+  const queued = extra.value.filter((item) => item.path && item.sourcePath);
+  if (!queued.length) {
+    app.status = "没有可保存的图片";
+    return;
+  }
+  await run(async () => {
+    const result = await fileCleanedImages(queued.map((item) => ({ path: item.path, sourcePath: item.sourcePath || item.path })));
+    const next = [...extra.value];
+    let cursor = 0;
+    for (let i = 0; i < next.length; i += 1) {
+      if (!next[i].path || !next[i].sourcePath) continue;
+      next[i] = { ...next[i], path: result.paths[cursor] || next[i].path };
+      cursor += 1;
+    }
+    extra.value = next;
+    app.status = result.moved
+      ? `已把 ${result.moved} 张保存到对应文件夹`
+      : "这些图片已经在对应文件夹里";
+    if (result.skipped) app.status += `，${result.skipped} 张没保存`;
+  });
 }
 
 async function mosaic() {
@@ -535,6 +574,9 @@ onUnmounted(() => {
         </button>
         <button v-else-if="store.tab === 'meta'" type="button" class="primary" :disabled="busy" @click="strip">
           {{ extra.length > 1 ? `清除全部 ${extra.length}` : "清除并保存" }}
+        </button>
+        <button v-if="store.tab === 'meta'" type="button" :disabled="busy || !readyToFile" @click="saveToFolders">
+          保存到对应文件夹
         </button>
         <button v-else type="button" class="primary" :disabled="busy" @click="mosaic">
           {{ extra.length > 1 ? `打码全部 ${extra.length}` : "打马赛克" }}

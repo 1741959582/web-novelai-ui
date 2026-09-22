@@ -714,6 +714,100 @@ pub fn history_arrange_groups() -> Result<ArrangeGroupsResult, String> {
     })
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FiledImage {
+    pub path: String,
+    pub source_path: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FiledImagesResult {
+    pub moved: u32,
+    pub skipped: u32,
+    pub paths: Vec<String>,
+}
+
+fn folder_for_source(data: &PersistFile, source_path: &str) -> PathBuf {
+    if let Some(item) = data
+        .history
+        .iter()
+        .find(|item| item.path == source_path || paths_eq(&item.path, source_path))
+    {
+        if !item.group_id.is_empty() {
+            if let Some(group) = data.history_groups.iter().find(|g| g.id == item.group_id) {
+                return group_folder(&group.name);
+            }
+        }
+    }
+    let source = PathBuf::from(source_path);
+    if let Some(parent) = source.parent() {
+        if parent.as_os_str().len() > 0 && parent.is_dir() {
+            return parent.to_path_buf();
+        }
+    }
+    default_output_dir()
+}
+
+fn cleaned_stem(source_path: &str) -> String {
+    let raw = Path::new(source_path)
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("cleaned");
+    let cleaned: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_control() || r#"<>:"/\|?*"#.contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let cleaned = cleaned.trim().trim_matches('.').trim();
+    if cleaned.is_empty() {
+        "cleaned".into()
+    } else {
+        format!("{cleaned}_cleaned")
+    }
+}
+
+#[tauri::command]
+pub fn file_cleaned_images(items: Vec<FiledImage>) -> Result<FiledImagesResult, String> {
+    let data = load_file();
+    let mut moved = 0u32;
+    let mut skipped = 0u32;
+    let mut paths = Vec::with_capacity(items.len());
+    for item in items {
+        let src = PathBuf::from(&item.path);
+        if !src.is_file() {
+            skipped += 1;
+            paths.push(item.path);
+            continue;
+        }
+        let dest_dir = folder_for_source(&data, &item.source_path);
+        fs::create_dir_all(&dest_dir)
+            .map_err(|e| format!("无法创建文件夹 {}：{e}", dest_dir.display()))?;
+        let dest = unique_path(&dest_dir, &cleaned_stem(&item.source_path), "png");
+        if paths_eq(&item.path, &dest.to_string_lossy()) {
+            paths.push(dest.to_string_lossy().into_owned());
+            continue;
+        }
+        if fs::rename(&src, &dest).is_err() {
+            fs::copy(&src, &dest).map_err(|e| format!("保存失败：{e}"))?;
+            let _ = fs::remove_file(&src);
+        }
+        moved += 1;
+        paths.push(dest.to_string_lossy().into_owned());
+    }
+    Ok(FiledImagesResult {
+        moved,
+        skipped,
+        paths,
+    })
+}
+
 #[tauri::command]
 pub fn reveal_in_folder(path: String) -> Result<(), String> {
     let file = PathBuf::from(&path);
