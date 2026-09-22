@@ -264,16 +264,22 @@ async function deleteItem(item: HistoryItem) {
         {{ store.history.length ? "这个分组里还没有图片。" : "生成后的图片会出现在这里。" }}
       </p>
       <div v-for="item in items" :key="item.id" class="item" :class="{ busy: busyId === item.id, picked: picked.includes(item.id) }">
-        <button class="thumb" type="button" title="预览；双击载入参数" @click="store.showHistory(item)" @dblclick="store.applyHistory(item)">
-          <img v-if="thumbs[item.id]" :src="thumbs[item.id]" alt="" />
-          <label class="tick" title="多选，按住 Shift 可连选" @click.stop @dblclick.stop>
-            <input
-              type="checkbox"
-              :checked="picked.includes(item.id)"
-              @click.prevent.stop="togglePick(item.id, ($event as MouseEvent).shiftKey)"
-            />
-          </label>
-        </button>
+        <div class="thumb-wrap">
+          <button class="thumb" type="button" title="预览；双击载入参数" @click="store.showHistory(item)" @dblclick="store.applyHistory(item)">
+            <img v-if="thumbs[item.id]" :src="thumbs[item.id]" alt="" />
+          </button>
+          <button
+            type="button"
+            class="tick"
+            :class="{ on: picked.includes(item.id) }"
+            :aria-pressed="picked.includes(item.id)"
+            title="多选，按住 Shift 可连选"
+            @click.stop="togglePick(item.id, $event.shiftKey)"
+            @dblclick.stop
+          >
+            <span v-if="picked.includes(item.id)">✓</span>
+          </button>
+        </div>
         <div class="meta">
           <button class="title" type="button" title="在资源管理器中显示" @click="revealItem(item)">
             {{ item.width }}×{{ item.height }}
@@ -389,7 +395,7 @@ header { display: flex; justify-content: space-between; align-items: center; mar
   color: rgba(255,255,255,0.72);
   font-size: 12px;
 }
-.pick-head span { margin-right: auto; }
+.pick-head span { margin-right: auto; font-weight: 700; color: #f5f3c2; }
 .pick-actions { display: flex; flex-wrap: wrap; gap: 4px; }
 .pick-actions button {
   border: 0;
@@ -432,10 +438,17 @@ header { display: flex; justify-content: space-between; align-items: center; mar
   margin-bottom: 6px;
 }
 .item:hover,
-.item.busy,
-.item.picked { background: var(--bg3); }
-.thumb {
+.item.busy { background: var(--bg3); }
+.item.picked {
+  background: rgba(245, 243, 194, 0.16);
+  box-shadow: inset 0 0 0 2px #f5f3c2;
+}
+.thumb-wrap {
   position: relative;
+  width: 48px;
+  height: 64px;
+}
+.thumb {
   padding: 0;
   border: 0;
   background: transparent;
@@ -446,14 +459,22 @@ header { display: flex; justify-content: space-between; align-items: center; mar
   position: absolute;
   left: 2px;
   top: 2px;
-  width: 16px;
-  height: 16px;
+  z-index: 1;
+  width: 18px;
+  height: 18px;
+  padding: 0;
   display: grid;
   place-items: center;
-  background: rgba(14, 15, 33, 0.72);
-  border-radius: 3px;
+  border: 2px solid #f5f3c2;
+  border-radius: 4px;
+  background: rgba(14, 15, 33, 0.88);
+  color: #0e0f21;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1;
 }
-.tick input { margin: 0; }
+.tick.on { background: #f5f3c2; }
+.item.picked img { box-shadow: 0 0 0 2px #f5f3c2; }
 .item img { width: 48px; height: 64px; object-fit: cover; border-radius: 4px; }
 .meta { min-width: 0; }
 .title {
