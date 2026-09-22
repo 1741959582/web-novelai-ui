@@ -426,16 +426,21 @@ export const useAppStore = defineStore("app", () => {
     return result;
   }
 
+  function syncedHistory(items: HistoryItem[]) {
+    return items.map((item) => history.value.find((entry) => entry.id === item.id) || item);
+  }
+
   async function assignSelectedGroup(items: HistoryItem[]) {
     const gid = selectedHistoryGroupId.value;
-    if (!gid || gid === "__ungrouped" || !items.length) return;
+    if (!gid || gid === "__ungrouped" || !items.length) return syncedHistory(items);
     for (const item of items) {
       try {
         await setHistoryItemGroup(item.id, gid);
       } catch {
-        /* keep generating */
+        /* keep the image visible even if filing it fails */
       }
     }
+    return syncedHistory(items);
   }
 
   async function removeHistory(id: string) {
@@ -878,9 +883,9 @@ export const useAppStore = defineStore("app", () => {
         applyAccount(res.account);
         history.value = [...res.items, ...history.value];
         collected.push(...res.items);
-        await assignSelectedGroup(res.items);
-        if (res.items[0]) await showHistory(res.items[0]);
-        await persistSession(res.items);
+        const saved = await assignSelectedGroup(res.items);
+        if (saved[0]) await showHistory(saved[0]);
+        await persistSession(saved);
         if (params.value.seedMode === "fixed") {
           params.value.seed = res.actualSeed + 1;
         }
@@ -951,9 +956,9 @@ export const useAppStore = defineStore("app", () => {
     status.value = res.message;
     applyAccount(res.account);
     history.value = [...res.items, ...history.value];
-    await assignSelectedGroup(res.items);
-    if (res.items[0]) await showHistory(res.items[0]);
-    await persistSession(res.items);
+    const saved = await assignSelectedGroup(res.items);
+    if (saved[0]) await showHistory(saved[0]);
+    await persistSession(saved);
   }
 
   async function enhanceCurrent() {

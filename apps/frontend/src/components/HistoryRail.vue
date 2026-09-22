@@ -36,20 +36,26 @@ const activeGroup = computed(() =>
 );
 
 async function loadThumbs() {
-  const next = { ...thumbs.value };
-  for (const item of items.value.slice(0, 48)) {
-    if (next[item.id]) continue;
+  const snapshot = items.value.slice(0, 48);
+  const updates: Record<string, string> = {};
+  for (const item of snapshot) {
+    if (thumbs.value[item.id] || updates[item.id]) continue;
     try {
-      next[item.id] = await readImageDataUrl(item.path);
+      const url = await readImageDataUrl(item.path);
+      const current = items.value.find((entry) => entry.id === item.id);
+      if (current && current.path !== item.path) continue;
+      updates[item.id] = url;
     } catch {
-      next[item.id] = "";
+      const current = items.value.find((entry) => entry.id === item.id);
+      if (!current || current.path !== item.path || thumbs.value[item.id]) continue;
+      updates[item.id] = "";
     }
   }
-  thumbs.value = next;
+  if (Object.keys(updates).length) thumbs.value = { ...thumbs.value, ...updates };
 }
 
 watch(
-  () => [store.historyOpen, items.value.map((h) => h.id).join("|")] as const,
+  () => [store.historyOpen, items.value.map((h) => `${h.id}:${h.groupId || ""}:${h.path}`).join("|")] as const,
   () => {
     const ids = new Set(items.value.map((item) => item.id));
     picked.value = picked.value.filter((id) => ids.has(id));
