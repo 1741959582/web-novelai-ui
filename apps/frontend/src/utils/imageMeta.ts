@@ -426,6 +426,15 @@ export async function inspectImageBuffer(buffer: ArrayBuffer): Promise<MetadataR
     }
   }
   let report = reportFromMeta(meta);
+  const ihdr = chunks.find((c) => c.type === "IHDR")?.data;
+  const mega = ihdr && ihdr.length >= 8
+    ? (new DataView(ihdr.buffer, ihdr.byteOffset, ihdr.byteLength).getUint32(0)
+        * new DataView(ihdr.buffer, ihdr.byteOffset, ihdr.byteLength).getUint32(4))
+      / 1_000_000
+    : 0;
+  if (report.hasMetadata || mega > 3.2 || buffer.byteLength > 8 * 1024 * 1024) {
+    return report;
+  }
   const pixels = chunks.length ? await decodePngPixels(chunks) : null;
   if (pixels) {
     const stealth = await readStealthPayload(pixels);

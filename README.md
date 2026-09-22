@@ -7,6 +7,8 @@
 
 Token 只存在 Rust 侧，前端通过 `invoke` 调用，不会直接把 Bearer 发给网页。
 
+第一次打开的向导，以及设置里哪些必填、哪些留空，见 [首次使用](docs/GETTING_STARTED.md)。
+
 ## 目录
 
 ```text

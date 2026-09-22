@@ -6,19 +6,29 @@ import {
   accountRefresh,
   generateImg2img,
   generateTxt2img,
+  upscaleImage,
+  augmentImage,
   historyDelete,
+  historyGroupCreate,
+  historyGroupDelete,
+  historyGroupRename,
+  historyGroupsList,
   historyList,
+  historySetGroup,
+  revealInFolder,
   readImageDataUrl,
   sessionDelete,
   sessionLoad,
   sessionNew,
   sessionsList,
   sessionUpsert,
+  fetchRemoteImage,
   inspectImage,
-  inspectImageBytes,
   settingsGet,
   settingsSave,
   tokenVerify,
+  type QuickEntry,
+  type ReferencePreset,
 } from "@/api/tauri";
 import {
   DEFAULT_PARAMS,
@@ -36,6 +46,7 @@ import {
   type AppSettings,
   type CharCaption,
   type GenerateParams,
+  type HistoryGroup,
   type HistoryItem,
   type MetadataReport,
   type PreciseReference,
@@ -43,6 +54,7 @@ import {
   type VibeImage,
 } from "@/types/nai";
 import { dataUrlToBuffer, inspectImageBuffer } from "@/utils/imageMeta";
+import { prepareOfficialInpaintAssets } from "@/utils/inpaintMask";
 
 function stripDataUrl(value: string) {
   const idx = value.indexOf(",");
@@ -68,6 +80,9 @@ export const useAppStore = defineStore("app", () => {
     theme: "dark",
     token: "",
     streamPreviewEnabled: true,
+    huggingfaceToken: "",
+    localClTaggerEnabled: false,
+    localClTaggerThreshold: 0.55,
   });
   const account = ref<AccountSummary>({
     hasToken: false,
@@ -76,32 +91,55 @@ export const useAppStore = defineStore("app", () => {
     anlasBalance: null,
     expiresAt: null,
     hasActiveSubscription: false,
+    opusUsage: null,
+    opusUsageUpdatedAt: null,
   });
   const params = ref<GenerateParams>({ ...DEFAULT_PARAMS });
   const characters = ref<CharCaption[]>([newCharacter()]);
   const history = ref<HistoryItem[]>([]);
+  const historyGroups = ref<HistoryGroup[]>([]);
+  const selectedHistoryGroupId = ref("");
   const sessions = ref<SessionRecord[]>([]);
   const currentSessionId = ref("");
   const showSessionDialog = ref(false);
+  const ready = ref(false);
   const previewUrl = ref("");
   const status = ref("就绪");
   const busy = ref(false);
   const i2iImage = ref("");
   const i2iStrength = ref(0.7);
+  const i2iNoise = ref(0);
   const vibeImages = ref<VibeImage[]>([]);
   const preciseReferences = ref<PreciseReference[]>([]);
   const normalizeVibe = ref(true);
   const batchCount = ref(1);
   const positionCustom = ref(false);
+  const positionEditorOpen = ref(false);
+  const overlayGuide = ref<"none" | "thirds" | "phi" | "grid">("none");
+  const overlayCols = ref(2);
+  const overlayRows = ref(2);
   const historyOpen = ref(false);
   const importPreview = ref("");
   const importReport = ref<MetadataReport | null>(null);
+  const inpaintMask = ref("");
+  const paintMode = ref(false);
+  const paintEditorOpen = ref(false);
+  const brushErase = ref(false);
+  const brushSize = ref(20);
+  const brushShape = ref<"round" | "square">("round");
+  const currentItem = ref<HistoryItem | null>(null);
+  const pinnedUrl = ref("");
   const genProgress = ref(0);
   const genStep = ref(0);
   const genSteps = ref(28);
   const genPreview = ref("");
   const genPhase = ref("");
+  const streamFrames = ref<string[]>([]);
+  const streamReplaying = ref(false);
   let unlistenProgress: UnlistenFn | undefined;
+  let genTick: number | undefined;
+  let genStartedAt = 0;
+  let lastProgressAt = 0;
 
   const hasToken = computed(() => account.value.hasToken || settings.value.token === "configured");
   const customPositions = computed(() => positionCustom.value || characters.value.some((c) => c.useCoords));
@@ -111,8 +149,10 @@ export const useAppStore = defineStore("app", () => {
       settings.value = await settingsGet();
       account.value = await accountGet();
       history.value = await historyList();
+      historyGroups.value = await historyGroupsList();
       sessions.value = await sessionsList();
-      showSessionDialog.value = sessions.value.length > 0;
+      ready.value = true;
+      showSessionDialog.value = settings.value.hasOnboarded && sessions.value.length > 0;
       status.value = hasToken.value ? "API 已配置" : "请先在设置中填写 Token";
       unlistenProgress = await listen<{
         progress: number;
@@ -121,11 +161,24 @@ export const useAppStore = defineStore("app", () => {
         previewDataUrl: string;
         phase: string;
       }>("generate-progress", (event) => {
-        genProgress.value = event.payload.progress;
-        genStep.value = event.payload.currentStep;
+        lastProgressAt = Date.now();
+        if (event.payload.progress >= genProgress.value || event.payload.phase === "saving") {
+          genProgress.value = event.payload.progress;
+        }
+        if (event.payload.currentStep >= genStep.value || event.payload.phase === "saving") {
+          genStep.value = event.payload.currentStep;
+        }
         genSteps.value = event.payload.totalSteps;
         genPhase.value = event.payload.phase;
-        if (event.payload.previewDataUrl) genPreview.value = event.payload.previewDataUrl;
+        if (event.payload.previewDataUrl) {
+          genPreview.value = event.payload.previewDataUrl;
+          if (event.payload.phase === "streaming") {
+            const last = streamFrames.value[streamFrames.value.length - 1];
+            if (last !== event.payload.previewDataUrl && streamFrames.value.length < 48) {
+              streamFrames.value = [...streamFrames.value, event.payload.previewDataUrl];
+            }
+          }
+        }
       });
     } catch {
       status.value = "未连接到 Tauri 宿主，请用 npm run dev 启动桌面窗口";
@@ -140,22 +193,45 @@ export const useAppStore = defineStore("app", () => {
     const res = await tokenVerify(token);
     status.value = res.message;
     if (res.valid) {
-      account.value = res.account;
+      applyAccount(res.account);
       settings.value = await settingsGet();
     }
     return res;
   }
 
-  async function refreshAccount() {
+  function applyAccount(next: AccountSummary) {
+    const prev = account.value.opusUsage;
+    const incoming = next.opusUsage ?? prev ?? null;
+    let opusUsage = incoming;
+    if (prev && incoming) {
+      const prevRemain = prev.remainingImages ?? 0;
+      const nextRemain = incoming.remainingImages ?? 0;
+      if (prevRemain > 0 && nextRemain > prevRemain && Math.abs(Math.round(prev.percent) - Math.round(incoming.percent)) <= 1) {
+        opusUsage = {
+          ...incoming,
+          remainingImages: prevRemain,
+          percent: Math.min(100, Math.max(0, prevRemain / 17)),
+        };
+      }
+    }
+    account.value = {
+      ...next,
+      opusUsage,
+      opusUsageUpdatedAt: next.opusUsage ? next.opusUsageUpdatedAt : account.value.opusUsageUpdatedAt,
+    };
+  }
+
+  async function refreshAccount(silent = false) {
     try {
-      account.value = await accountRefresh();
-      status.value = `已刷新积分：${account.value.anlasBalance ?? 0} Anlas`;
+      applyAccount(await accountRefresh());
+      if (!silent) status.value = `已刷新积分：${account.value.anlasBalance ?? 0} Anlas`;
     } catch (e) {
-      status.value = formatErr(e);
+      if (!silent) status.value = formatErr(e);
     }
   }
 
   async function showHistory(item: HistoryItem) {
+    currentItem.value = item;
     try {
       previewUrl.value = await readImageDataUrl(item.path);
     } catch {
@@ -189,24 +265,28 @@ export const useAppStore = defineStore("app", () => {
   }
 
   async function inspectAndOpenImport(preview: string, buffer?: ArrayBuffer) {
+    openImportDialog(preview, emptyMetadataReport());
     let report = emptyMetadataReport();
     try {
       report = await inspectImageBuffer(buffer ?? dataUrlToBuffer(preview));
     } catch {
       /* try rust fallback */
     }
-    if (!report.hasMetadata) {
-      try {
-        const fallback = await inspectImageBytes(preview);
-        if (fallback.hasMetadata) report = fallback;
-      } catch {
-        /* keep local parse */
-      }
-    }
-    openImportDialog(preview, report);
+    if (importPreview.value === preview) importReport.value = report;
+  }
+
+  async function openImportFromUrl(url: string) {
+    status.value = "正在下载外站图片…";
+    const preview = await fetchRemoteImage(url);
+    await inspectAndOpenImport(preview);
+    status.value = "已导入外站图片";
   }
 
   async function openImportFromFile(file: File | Blob) {
+    if (file.size > 25 * 1024 * 1024) {
+      status.value = "图片超过 25MB，无法直接导入。";
+      return;
+    }
     const bytes = new Uint8Array(await file.arrayBuffer());
     const blob = new Blob([bytes], { type: (file as File).type || "image/png" });
     const preview = await new Promise<string>((resolve, reject) => {
@@ -220,21 +300,7 @@ export const useAppStore = defineStore("app", () => {
 
   async function openImportFromPath(path: string) {
     const preview = await readImageDataUrl(path);
-    let report = emptyMetadataReport();
-    try {
-      report = await inspectImageBuffer(dataUrlToBuffer(preview));
-    } catch {
-      /* rust path inspect */
-    }
-    if (!report.hasMetadata) {
-      try {
-        const rust = await inspectImage(path);
-        if (rust.hasMetadata) report = rust;
-      } catch {
-        /* keep local */
-      }
-    }
-    openImportDialog(preview, report);
+    await inspectAndOpenImport(preview);
   }
 
   async function importFromHistory(item: HistoryItem) {
@@ -281,17 +347,106 @@ export const useAppStore = defineStore("app", () => {
     await showHistory(item);
   }
 
+  function itemGroupId(item: HistoryItem) {
+    return item.groupId?.trim() || "";
+  }
+
+  function visibleHistory() {
+    const gid = selectedHistoryGroupId.value;
+    if (!gid) return history.value;
+    if (gid === "__ungrouped") return history.value.filter((h) => !itemGroupId(h));
+    return history.value.filter((h) => itemGroupId(h) === gid);
+  }
+
+  async function refreshHistoryGroups() {
+    historyGroups.value = await historyGroupsList();
+  }
+
+  async function createHistoryGroup(name: string) {
+    const group = await historyGroupCreate(name);
+    historyGroups.value = [...historyGroups.value, group];
+    selectedHistoryGroupId.value = group.id;
+    status.value = `已创建分组「${group.name}」`;
+    return group;
+  }
+
+  async function renameHistoryGroup(id: string, name: string) {
+    const group = await historyGroupRename(id, name);
+    historyGroups.value = historyGroups.value.map((g) => (g.id === id ? group : g));
+    status.value = `已重命名为「${group.name}」`;
+    return group;
+  }
+
+  async function deleteHistoryGroup(id: string) {
+    await historyGroupDelete(id);
+    historyGroups.value = historyGroups.value.filter((g) => g.id !== id);
+    history.value = history.value.map((h) => (itemGroupId(h) === id ? { ...h, groupId: "" } : h));
+    if (selectedHistoryGroupId.value === id) selectedHistoryGroupId.value = "";
+    status.value = "已删除分组，图片仍保留在历史中";
+  }
+
+  async function setHistoryItemGroup(id: string, groupId: string) {
+    const next = await historySetGroup(id, groupId);
+    history.value = history.value.map((h) => (h.id === id ? { ...h, groupId: next.groupId || "" } : h));
+    return next;
+  }
+
+  async function assignSelectedGroup(items: HistoryItem[]) {
+    const gid = selectedHistoryGroupId.value;
+    if (!gid || gid === "__ungrouped" || !items.length) return;
+    for (const item of items) {
+      try {
+        await setHistoryItemGroup(item.id, gid);
+      } catch {
+        /* keep generating */
+      }
+    }
+  }
+
   async function removeHistory(id: string) {
     await historyDelete(id);
     history.value = history.value.filter((h) => h.id !== id);
-    if (!history.value.some((h) => previewUrl.value.includes(h.id))) {
+    if (currentItem.value?.id === id) {
+      currentItem.value = null;
       previewUrl.value = "";
+    }
+  }
+
+  async function copyHistoryImage(item: HistoryItem) {
+    try {
+      const src = await readImageDataUrl(item.path);
+      const blob = await (await fetch(src)).blob();
+      await navigator.clipboard.write([new ClipboardItem({ [blob.type || "image/png"]: blob })]);
+      status.value = "已复制图片";
+    } catch {
+      status.value = "复制失败，请改用资源管理器打开后复制";
+    }
+  }
+
+  async function revealHistoryItem(item: HistoryItem) {
+    try {
+      await revealInFolder(item.path);
+      status.value = "已打开文件所在目录";
+    } catch (e) {
+      status.value = formatErr(e);
     }
   }
 
   function setPositionMode(custom: boolean) {
     positionCustom.value = custom;
     characters.value = characters.value.map((c) => ({ ...c, useCoords: custom }));
+    if (!custom) positionEditorOpen.value = false;
+  }
+
+  function startPositionEditor() {
+    setPositionMode(true);
+    if (!characters.value.length) addCharacter();
+    positionEditorOpen.value = true;
+  }
+
+  function finishPositionEditor() {
+    positionEditorOpen.value = false;
+    status.value = "已保存角色位置";
   }
 
   function addCharacter() {
@@ -396,6 +551,53 @@ export const useAppStore = defineStore("app", () => {
     status.value = "已导入图片元数据";
   }
 
+  function importCodexEntry(entry: QuickEntry) {
+    applyImportedMetadata(
+      {
+        ...emptyMetadataReport(),
+        kind: "quicktag",
+        software: "QuickTagCloud",
+        prompt: entry.prompt,
+        negative: entry.negative,
+        model: entry.model,
+        seed: entry.seed,
+        width: entry.width,
+        height: entry.height,
+        steps: entry.steps,
+        sampler: entry.sampler,
+        cfgScale: entry.cfgScale,
+        characterCaptions: entry.characterPrompts.map((c) => ({
+          ...newCharacter(),
+          prompt: c.prompt,
+          enabled: true,
+        })),
+        hasMetadata: Boolean(entry.prompt || entry.negative || entry.characterPrompts.length),
+        rawText: [entry.title, entry.prompt, entry.negative].filter(Boolean).join("\n"),
+      },
+      { prompt: true, uc: true, characters: true, append: false, settings: true, seed: Boolean(entry.seed), clean: false },
+    );
+    status.value = entry.title ? `已导入法典「${entry.title}」` : "已导入法典词条";
+  }
+
+  function applyReferencePreset(preset: ReferencePreset) {
+    vibeImages.value = preset.vibeImages.map((v) => ({
+      ...newVibeImage(v.previewUrl, v.base64),
+      infoExtracted: v.infoExtracted,
+      strength: v.strength,
+      enabled: v.enabled,
+      name: v.name,
+    }));
+    preciseReferences.value = preset.preciseReferences.map((p) => ({
+      ...newPreciseReference(p.previewUrl, p.base64),
+      type: (p.type as PreciseReference["type"]) || "character&style",
+      strength: p.strength,
+      fidelity: p.fidelity,
+      enabled: p.enabled,
+    }));
+    normalizeVibe.value = preset.normalizeVibe;
+    status.value = `已套用参考预设「${preset.name}」`;
+  }
+
   function rollSeed() {
     params.value.seed = Math.floor(Math.random() * 2_147_483_647) + 1;
     params.value.seedMode = "fixed";
@@ -495,7 +697,64 @@ export const useAppStore = defineStore("app", () => {
     status.value = "已开始新会话";
   }
 
-  async function generate(kind: "txt2img" | "img2img" = "txt2img") {
+  function useImageAs(kind: "i2i" | "vibe" | "precise", dataUrl: string) {
+    if (!dataUrl) {
+      status.value = "当前没有可参考的图片";
+      return false;
+    }
+    if (kind === "i2i") {
+      i2iImage.value = dataUrl;
+      status.value = "已设为 Image2Image 参考图";
+      return true;
+    }
+    if (kind === "vibe") return addVibeFromDataUrl(dataUrl);
+    return addPreciseFromDataUrl(dataUrl);
+  }
+
+  function currentSourceImage() {
+    return i2iImage.value || previewUrl.value;
+  }
+
+  function clearI2i() {
+    i2iImage.value = "";
+    inpaintMask.value = "";
+    paintMode.value = false;
+    paintEditorOpen.value = false;
+  }
+
+  function clearInpaintMask() {
+    inpaintMask.value = "";
+    status.value = "已清除局部重绘蒙版";
+  }
+
+  function startInpaint() {
+    const src = currentSourceImage();
+    if (!src) {
+      status.value = "请先上传图生图底图，或用当前图";
+      return false;
+    }
+    if (!i2iImage.value) i2iImage.value = src;
+    paintMode.value = true;
+    paintEditorOpen.value = true;
+    brushErase.value = false;
+    status.value = "涂抹要重绘的区域，然后 Save & Close";
+    return true;
+  }
+
+  async function usePathAs(kind: "i2i" | "vibe" | "precise", path: string) {
+    const url = await readImageDataUrl(path);
+    return useImageAs(kind, url);
+  }
+
+  async function generate(
+    kind: "txt2img" | "img2img" = "txt2img",
+    options?: { ignoreI2i?: boolean },
+  ): Promise<{ ok: boolean; items: HistoryItem[] }> {
+    const empty = { ok: false, items: [] as HistoryItem[] };
+    if (busy.value) return empty;
+    const source = i2iImage.value || (inpaintMask.value && paintMode.value ? previewUrl.value : "");
+    const hasMask = Boolean(inpaintMask.value) && paintMode.value;
+    if (!options?.ignoreI2i && ((hasMask && source) || i2iImage.value)) kind = "img2img";
     const hasPrompt =
       params.value.positivePrompt.trim() ||
       params.value.stylePrompt.trim() ||
@@ -504,43 +763,46 @@ export const useAppStore = defineStore("app", () => {
       preciseReferences.value.some((p) => p.enabled);
     if (!hasPrompt && kind !== "img2img") {
       status.value = "请输入正面提示词、角色提示词，或加入参考图";
-      return;
+      return empty;
     }
-    if (kind === "img2img" && !i2iImage.value) {
-      status.value = "请先加载 Image2Image 参考图";
-      return;
+    if (kind === "img2img" && !source) {
+      status.value = "请先加载 Image2Image 参考图，或把当前图设为参考";
+      return empty;
     }
-    const vibeOn = vibeImages.value.some((v) => v.enabled && v.base64);
-    const preciseOn = preciseReferences.value.some((p) => p.enabled && p.base64);
-    if (vibeOn && !supportsNAIVibeTransfer(params.value.model)) {
-      status.value = "Vibe Transfer 需要 V3 / V4 / V4.5，当前 V5 不支持。请切换模型或移除氛围图。";
-      return;
+    if (hasMask && !source) {
+      status.value = "请先加载要涂抹重绘的原图";
+      return empty;
     }
-    if (preciseOn && !supportsNAIPreciseReference(params.value.model)) {
-      status.value = "Precise Reference 仅支持 V4.5。请切换到 V4.5 Full/Curated，或移除精准参考图。";
-      return;
-    }
+    const vibeOn = supportsNAIVibeTransfer(params.value.model) && vibeImages.value.some((v) => v.enabled && v.base64);
+    const preciseOn = supportsNAIPreciseReference(params.value.model) && preciseReferences.value.some((p) => p.enabled && p.base64);
     busy.value = true;
-    genProgress.value = 0.02;
+    genProgress.value = 0.04;
     genStep.value = 0;
     genSteps.value = params.value.steps;
     genPreview.value = "";
     genPhase.value = settings.value.streamPreviewEnabled ? "streaming" : "waiting";
+    streamFrames.value = [];
+    startGenTicker();
     const n = Math.min(4, Math.max(1, batchCount.value));
     const extras = {
-      vibeImages: vibeImages.value
-        .filter((v) => v.enabled && v.base64)
-        .map((v) => ({ base64: stripDataUrl(v.base64), infoExtracted: v.infoExtracted, strength: v.strength })),
-      preciseReferences: preciseReferences.value
-        .filter((p) => p.enabled && p.base64)
-        .map((p) => ({
-          base64: stripDataUrl(p.base64),
-          type: p.type,
-          strength: p.strength,
-          fidelity: p.fidelity,
-        })),
+      vibeImages: vibeOn
+        ? vibeImages.value
+            .filter((v) => v.enabled && v.base64)
+            .map((v) => ({ base64: stripDataUrl(v.base64), infoExtracted: v.infoExtracted, strength: v.strength }))
+        : [],
+      preciseReferences: preciseOn
+        ? preciseReferences.value
+            .filter((p) => p.enabled && p.base64)
+            .map((p) => ({
+              base64: stripDataUrl(p.base64),
+              type: p.type,
+              strength: p.strength,
+              fidelity: p.fidelity,
+            }))
+        : [],
       normalizeVibe: normalizeVibe.value,
     };
+    const collected: HistoryItem[] = [];
     try {
       for (let i = 0; i < n; i++) {
         status.value = n > 1 ? `正在生成 ${i + 1}/${n}…` : "正在生成…";
@@ -549,28 +811,219 @@ export const useAppStore = defineStore("app", () => {
           charCaptions: characters.value,
           ...extras,
         };
+        let imageBase64 = kind === "img2img" ? stripDataUrl(source) : "";
+        let maskBase64 = hasMask ? stripDataUrl(inpaintMask.value) : undefined;
+        let width = params.value.width;
+        let height = params.value.height;
+        if (hasMask && source) {
+          const assets = await prepareOfficialInpaintAssets(
+            source,
+            inpaintMask.value,
+            params.value.width,
+            params.value.height,
+          );
+          imageBase64 = assets.imageBase64;
+          maskBase64 = assets.maskBase64;
+          width = assets.width;
+          height = assets.height;
+        }
         const res =
           kind === "img2img"
             ? await generateImg2img({
                 ...request,
-                imageBase64: stripDataUrl(i2iImage.value),
+                width,
+                height,
+                imageBase64,
                 strength: i2iStrength.value,
+                noise: hasMask ? 0 : i2iNoise.value,
+                maskBase64,
               })
             : await generateTxt2img(request);
         status.value = res.message;
-        account.value = res.account;
+        applyAccount(res.account);
         history.value = [...res.items, ...history.value];
+        collected.push(...res.items);
+        await assignSelectedGroup(res.items);
         if (res.items[0]) await showHistory(res.items[0]);
         await persistSession(res.items);
         if (params.value.seedMode === "fixed") {
           params.value.seed = res.actualSeed + 1;
         }
       }
+      return { ok: collected.length > 0, items: collected };
+    } catch (e) {
+      status.value = formatErr(e);
+      return { ok: false, items: collected };
+    } finally {
+      stopGenTicker();
+      busy.value = false;
+    }
+  }
+
+  function startGenTicker() {
+    stopGenTicker();
+    genStartedAt = Date.now();
+    lastProgressAt = Date.now();
+    genTick = window.setInterval(() => {
+      if (!busy.value || genPhase.value === "saving") return;
+      const expected = Math.max(5000, genSteps.value * 480);
+      const estimated = Math.min(0.92, (Date.now() - genStartedAt) / expected);
+      const estStep = Math.max(1, Math.round(estimated * genSteps.value));
+      if (genProgress.value < estimated) {
+        genProgress.value = estimated;
+        genStep.value = Math.max(genStep.value, estStep);
+        if (genPhase.value === "waiting" || !genPhase.value) genPhase.value = "generating";
+      }
+    }, 160);
+  }
+
+  function stopGenTicker() {
+    if (genTick) {
+      window.clearInterval(genTick);
+      genTick = undefined;
+    }
+  }
+
+  async function toggleStreamPreview() {
+    settings.value.streamPreviewEnabled = !settings.value.streamPreviewEnabled;
+    await saveSettings();
+    status.value = settings.value.streamPreviewEnabled ? "流式预览已开启" : "流式预览已关闭";
+  }
+
+  async function replayStream() {
+    if (busy.value || streamReplaying.value) return;
+    if (!streamFrames.value.length) {
+      await generate();
+      return;
+    }
+    streamReplaying.value = true;
+    try {
+      for (const url of streamFrames.value) {
+        genPreview.value = url;
+        await new Promise((resolve) => window.setTimeout(resolve, 90));
+      }
+      if (previewUrl.value) genPreview.value = "";
+    } finally {
+      streamReplaying.value = false;
+    }
+  }
+
+  function currentPreview() {
+    return previewUrl.value || i2iImage.value;
+  }
+
+  async function applyToolResult(res: Awaited<ReturnType<typeof generateImg2img>>) {
+    status.value = res.message;
+    applyAccount(res.account);
+    history.value = [...res.items, ...history.value];
+    await assignSelectedGroup(res.items);
+    if (res.items[0]) await showHistory(res.items[0]);
+    await persistSession(res.items);
+  }
+
+  async function enhanceCurrent() {
+    const src = currentPreview();
+    if (!src) {
+      status.value = "没有可增强的图片";
+      return;
+    }
+    busy.value = true;
+    genPhase.value = "waiting";
+    try {
+      const res = await generateImg2img({
+        ...params.value,
+        charCaptions: characters.value,
+        imageBase64: stripDataUrl(src),
+        strength: 0.25,
+        noise: 0,
+      });
+      await applyToolResult(res);
     } catch (e) {
       status.value = formatErr(e);
     } finally {
       busy.value = false;
     }
+  }
+
+  async function upscaleCurrent() {
+    const src = currentPreview();
+    if (!src) {
+      status.value = "没有可超分的图片";
+      return;
+    }
+    busy.value = true;
+    genPhase.value = "waiting";
+    try {
+      const res = await upscaleImage({ imageBase64: stripDataUrl(src), scale: 4 });
+      await applyToolResult(res);
+    } catch (e) {
+      status.value = formatErr(e);
+    } finally {
+      busy.value = false;
+    }
+  }
+
+  async function runDirector(tool: string) {
+    const src = currentPreview();
+    if (!src) {
+      status.value = "没有可处理的图片";
+      return;
+    }
+    busy.value = true;
+    genPhase.value = "waiting";
+    try {
+      const res = await augmentImage({
+        imageBase64: stripDataUrl(src),
+        tool,
+        width: params.value.width,
+        height: params.value.height,
+      });
+      await applyToolResult(res);
+    } catch (e) {
+      status.value = formatErr(e);
+    } finally {
+      busy.value = false;
+    }
+  }
+
+  async function copyCurrentImage() {
+    const src = currentPreview();
+    if (!src) return;
+    try {
+      const blob = await (await fetch(src)).blob();
+      await navigator.clipboard.write([new ClipboardItem({ [blob.type || "image/png"]: blob })]);
+      status.value = "已复制图片";
+    } catch {
+      status.value = "复制失败，请改用下载";
+    }
+  }
+
+  function togglePin() {
+    const src = currentPreview();
+    if (!src) return;
+    pinnedUrl.value = pinnedUrl.value === src ? "" : src;
+    status.value = pinnedUrl.value ? "已固定当前图，可与下一张对比" : "已取消固定";
+  }
+
+  function useCurrentAsI2i() {
+    const src = currentPreview();
+    if (!src) {
+      status.value = "没有可设为底图的图片";
+      return;
+    }
+    useImageAs("i2i", src);
+  }
+
+  function downloadCurrentImage() {
+    const src = currentPreview();
+    if (!src) return;
+    const link = document.createElement("a");
+    link.href = src;
+    link.download = currentItem.value
+      ? `${currentItem.value.id}.png`
+      : `novelai-${Date.now()}.png`;
+    link.click();
+    status.value = "已开始下载";
   }
 
   return {
@@ -579,14 +1032,18 @@ export const useAppStore = defineStore("app", () => {
     params,
     characters,
     history,
+    historyGroups,
+    selectedHistoryGroupId,
     sessions,
     currentSessionId,
+    ready,
     showSessionDialog,
     previewUrl,
     status,
     busy,
     i2iImage,
     i2iStrength,
+    i2iNoise,
     vibeImages,
     preciseReferences,
     normalizeVibe,
@@ -594,13 +1051,35 @@ export const useAppStore = defineStore("app", () => {
     historyOpen,
     importPreview,
     importReport,
+    inpaintMask,
+    paintMode,
+    paintEditorOpen,
+    brushErase,
+    brushSize,
+    brushShape,
+    currentItem,
+    pinnedUrl,
+    useImageAs,
+    usePathAs,
+    currentSourceImage,
+    clearI2i,
+    clearInpaintMask,
+    startInpaint,
     genProgress,
     genStep,
     genSteps,
+    streamFrames,
+    streamReplaying,
+    toggleStreamPreview,
+    replayStream,
     genPreview,
     genPhase,
     hasToken,
     customPositions,
+    positionEditorOpen,
+    overlayGuide,
+    overlayCols,
+    overlayRows,
     boot,
     saveSettings,
     verifyToken,
@@ -608,7 +1087,17 @@ export const useAppStore = defineStore("app", () => {
     showHistory,
     applyHistory,
     removeHistory,
+    visibleHistory,
+    refreshHistoryGroups,
+    createHistoryGroup,
+    renameHistoryGroup,
+    deleteHistoryGroup,
+    setHistoryItemGroup,
+    copyHistoryImage,
+    revealHistoryItem,
     setPositionMode,
+    startPositionEditor,
+    finishPositionEditor,
     addCharacter,
     removeCharacter,
     moveCharacter,
@@ -616,9 +1105,12 @@ export const useAppStore = defineStore("app", () => {
     rollSeed,
     clearSeed,
     applyImportedMetadata,
+    importCodexEntry,
+    applyReferencePreset,
     closeImportDialog,
     openImportFromFile,
     openImportFromPath,
+    openImportFromUrl,
     importFromHistory,
     addVibeFromDataUrl,
     updateVibeImage,
@@ -630,6 +1122,14 @@ export const useAppStore = defineStore("app", () => {
     removeSession,
     startNewSession,
     generate,
+    enhanceCurrent,
+    upscaleCurrent,
+    runDirector,
+    copyCurrentImage,
+    togglePin,
+    useCurrentAsI2i,
+    downloadCurrentImage,
+    currentPreview,
   };
 });
 

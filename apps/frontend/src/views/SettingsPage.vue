@@ -1,11 +1,40 @@
 <script setup lang="ts">
-import { ref } from "vue";
-import { openOutputDir, pickOutputDir } from "@/api/tauri";
+import { onMounted, ref } from "vue";
+import { danbooruStatus, downloadDanbooru, openOutputDir, pickOutputDir } from "@/api/tauri";
 import { useAppStore } from "@/stores/app";
+import ClTaggerPanel from "@/components/ClTaggerPanel.vue";
+import NaiIcon from "@/components/NaiIcon.vue";
+
+type Tab = "api" | "storage" | "tags" | "tagger" | "perf";
 
 const store = useAppStore();
+const tab = ref<Tab>("api");
 const tokenDraft = ref("");
 const message = ref("");
+const tagBusy = ref(false);
+const tagLib = ref({ downloaded: false, count: 0 });
+
+onMounted(async () => {
+  try {
+    tagLib.value = await danbooruStatus();
+  } catch {
+    /* ignore */
+  }
+});
+
+async function downloadTags() {
+  if (tagBusy.value) return;
+  tagBusy.value = true;
+  message.value = "正在下载中文标签库（约 7MB，每个标签均含中文）…";
+  try {
+    tagLib.value = await downloadDanbooru();
+    message.value = `已下载中文标签库（${tagLib.value.count} 条，均含中文）。`;
+  } catch (e) {
+    message.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    tagBusy.value = false;
+  }
+}
 
 async function verify() {
   const res = await store.verifyToken(tokenDraft.value);
@@ -28,59 +57,157 @@ async function save() {
 </script>
 
 <template>
-  <div class="wrap">
-    <div class="card">
-      <h2>API 配置</h2>
-      <p class="hint">填写 NovelAI Persistent API Token。Token 只保存在本机 Rust 侧，不会出现在页面请求里。</p>
-      <div class="field">
-        <label>Token</label>
-        <input v-model="tokenDraft" type="password" :placeholder="store.hasToken ? '已配置，输入新 Token 可覆盖' : 'pst-...'" />
-      </div>
-      <button class="btn primary" type="button" @click="verify">验证 Token / 刷新积分</button>
-      <p class="hint">当前：{{ store.account.tierName }} · Anlas {{ store.account.anlasBalance ?? "—" }} · 到期 {{ store.account.expiresAt || "—" }}</p>
-      <p class="hint">会话记录保存在本机数据目录，不依赖浏览器缓存。窗口以 WebView 无痕模式运行，站点 Cookie 不会跨启动残留。</p>
-    </div>
+  <div class="page">
+    <nav class="nav">
+      <button type="button" :class="{ on: tab === 'api' }" @click="tab = 'api'">
+        <NaiIcon name="globe" :size="16" />
+        <span>API 配置</span>
+      </button>
+      <button type="button" :class="{ on: tab === 'storage' }" @click="tab = 'storage'">
+        <NaiIcon name="folder" :size="16" />
+        <span>存储与网络</span>
+      </button>
+      <button type="button" :class="{ on: tab === 'tags' }" @click="tab = 'tags'">
+        <NaiIcon name="bulb" :size="16" />
+        <span>提示词补全</span>
+      </button>
+      <button type="button" :class="{ on: tab === 'tagger' }" @click="tab = 'tagger'">
+        <NaiIcon name="diamond" :size="16" />
+        <span>本地打标</span>
+      </button>
+      <button type="button" :class="{ on: tab === 'perf' }" @click="tab = 'perf'">
+        <NaiIcon name="sparkle" :size="16" />
+        <span>性能</span>
+      </button>
+    </nav>
 
-    <div class="card">
-      <h2>存储与网络</h2>
-      <div class="field">
-        <label>输出目录</label>
-        <div class="row">
-          <input v-model="store.settings.outputDir" placeholder="空则使用「图片/Langbai NovelAI」" />
-          <button class="btn" type="button" @click="chooseDir">选择…</button>
-          <button class="btn" type="button" @click="openOutputDir()">打开</button>
+    <section class="content">
+      <div v-if="tab === 'api'" class="card">
+        <h2>API 配置</h2>
+        <p class="hint">填写 NovelAI Persistent API Token。Token 只保存在本机 Rust 侧，不会出现在页面请求里。</p>
+        <div class="field">
+          <label>Token</label>
+          <input v-model="tokenDraft" type="password" :placeholder="store.hasToken ? '已配置，输入新 Token 可覆盖' : 'pst-...'" />
+        </div>
+        <button class="btn primary" type="button" @click="verify">验证 Token / 刷新积分</button>
+        <p class="hint">当前：{{ store.account.tierName }} · Anlas {{ store.account.anlasBalance ?? "—" }} · 到期 {{ store.account.expiresAt || "—" }}</p>
+        <p class="hint">会话记录保存在本机数据目录，不依赖浏览器缓存。窗口以 WebView 无痕模式运行，站点 Cookie 不会跨启动残留。</p>
+      </div>
+
+      <div v-else-if="tab === 'storage'" class="card">
+        <h2>存储与网络</h2>
+        <div class="field">
+          <label>输出目录</label>
+          <div class="row">
+            <input v-model="store.settings.outputDir" placeholder="空则使用「图片/Langbai NovelAI」" />
+            <button class="btn" type="button" @click="chooseDir">选择…</button>
+            <button class="btn" type="button" @click="openOutputDir()">打开</button>
+          </div>
+        </div>
+        <div class="field">
+          <label>Image API</label>
+          <input v-model="store.settings.imageBaseUrl" />
+        </div>
+        <div class="field">
+          <label>HTTP / SOCKS 代理（可选）</label>
+          <input v-model="store.settings.proxyUrl" placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:10808" />
+        </div>
+        <label class="check">
+          <input v-model="store.settings.allowCustomEndpoint" type="checkbox" />
+          允许把 Token 发到非官方端点
+        </label>
+        <label class="check">
+          <input v-model="store.settings.allowCustomEndpointFallback" type="checkbox" />
+          自定义端点 401/403 时回退官方
+        </label>
+        <div class="actions">
+          <button class="btn primary" type="button" @click="save">保存设置</button>
         </div>
       </div>
-      <div class="field">
-        <label>Image API</label>
-        <input v-model="store.settings.imageBaseUrl" />
+
+      <div v-else-if="tab === 'tags'" class="card">
+        <h2>提示词补全</h2>
+        <p class="hint">来源 DanbooruSearchOnline（GPL-3.0，已固定版本），单独下载、不打包进程序。下载后可用中文或英文补全并显示热度。</p>
+        <div class="field">
+          <label>标签库状态</label>
+          <input
+            readOnly
+            :value="tagLib.downloaded ? `已下载（${tagLib.count} 条，均含中文）` : '未下载（补全将使用内置精简词库）'"
+          />
+        </div>
+        <div class="actions">
+          <button class="btn primary" type="button" :disabled="tagBusy" @click="downloadTags">
+            {{ tagBusy ? "下载中…" : tagLib.downloaded ? "重新下载" : "下载标签库" }}
+          </button>
+        </div>
       </div>
-      <div class="field">
-        <label>HTTP / SOCKS 代理（可选）</label>
-        <input v-model="store.settings.proxyUrl" placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:10808" />
+
+      <div v-else-if="tab === 'tagger'" class="card">
+        <h2>本地打标</h2>
+        <ClTaggerPanel />
       </div>
-      <label class="check">
-        <input v-model="store.settings.streamPreviewEnabled" type="checkbox" />
-        流式预览（逐步显示生成过程，失败时自动回退 ZIP）
-      </label>
-      <label class="check">
-        <input v-model="store.settings.allowCustomEndpoint" type="checkbox" />
-        允许把 Token 发到非官方端点
-      </label>
-      <label class="check">
-        <input v-model="store.settings.allowCustomEndpointFallback" type="checkbox" />
-        自定义端点 401/403 时回退官方
-      </label>
-      <div class="actions">
-        <button class="btn primary" type="button" @click="save">保存设置</button>
+
+      <div v-else class="card">
+        <h2>性能</h2>
+        <label class="check">
+          <input v-model="store.settings.streamPreviewEnabled" type="checkbox" @change="store.saveSettings()" />
+          流式预览（逐步显示生成过程，失败时自动回退 ZIP）
+        </label>
+        <p class="hint">也可在生成画布右上角开关流式预览。</p>
       </div>
-    </div>
-    <p v-if="message">{{ message }}</p>
+
+      <p v-if="message" class="note">{{ message }}</p>
+    </section>
   </div>
 </template>
 
 <style scoped>
-.wrap { padding: 20px; display: grid; gap: 16px; max-width: 780px; }
+.page {
+  height: 100%;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+  background: var(--bg0);
+}
+.nav {
+  height: 100%;
+  overflow: auto;
+  padding: 14px 10px;
+  border-right: 1px solid var(--bg3);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.nav button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: rgba(255,255,255,0.72);
+  text-align: left;
+  font-size: 13px;
+}
+.nav button.on,
+.nav button:hover {
+  background: var(--bg2);
+  color: var(--heading);
+}
+.content {
+  min-width: 0;
+  height: 100%;
+  overflow: auto;
+  padding: 20px 24px 32px;
+}
+.card {
+  max-width: 720px;
+  display: grid;
+  gap: 10px;
+}
 .check { display: flex; gap: 8px; align-items: center; margin: 8px 0; }
-.actions { margin-top: 12px; }
+.actions { margin-top: 8px; }
+.note { color: var(--heading); font-size: 13px; margin-top: 16px; }
 </style>

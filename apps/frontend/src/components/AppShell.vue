@@ -92,6 +92,7 @@ function go(path: string) {
 .grow { flex: 1; }
 .status { color: var(--muted); font-size: 12px; max-width: 42%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .main { flex: 1; min-height: 0; overflow: hidden; position: relative; }
+.main > * { height: 100%; min-height: 0; }
 .menu-back {
   position: fixed;
   inset: 0;

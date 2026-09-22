@@ -117,6 +117,14 @@ defineProps<{ name: string; size?: number }>();
     <template v-else-if="name === 'x'">
       <path d="M7 7l10 10M17 7 7 17" />
     </template>
+    <template v-else-if="name === 'brush'">
+      <path d="M14.5 4.5 19.5 9.5 10 19H5v-5L14.5 4.5Z" />
+      <path d="M13 6.5 17.5 11" />
+    </template>
+    <template v-else-if="name === 'eraser'">
+      <path d="M15.5 5.5 4.8 16.2a2 2 0 0 0 0 2.8l.2.2h6.2L20 10.4 15.5 5.5Z" />
+      <path d="M8 19.2h11" />
+    </template>
     <template v-else-if="name === 'upload'">
       <rect x="4" y="4" width="16" height="16" rx="3" />
       <path d="M12 16V9" />
@@ -126,6 +134,67 @@ defineProps<{ name: string; size?: number }>();
       <circle cx="6" cy="12" r="1.4" fill="currentColor" stroke="none" />
       <circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none" />
       <circle cx="18" cy="12" r="1.4" fill="currentColor" stroke="none" />
+    </template>
+    <template v-else-if="name === 'folder'">
+      <path d="M4 7.5A1.5 1.5 0 0 1 5.5 6H9l1.6 1.8H18.5A1.5 1.5 0 0 1 20 9.3v7.2A1.5 1.5 0 0 1 18.5 18h-13A1.5 1.5 0 0 1 4 16.5v-9Z" />
+    </template>
+    <template v-else-if="name === 'copy'">
+      <rect x="8" y="8" width="11" height="11" rx="1.6" />
+      <path d="M6 15.5V6.2A1.2 1.2 0 0 1 7.2 5H15" />
+    </template>
+    <template v-else-if="name === 'download'">
+      <path d="M12 4v11" />
+      <path d="M7.5 11.5 12 16l4.5-4.5" />
+      <path d="M5 19h14" />
+    </template>
+    <template v-else-if="name === 'arrow'">
+      <path d="M5 12h12" />
+      <path d="M13 7l5 5-5 5" />
+    </template>
+    <template v-else-if="name === 'undo'">
+      <path d="M8 8H4v4" />
+      <path d="M4.6 12A8 8 0 1 0 6 7.2" />
+    </template>
+    <template v-else-if="name === 'redo'">
+      <path d="M16 8h4v4" />
+      <path d="M19.4 12A8 8 0 1 1 18 7.2" />
+    </template>
+    <template v-else-if="name === 'eye'">
+      <path d="M3 12s3.4-6 9-6 9 6 9 6-3.4 6-9 6-9-6-9-6Z" />
+      <circle cx="12" cy="12" r="2.2" />
+    </template>
+    <template v-else-if="name === 'invert'">
+      <circle cx="12" cy="12" r="8" />
+      <path d="M12 4v16" />
+      <path d="M12 4a8 8 0 0 1 0 16" fill="currentColor" />
+    </template>
+    <template v-else-if="name === 'help'">
+      <circle cx="12" cy="12" r="8" />
+      <path d="M9.6 9.4a2.4 2.4 0 1 1 3.3 2.2c-.8.4-1.1 1-.1 2" />
+      <circle cx="12" cy="16.6" r=".8" fill="currentColor" stroke="none" />
+    </template>
+    <template v-else-if="name === 'thumbtack'">
+      <path d="M15 4.5 19.5 9l-2 1-3.2 5.2-2.3-2.3L7 16.2 4.8 14l3.3-5.1L7 6.8 8 4.8 15 4.5Z" />
+      <path d="M10.2 14.6 7 20" />
+    </template>
+    <template v-else-if="name === 'layers'">
+      <path d="M12 4 4 8.5 12 13l8-4.5L12 4Z" />
+      <path d="M4 12.2 12 16.8 20 12.2" />
+      <path d="M4 16 12 20.6 20 16" />
+    </template>
+    <template v-else-if="name === 'sliders'">
+      <path d="M4 7h16M4 17h16" />
+      <circle cx="9" cy="7" r="2" />
+      <circle cx="15" cy="17" r="2" />
+    </template>
+    <template v-else-if="name === 'globe'">
+      <circle cx="12" cy="12" r="8" />
+      <path d="M4 12h16" />
+      <path d="M12 4c2.4 2.4 3.6 5.2 3.6 8s-1.2 5.6-3.6 8c-2.4-2.4-3.6-5.2-3.6-8S9.6 6.4 12 4Z" />
+    </template>
+    <template v-else-if="name === 'bulb'">
+      <path d="M9 14.2A5 5 0 1 1 15 14.2C13.8 15.4 13 16.4 13 18h-2c0-1.6-.8-2.6-2-3.8Z" />
+      <path d="M10 20h4" />
     </template>
   </svg>
 </template>

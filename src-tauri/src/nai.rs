@@ -42,6 +42,10 @@ pub struct GenerateRequest {
     pub model_mode: Option<String>,
     pub image_base64: Option<String>,
     pub strength: Option<f64>,
+    #[serde(default)]
+    pub noise: Option<f64>,
+    #[serde(default)]
+    pub mask_base64: Option<String>,
     pub char_captions: Option<Vec<CharCaption>>,
     pub vibe_images: Option<Vec<VibeImageIn>>,
     pub precise_references: Option<Vec<PreciseRefIn>>,
@@ -115,6 +119,15 @@ fn normalize_model(model: &str) -> String {
 fn snap64(v: u32, fallback: u32) -> u32 {
     let n = if v == 0 { fallback } else { v };
     ((n.max(64) / 64) * 64).min(49152)
+}
+
+fn to_inpaint_model(model: &str) -> String {
+    let m = normalize_model(model);
+    if m.ends_with("-inpainting") {
+        m
+    } else {
+        format!("{m}-inpainting")
+    }
 }
 
 fn merge_prompt(parts: &[&str]) -> String {
@@ -292,6 +305,10 @@ fn token_safe_base(raw: &str, fallback: &str, settings: &AppSettings) -> String 
     }
 }
 
+pub fn http_client() -> Result<reqwest::Client, String> {
+    build_client(&load_settings())
+}
+
 fn build_client(settings: &AppSettings) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(180))
@@ -354,6 +371,46 @@ fn encode_b64(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
+fn decode_rgba(bytes: &[u8]) -> Result<image::RgbaImage, String> {
+    image::load_from_memory(bytes)
+        .map(|img| img.to_rgba8())
+        .map_err(|e| format!("无法解码重绘图片: {e}"))
+}
+
+fn decode_rgba_b64(value: &str) -> Result<image::RgbaImage, String> {
+    decode_rgba(&decode_b64(value)?)
+}
+
+fn encode_rgba_png(img: &image::RgbaImage) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    image::DynamicImage::ImageRgba8(img.clone())
+        .write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png)
+        .map_err(|e| format!("无法编码重绘结果: {e}"))?;
+    Ok(out)
+}
+
+fn composite_inpaint_result(generated: &[u8], source_b64: &str, mask_b64: &str) -> Result<Vec<u8>, String> {
+    let mut gen = decode_rgba(generated)?;
+    let mut src = decode_rgba_b64(source_b64)?;
+    let mut mask = decode_rgba_b64(mask_b64)?;
+    let (width, height) = gen.dimensions();
+    if src.dimensions() != (width, height) {
+        src = image::imageops::resize(&src, width, height, image::imageops::FilterType::Triangle);
+    }
+    if mask.dimensions() != (width, height) {
+        mask = image::imageops::resize(&mask, width, height, image::imageops::FilterType::Nearest);
+    }
+    for y in 0..height {
+        for x in 0..width {
+            let pixel = mask.get_pixel(x, y);
+            if pixel[0].max(pixel[1]).max(pixel[2]) < 128 {
+                gen.put_pixel(x, y, *src.get_pixel(x, y));
+            }
+        }
+    }
+    encode_rgba_png(&gen)
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
@@ -375,13 +432,196 @@ fn auth_headers(token: &str) -> Result<HeaderMap, String> {
     Ok(headers)
 }
 
+fn read_f64(value: Option<&Value>) -> Option<f64> {
+    value.and_then(|v| {
+        v.as_f64()
+            .or_else(|| v.as_i64().map(|n| n as f64))
+            .or_else(|| v.as_u64().map(|n| n as f64))
+            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+    })
+}
+
+/// sharednai5 / official FAQ: ~17 normal-res 23-step images per 1%, cap ~1700.
+const V5_IMAGES_PER_PERCENT: f64 = 17.0;
+const V5_MAX_IMAGES: f64 = 1700.0;
+const V5_DEFAULT_DAILY: f64 = 185.0;
+const V5_FREE_MAX_PIXELS: u32 = 1024 * 1024;
+const V5_FREE_MAX_STEPS: u32 = 28;
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn is_usage_object(value: &Value) -> bool {
+    let Some(obj) = value.as_object() else {
+        return false;
+    };
+    read_f64(obj.get("percent")).is_some()
+        && (obj.contains_key("isNegative")
+            || obj.contains_key("is_negative")
+            || obj.contains_key("timeUntilNextPercent")
+            || obj.contains_key("time_until_next_percent"))
+}
+
+fn find_usage(value: &Value) -> Option<&Value> {
+    if is_usage_object(value) {
+        return Some(value);
+    }
+    if let Some(obj) = value.as_object() {
+        for child in obj.values() {
+            if let Some(found) = find_usage(child) {
+                return Some(found);
+            }
+        }
+    } else if let Some(arr) = value.as_array() {
+        for child in arr {
+            if let Some(found) = find_usage(child) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+fn usage_from_official(percent: f64, is_negative: bool, until: f64) -> crate::store::OpusGenerationUsage {
+    let percent = if is_negative {
+        0.0
+    } else {
+        percent.clamp(0.0, 100.0)
+    };
+    let remaining = (V5_IMAGES_PER_PERCENT * percent).round();
+    let daily = if until > 0.0 {
+        (V5_IMAGES_PER_PERCENT * (86_400.0 / until)).round()
+    } else {
+        V5_DEFAULT_DAILY
+    };
+    crate::store::OpusGenerationUsage {
+        percent,
+        is_negative,
+        time_until_next_percent: until.max(0.0),
+        remaining_images: remaining,
+        max_images: V5_MAX_IMAGES,
+        daily_refill_images: daily,
+    }
+}
+
+fn hydrate_usage(usage: &mut crate::store::OpusGenerationUsage) {
+    if usage.max_images <= 0.0 {
+        usage.max_images = V5_MAX_IMAGES;
+    }
+    if usage.daily_refill_images <= 0.0 && usage.time_until_next_percent > 0.0 {
+        usage.daily_refill_images =
+            (V5_IMAGES_PER_PERCENT * (86_400.0 / usage.time_until_next_percent)).round();
+    }
+    if usage.daily_refill_images <= 0.0 {
+        usage.daily_refill_images = V5_DEFAULT_DAILY;
+    }
+    if usage.remaining_images <= 0.0 && usage.percent > 0.0 && !usage.is_negative {
+        usage.remaining_images = (V5_IMAGES_PER_PERCENT * usage.percent.clamp(0.0, 100.0)).round();
+    }
+}
+
+fn apply_refill(usage: &mut crate::store::OpusGenerationUsage, elapsed_secs: f64) {
+    hydrate_usage(usage);
+    if usage.is_negative || elapsed_secs <= 0.0 {
+        return;
+    }
+    if usage.remaining_images >= usage.max_images - 0.01 {
+        return;
+    }
+    if usage.time_until_next_percent <= 0.0 {
+        return;
+    }
+    let recovered = elapsed_secs / usage.time_until_next_percent * V5_IMAGES_PER_PERCENT;
+    usage.remaining_images = (usage.remaining_images + recovered).min(usage.max_images);
+    usage.percent = (usage.remaining_images / V5_IMAGES_PER_PERCENT).clamp(0.0, 100.0);
+    usage.is_negative = usage.remaining_images <= 0.0;
+}
+
+fn merge_opus_usage(
+    prev: Option<crate::store::OpusGenerationUsage>,
+    prev_at: Option<i64>,
+    official: Option<crate::store::OpusGenerationUsage>,
+) -> Option<crate::store::OpusGenerationUsage> {
+    let Some(mut official) = official else {
+        return prev.map(|mut usage| {
+            let elapsed = prev_at
+                .map(|at| ((now_ms() - at) as f64) / 1000.0)
+                .unwrap_or(0.0);
+            apply_refill(&mut usage, elapsed);
+            usage
+        });
+    };
+    hydrate_usage(&mut official);
+    if let Some(mut prev) = prev {
+        hydrate_usage(&mut prev);
+        let elapsed = prev_at
+            .map(|at| ((now_ms() - at) as f64) / 1000.0)
+            .unwrap_or(0.0);
+        apply_refill(&mut prev, elapsed);
+        let official_bucket = official.percent.round();
+        let prev_bucket = (prev.remaining_images / V5_IMAGES_PER_PERCENT).round();
+        // Official percent is a coarse integer. Keep the finer local remaining
+        // while we are still in the same 1% bucket (sharednai5 v5_remaining_images).
+        if (official_bucket - prev_bucket).abs() <= 1.0 && prev.remaining_images > 0.0 {
+            official.remaining_images = prev.remaining_images.min(official.remaining_images);
+            official.percent = (official.remaining_images / V5_IMAGES_PER_PERCENT).clamp(0.0, 100.0);
+            official.is_negative = official.remaining_images <= 0.0;
+        }
+    }
+    Some(official)
+}
+
+fn consumes_v5_energy(req: &GenerateRequest, action: &str) -> bool {
+    if action != "generate" {
+        return false;
+    }
+    if !is_v5(&req.model) {
+        return false;
+    }
+    let width = snap64(req.width, 832);
+    let height = snap64(req.height, 1216);
+    width.saturating_mul(height) <= V5_FREE_MAX_PIXELS && req.steps <= V5_FREE_MAX_STEPS
+}
+
+fn consume_v5_energy(count: u32) {
+    if count == 0 {
+        return;
+    }
+    let mut account = crate::store::get_account();
+    let Some(mut usage) = account.opus_usage.take() else {
+        return;
+    };
+    let elapsed = account
+        .opus_usage_updated_at
+        .map(|at| ((now_ms() - at) as f64) / 1000.0)
+        .unwrap_or(0.0);
+    apply_refill(&mut usage, elapsed);
+    usage.remaining_images = (usage.remaining_images - count as f64).max(0.0);
+    usage.percent = (usage.remaining_images / V5_IMAGES_PER_PERCENT).clamp(0.0, 100.0);
+    usage.is_negative = usage.remaining_images <= 0.0;
+    account.opus_usage = Some(usage);
+    account.opus_usage_updated_at = Some(now_ms());
+    let _ = crate::store::set_account(account);
+}
+
 fn parse_account(data: &Value) -> AccountSummary {
     let sub = data
         .get("subscription")
         .or_else(|| data.pointer("/information/subscription"))
         .or_else(|| data.pointer("/data/subscription"))
+        .or_else(|| data.pointer("/data/information/subscription"))
         .cloned()
-        .unwrap_or(Value::Null);
+        .unwrap_or_else(|| {
+            if data.get("tier").is_some() || data.get("usage").is_some() || data.get("trainingStepsLeft").is_some() {
+                data.clone()
+            } else {
+                Value::Null
+            }
+        });
     let tier = sub.get("tier").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
     let active = sub.get("active").and_then(|v| v.as_bool()).unwrap_or(true);
     let anlas = sub
@@ -411,6 +651,21 @@ fn parse_account(data: &Value) -> AccountSummary {
             .map(|d| d.date_naive().to_string())
             .unwrap_or_default()
     });
+    let usage = sub
+        .get("usage")
+        .filter(|v| is_usage_object(v))
+        .or_else(|| find_usage(&sub))
+        .or_else(|| find_usage(data));
+    let percent = usage.and_then(|v| read_f64(v.get("percent")));
+    let until = usage
+        .and_then(|v| read_f64(v.get("timeUntilNextPercent")).or_else(|| read_f64(v.get("time_until_next_percent"))))
+        .unwrap_or(0.0);
+    let is_negative = usage
+        .and_then(|v| v.get("isNegative").or_else(|| v.get("is_negative")))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let opus_usage = percent.map(|percent| usage_from_official(percent, is_negative, until));
+    let opus_usage_updated_at = opus_usage.as_ref().map(|_| now_ms());
     AccountSummary {
         has_token: true,
         tier_name: match tier {
@@ -425,15 +680,18 @@ fn parse_account(data: &Value) -> AccountSummary {
         anlas_balance: anlas,
         expires_at: expires.filter(|s| !s.is_empty()),
         has_active_subscription: active && tier > 0,
+        opus_usage,
+        opus_usage_updated_at,
     }
 }
 
-async fn fetch_account(token: &str) -> Result<AccountSummary, String> {
-    let settings = load_settings();
-    let base = token_safe_base(&settings.image_base_url, OFFICIAL_IMAGE, &settings);
-    let client = build_client(&settings)?;
+async fn fetch_user_json(
+    client: &reqwest::Client,
+    token: &str,
+    url: &str,
+) -> Result<Value, String> {
     let res = client
-        .get(format!("{base}/user/data"))
+        .get(url)
         .headers(auth_headers(token)?)
         .send()
         .await
@@ -446,14 +704,51 @@ async fn fetch_account(token: &str) -> Result<AccountSummary, String> {
         }
         return Err(format!("验证失败 HTTP {status}: {body}"));
     }
-    let data: Value = res.json().await.map_err(|e| e.to_string())?;
-    Ok(parse_account(&data))
+    res.json().await.map_err(|e| e.to_string())
+}
+
+async fn fetch_account(token: &str) -> Result<AccountSummary, String> {
+    let settings = load_settings();
+    let base = token_safe_base(&settings.image_base_url, OFFICIAL_IMAGE, &settings);
+    let client = build_client(&settings)?;
+    let data = fetch_user_json(&client, token, &format!("{base}/user/data")).await?;
+    let mut account = parse_account(&data);
+    if let Ok(sub) = fetch_user_json(&client, token, &format!("{base}/user/subscription")).await {
+        let wrapped = if sub.get("subscription").is_some()
+            || sub.pointer("/information/subscription").is_some()
+        {
+            sub
+        } else {
+            json!({ "subscription": sub })
+        };
+        let extra = parse_account(&wrapped);
+        if extra.opus_usage.is_some() {
+            account.opus_usage = extra.opus_usage;
+            account.opus_usage_updated_at = extra.opus_usage_updated_at;
+        }
+        if extra.anlas_balance.is_some() {
+            account.anlas_balance = extra.anlas_balance;
+        }
+        if extra.tier_level.unwrap_or(0) > 0 {
+            account.tier_level = extra.tier_level;
+            account.tier_name = extra.tier_name;
+            account.has_active_subscription = extra.has_active_subscription;
+        }
+    }
+    let prev = crate::store::get_account();
+    account.opus_usage = merge_opus_usage(prev.opus_usage, prev.opus_usage_updated_at, account.opus_usage);
+    account.opus_usage_updated_at = account.opus_usage.as_ref().map(|_| now_ms());
+    Ok(account)
 }
 
 fn build_payload(req: &GenerateRequest, seed: u32, action: &str) -> Value {
     let width = snap64(req.width, 832);
     let height = snap64(req.height, 1216);
-    let model = req.model.clone();
+    let model = if action == "infill" {
+        to_inpaint_model(&req.model)
+    } else {
+        req.model.clone()
+    };
     let mut base = merge_prompt(&[&req.style_prompt, &req.positive_prompt]);
     if req.model_mode.as_deref() == Some("furry")
         && is_v4_plus(&model)
@@ -554,8 +849,27 @@ fn build_payload(req: &GenerateRequest, seed: u32, action: &str) -> Value {
             let b64 = strip_b64(img);
             parameters["image"] = json!(b64);
             parameters["strength"] = json!(req.strength.unwrap_or(0.7).clamp(0.0, 1.0));
-            parameters["noise"] = json!(0);
+            parameters["noise"] = json!(req.noise.unwrap_or(0.0).clamp(0.0, 1.0));
         }
+    }
+    if action == "infill" {
+        if let Some(img) = &req.image_base64 {
+            parameters["image"] = json!(strip_b64(img));
+        }
+        if let Some(mask) = &req.mask_base64 {
+            parameters["mask"] = json!(strip_b64(mask));
+        }
+        let strength = req.strength.unwrap_or(1.0).clamp(0.0, 1.0);
+        // Official site disables server-side overlay; a true value blends a
+        // dark film over the painted region. We composite locally after return.
+        parameters["add_original_image"] = json!(false);
+        parameters["inpaintImg2ImgStrength"] = json!(strength);
+        parameters["strength"] = json!(0.7);
+        if (strength - 1.0).abs() > f64::EPSILON {
+            parameters["img2img"] = json!({ "strength": strength, "color_correct": true });
+        }
+        parameters["noise"] = json!(0.0);
+        parameters["extra_noise_seed"] = json!(seed.saturating_sub(1));
     }
     let mut vibes = req.vibe_images.clone().unwrap_or_default();
     if is_v5(&model) {
@@ -776,6 +1090,13 @@ fn build_generate_form(payload: Value) -> Result<Form, String> {
             params.insert("image".into(), json!("image"));
         }
     }
+    let mut mask: Option<Vec<u8>> = None;
+    if let Some(Value::String(img)) = params.get("mask").cloned() {
+        if let Ok(bytes) = decode_b64(&img) {
+            mask = Some(bytes);
+            params.insert("mask".into(), json!("mask"));
+        }
+    }
 
     let request_part = Part::text(request.to_string())
         .mime_str("application/json")
@@ -787,6 +1108,13 @@ fn build_generate_form(payload: Value) -> Result<Form, String> {
             .mime_str("image/png")
             .map_err(|e| e.to_string())?;
         form = form.part("image", part);
+    }
+    if let Some(bytes) = mask {
+        let part = Part::bytes(bytes)
+            .file_name("mask")
+            .mime_str("image/png")
+            .map_err(|e| e.to_string())?;
+        form = form.part("mask", part);
     }
     for (index, b64) in images.into_iter().enumerate() {
         let bytes = decode_b64(&b64)?;
@@ -947,13 +1275,21 @@ async fn post_generate(
             let body = res.text().await.unwrap_or_default();
             return Err(http_status_error(status, &body));
         }
-        let bytes = res.bytes().await.map_err(format_reqwest)?;
+        let bytes = crate::nai_stream::read_body_with_progress(app, res, total_steps).await?;
         images = Some(unzip_images(&bytes)?);
     }
 
-    let images = images.unwrap_or_default();
+    let mut images = images.unwrap_or_default();
     if images.is_empty() {
         return Err("接口成功但没有返回图片。".into());
+    }
+    if action == "infill" {
+        if let (Some(source), Some(mask)) = (&prepared.image_base64, &prepared.mask_base64) {
+            images = images
+                .into_iter()
+                .map(|img| composite_inpaint_result(&img, source, mask).unwrap_or(img))
+                .collect();
+        }
     }
     if let Some(first) = images.first() {
         let preview = format!(
@@ -989,9 +1325,13 @@ async fn post_generate(
             sampler: req.sampler.clone(),
             kind: if action == "img2img" { "i2i" } else { "txt2img" }.into(),
             session_id: String::new(),
+            group_id: String::new(),
         };
         add_history(item.clone())?;
         items.push(item);
+    }
+    if consumes_v5_energy(req, action) {
+        consume_v5_energy(items.len() as u32);
     }
     let account = fetch_account(&token).await.unwrap_or_else(|_| {
         let mut acc = crate::store::get_account();
@@ -1053,6 +1393,56 @@ pub async fn account_refresh() -> Result<AccountSummary, String> {
 }
 
 #[tauri::command]
+pub async fn fetch_remote_image(url: String) -> Result<String, String> {
+    let url = url.trim();
+    let parsed = Url::parse(url).map_err(|_| "图片地址无效。".to_string())?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err("只支持 http/https 图片地址。".into());
+    }
+    let settings = load_settings();
+    let client = build_client(&settings)?;
+    let res = client
+        .get(url)
+        .header("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
+        .send()
+        .await
+        .map_err(format_reqwest)?;
+    if !res.status().is_success() {
+        return Err(format!("下载外站图片失败 HTTP {}", res.status()));
+    }
+    let mime = res
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let bytes = res.bytes().await.map_err(format_reqwest)?;
+    if bytes.len() > 40 * 1024 * 1024 {
+        return Err("外站图片超过 40MB。".into());
+    }
+    if bytes.len() < 24 {
+        return Err("外站返回的不是有效图片。".into());
+    }
+    let kind = if bytes.starts_with(&[0x89, 0x50, 0x4e, 0x47]) {
+        "image/png"
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        "image/jpeg"
+    } else if bytes.starts_with(&[0x52, 0x49, 0x46, 0x46]) {
+        "image/webp"
+    } else if bytes.starts_with(&[0x47, 0x49, 0x46]) {
+        "image/gif"
+    } else if mime.starts_with("image/") {
+        mime.split(';').next().unwrap_or("image/png")
+    } else {
+        return Err("外站返回的不是图片文件。".into());
+    };
+    Ok(format!(
+        "data:{kind};base64,{}",
+        encode_b64(&bytes)
+    ))
+}
+
+#[tauri::command]
 pub async fn generate_txt2img(app: tauri::AppHandle, request: GenerateRequest) -> Result<GenerateResult, String> {
     post_generate(&app, &request, "generate").await
 }
@@ -1067,6 +1457,259 @@ pub async fn generate_img2img(app: tauri::AppHandle, request: GenerateRequest) -
     {
         return Err("请先加载参考图片。".into());
     }
-    post_generate(&app, &request, "img2img").await
+    let action = if request
+        .mask_base64
+        .as_ref()
+        .is_some_and(|value| !value.is_empty())
+    {
+        "infill"
+    } else {
+        "img2img"
+    };
+    post_generate(&app, &request, action).await
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpscaleRequest {
+    pub image_base64: String,
+    #[serde(default)]
+    pub scale: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AugmentRequest {
+    pub image_base64: String,
+    pub tool: String,
+    #[serde(default)]
+    pub width: u32,
+    #[serde(default)]
+    pub height: u32,
+    #[serde(default)]
+    pub prompt: Option<String>,
+}
+
+fn fit_within_pixels(width: u32, height: u32, max_pixels: u32) -> (u32, u32) {
+    let px = width.saturating_mul(height);
+    if px == 0 || px <= max_pixels {
+        return (width.max(64), height.max(64));
+    }
+    let scale = (max_pixels as f64 / px as f64).sqrt();
+    let width = ((width as f64 * scale / 64.0).floor() as u32 * 64).max(64);
+    let height = ((height as f64 * scale / 64.0).floor() as u32 * 64).max(64);
+    (width, height)
+}
+
+fn resize_png_bytes(bytes: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
+    let img = decode_rgba(bytes)?;
+    if img.dimensions() == (width, height) {
+        return Ok(bytes.to_vec());
+    }
+    encode_rgba_png(&image::imageops::resize(
+        &img,
+        width,
+        height,
+        image::imageops::FilterType::Triangle,
+    ))
+}
+
+async fn persist_tool_images(
+    images: Vec<Vec<u8>>,
+    kind: &str,
+    prompt: &str,
+    width: u32,
+    height: u32,
+) -> Result<GenerateResult, String> {
+    let token = get_token();
+    let mut items = Vec::new();
+    for img in images {
+        let ext = if img.starts_with(&[0x89, 0x50, 0x4e, 0x47]) {
+            "png"
+        } else {
+            "bin"
+        };
+        let path = save_image_bytes(&img, kind, 0, ext)?;
+        let item = HistoryItem {
+            id: Uuid::new_v4().to_string(),
+            path: path.to_string_lossy().into(),
+            created_at: chrono::Local::now().to_rfc3339(),
+            model: kind.into(),
+            prompt: prompt.into(),
+            negative_prompt: String::new(),
+            seed: 0,
+            width,
+            height,
+            steps: 0,
+            sampler: String::new(),
+            kind: kind.into(),
+            session_id: String::new(),
+            group_id: String::new(),
+        };
+        add_history(item.clone())?;
+        items.push(item);
+    }
+    let account = fetch_account(&token).await.unwrap_or_else(|_| {
+        let mut acc = crate::store::get_account();
+        acc.has_token = true;
+        acc
+    });
+    let _ = set_account(account.clone());
+    Ok(GenerateResult {
+        ok: true,
+        message: format!("已保存 {} 张图片", items.len()),
+        items,
+        actual_seed: 0,
+        account,
+    })
+}
+
+#[tauri::command]
+pub async fn upscale_image(request: UpscaleRequest) -> Result<GenerateResult, String> {
+    let token = get_token();
+    if token.is_empty() {
+        return Err("请先在设置中配置 API Token。".into());
+    }
+    let scale = if request.scale == 2 { 2 } else { 4 };
+    let mut bytes = decode_b64(&request.image_base64)?;
+    let img = decode_rgba(&bytes)?;
+    let (mut width, mut height) = img.dimensions();
+    let (fit_w, fit_h) = fit_within_pixels(width, height, 1024 * 1024);
+    if (fit_w, fit_h) != (width, height) {
+        bytes = resize_png_bytes(&bytes, fit_w, fit_h)?;
+        width = fit_w;
+        height = fit_h;
+    }
+    if width * scale > 4096 || height * scale > 4096 {
+        return Err(format!(
+            "超分后尺寸将达到 {}×{}，超过 4096。请改用 2× 或更小的原图。",
+            width * scale,
+            height * scale
+        ));
+    }
+    let settings = load_settings();
+    let base = token_safe_base(&settings.image_base_url, OFFICIAL_IMAGE, &settings);
+    let client = build_client(&settings)?;
+    let passes = if scale == 4 { 2 } else { 1 };
+    for _ in 0..passes {
+        let payload = json!({
+            "image": encode_b64(&bytes),
+            "model": "nai-diffusion-5-curated",
+            "declared_blur_sigma": 0
+        });
+        let res = client
+            .post(format!("{base}/ai/upscale"))
+            .headers(auth_headers(&token)?)
+            .header("Accept", "application/zip, application/octet-stream, image/png")
+            .json(&payload)
+            .send()
+            .await
+            .map_err(format_reqwest)?;
+        if !res.status().is_success() {
+            let status = res.status();
+            let body = res.text().await.unwrap_or_default();
+            return Err(http_status_error(status, &body));
+        }
+        let raw = res.bytes().await.map_err(format_reqwest)?;
+        let images = unzip_images(&raw)?;
+        bytes = images.into_iter().next().ok_or_else(|| "超分没有返回图片。".to_string())?;
+        width *= 2;
+        height *= 2;
+    }
+    persist_tool_images(vec![bytes], "upscale", &format!("upscale {scale}x"), width, height).await
+}
+
+#[tauri::command]
+pub async fn augment_image(request: AugmentRequest) -> Result<GenerateResult, String> {
+    let token = get_token();
+    if token.is_empty() {
+        return Err("请先在设置中配置 API Token。".into());
+    }
+    let bytes = decode_b64(&request.image_base64)?;
+    let img = decode_rgba(&bytes)?;
+    let (src_w, src_h) = img.dimensions();
+    let width = if request.width > 0 { request.width } else { src_w };
+    let height = if request.height > 0 { request.height } else { src_h };
+    let (fit_w, fit_h) = fit_within_pixels(width, height, 1024 * 1024);
+    let send = if (fit_w, fit_h) != img.dimensions() {
+        resize_png_bytes(&bytes, fit_w, fit_h)?
+    } else {
+        bytes
+    };
+    let settings = load_settings();
+    let base = token_safe_base(&settings.image_base_url, OFFICIAL_IMAGE, &settings);
+    let client = build_client(&settings)?;
+    let mut payload = json!({
+        "image": encode_b64(&send),
+        "width": fit_w,
+        "height": fit_h,
+        "req_type": request.tool,
+        "defry": 0
+    });
+    if let Some(prompt) = request.prompt.as_ref().filter(|s| !s.trim().is_empty()) {
+        payload["prompt"] = json!(prompt);
+    }
+    let res = client
+        .post(format!("{base}/ai/augment-image"))
+        .headers(auth_headers(&token)?)
+        .header("Accept", "application/zip, application/octet-stream")
+        .json(&payload)
+        .send()
+        .await
+        .map_err(format_reqwest)?;
+    if !res.status().is_success() {
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        return Err(http_status_error(status, &body));
+    }
+    let raw = res.bytes().await.map_err(format_reqwest)?;
+    let images = unzip_images(&raw)?;
+    if images.is_empty() {
+        return Err("后期处理成功但没有返回图片。".into());
+    }
+    persist_tool_images(images, &format!("director-{}", request.tool), &format!("director:{}", request.tool), width, height).await
+}
+
+#[derive(Debug, Deserialize)]
+struct MyMemoryResponse {
+    #[serde(rename = "responseData")]
+    response_data: Option<MyMemoryData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MyMemoryData {
+    #[serde(rename = "translatedText")]
+    translated_text: Option<String>,
+}
+
+#[tauri::command]
+pub async fn translate_text(text: String, langpair: Option<String>) -> Result<String, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(String::new());
+    }
+    let pair = langpair.unwrap_or_else(|| "zh-CN|en".into());
+    let settings = load_settings();
+    let client = build_client(&settings)?;
+    let res = client
+        .get("https://api.mymemory.translated.net/get")
+        .query(&[("q", text), ("langpair", pair.as_str())])
+        .send()
+        .await
+        .map_err(format_reqwest)?;
+    if !res.status().is_success() {
+        return Err(format!("翻译失败 HTTP {}", res.status()));
+    }
+    let body: MyMemoryResponse = res.json().await.map_err(format_reqwest)?;
+    let translated = body
+        .response_data
+        .and_then(|d| d.translated_text)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if translated.is_empty() {
+        return Err("翻译结果为空。".into());
+    }
+    Ok(translated)
 }
 

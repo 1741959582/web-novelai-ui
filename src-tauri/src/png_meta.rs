@@ -195,17 +195,29 @@ fn pick<'a>(map: &'a [(String, String)], keys: &[&str]) -> String {
 }
 
 #[tauri::command]
-pub fn inspect_image(path: String) -> Result<MetadataReport, String> {
-    let bytes = fs::read(&path).map_err(|e| e.to_string())?;
-    inspect_bytes(&bytes)
+pub async fn inspect_image(path: String) -> Result<MetadataReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+        inspect_bytes(&bytes)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub fn inspect_image_bytes(base64_data: String) -> Result<MetadataReport, String> {
-    let raw = base64_data.split(',').next_back().unwrap_or(&base64_data);
-    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, raw)
-        .map_err(|e| e.to_string())?;
-    inspect_bytes(&bytes)
+pub async fn inspect_image_bytes(base64_data: String) -> Result<MetadataReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let raw = base64_data
+            .split(',')
+            .next_back()
+            .unwrap_or(&base64_data)
+            .to_string();
+        let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, raw)
+            .map_err(|e| e.to_string())?;
+        inspect_bytes(&bytes)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 fn inspect_bytes(bytes: &[u8]) -> Result<MetadataReport, String> {

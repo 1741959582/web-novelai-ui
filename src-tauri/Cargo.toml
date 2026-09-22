@@ -15,7 +15,11 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 base64 = "0.22"
 chrono = { version = "0.4", features = ["clock"] }
+crc32fast = "1"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
 dirs = "5"
+encoding_rs = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "socks", "json", "multipart", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -25,6 +29,7 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+ort = { version = "=2.0.0-rc.10", features = ["download-binaries", "load-dynamic"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }

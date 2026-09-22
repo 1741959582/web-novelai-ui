@@ -14,7 +14,7 @@ export function quoteAnlas(opts: {
   params: GenerateParams;
   account?: AccountSummary;
   batchCount?: number;
-  action?: "generate" | "img2img";
+  action?: "generate" | "img2img" | "infill";
   strength?: number;
   vibeCount?: number;
   encodedVibeCount?: number;
@@ -26,7 +26,7 @@ export function quoteAnlas(opts: {
   const pixels = Math.max(width * height, 65_536);
   const steps = Math.max(1, opts.params.steps || 28);
   const action = opts.action ?? "generate";
-  const strength = action === "generate" ? 1 : clamp01(opts.strength ?? 1, 1);
+  const strength = action === "generate" || action === "infill" ? 1 : clamp01(opts.strength ?? 1, 1);
   const opus =
     action === "generate" &&
     Boolean(opts.account?.hasActiveSubscription && (opts.account.tierLevel ?? 0) >= 3) &&
@@ -48,4 +48,18 @@ export function quoteAnlas(opts: {
   if ((opts.preciseCount ?? 0) > 0) total += 5 * samples;
 
   return total;
+}
+
+export function quoteUpscaleAnlas(width: number, height: number, scale = 4, opus = false) {
+  const pixels = Math.max(1, width * height);
+  const max = 1024 * 1024;
+  const fitted = pixels > max ? max : pixels;
+  if (opus && fitted <= 409_600) return 0;
+  let amount = 7;
+  if (fitted <= 262_144) amount = 1;
+  else if (fitted <= 409_600) amount = 2;
+  else if (fitted <= 524_288) amount = 3;
+  else if (fitted <= 786_432) amount = 5;
+  else if (fitted <= 1_048_576) amount = 7;
+  return amount * (scale === 4 ? 2 : 1);
 }

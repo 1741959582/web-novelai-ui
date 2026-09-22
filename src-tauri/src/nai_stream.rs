@@ -27,6 +27,7 @@ pub struct StreamFrame {
     pub event_type: String,
     pub sample_index: u32,
     pub step_index: Option<u32>,
+    pub progress: Option<f64>,
     pub image: Option<Vec<u8>>,
     pub error: Option<String>,
 }
@@ -44,6 +45,18 @@ fn map_get<'a>(map: &'a [(Value, Value)], key: &str) -> Option<&'a Value> {
 
 fn as_int(value: &Value) -> Option<u32> {
     value.as_i64().or_else(|| value.as_u64().map(|n| n as i64)).and_then(|n| u32::try_from(n.max(0)).ok())
+}
+
+fn as_progress(value: &Value) -> Option<f64> {
+    let n = value
+        .as_f64()
+        .or_else(|| value.as_i64().map(|i| i as f64))
+        .or_else(|| value.as_u64().map(|i| i as f64))?;
+    if n > 1.5 {
+        Some((n / 100.0).clamp(0.0, 1.0))
+    } else {
+        Some(n.clamp(0.0, 1.0))
+    }
 }
 
 fn decode_image(value: &Value) -> Option<Vec<u8>> {
@@ -95,7 +108,14 @@ fn frame_from_map(map: &[(Value, Value)], fallback: Option<&str>) -> StreamFrame
         step_index: map_get(source, "step_ix")
             .or_else(|| map_get(source, "stepIndex"))
             .or_else(|| map_get(source, "step_index"))
+            .or_else(|| map_get(source, "step"))
+            .or_else(|| map_get(source, "current_step"))
+            .or_else(|| map_get(source, "currentStep"))
             .and_then(as_int),
+        progress: map_get(source, "progress")
+            .or_else(|| map_get(source, "pct"))
+            .or_else(|| map_get(source, "percent"))
+            .and_then(as_progress),
         error: if event_type == "error" || map_get(source, "error").is_some() {
             Some(
                 error_val
@@ -247,6 +267,7 @@ fn decode_sse_data(event_type: &str, value: &str) -> Option<StreamFrame> {
             event_type: event_type.into(),
             sample_index: 0,
             step_index: None,
+            progress: None,
             image: None,
             error: Some(data.to_string()),
         });
@@ -331,6 +352,48 @@ pub fn emit_saving(app: &AppHandle, preview: &str, total_steps: u32) {
     );
 }
 
+fn time_progress(total_steps: u32, start: std::time::Instant) -> (f64, u32) {
+    let expected = (total_steps as f64 * 0.48).max(5.0);
+    let progress = (start.elapsed().as_secs_f64() / expected).clamp(0.06, 0.92);
+    let current = ((progress * total_steps as f64).round() as u32).clamp(1, total_steps);
+    (progress, current)
+}
+
+pub fn emit_time_progress(app: &AppHandle, total_steps: u32, start: std::time::Instant, phase: &str) {
+    let (progress, current_step) = time_progress(total_steps, start);
+    emit_progress(
+        app,
+        GenerateProgress {
+            progress,
+            current_step,
+            total_steps,
+            preview_data_url: String::new(),
+            phase: phase.into(),
+        },
+    );
+}
+
+pub async fn read_body_with_progress(
+    app: &AppHandle,
+    response: reqwest::Response,
+    total_steps: u32,
+) -> Result<Vec<u8>, String> {
+    use futures_util::StreamExt;
+    let mut stream = response.bytes_stream();
+    let mut buf = Vec::new();
+    let start = std::time::Instant::now();
+    let mut last = std::time::Instant::now();
+    while let Some(item) = stream.next().await {
+        let chunk = item.map_err(|e| e.to_string())?;
+        buf.extend_from_slice(&chunk);
+        if last.elapsed().as_millis() >= 160 {
+            last = std::time::Instant::now();
+            emit_time_progress(app, total_steps, start, "generating");
+        }
+    }
+    Ok(buf)
+}
+
 pub async fn consume_generate_stream(
     app: &AppHandle,
     response: reqwest::Response,
@@ -354,6 +417,10 @@ pub async fn consume_generate_stream(
     let mut zip_chunks: Vec<u8> = Vec::new();
     let mut prefix: Vec<u8> = Vec::new();
     let mut last_preview = std::time::Instant::now() - std::time::Duration::from_secs(1);
+    let started = std::time::Instant::now();
+    let mut last_tick = std::time::Instant::now();
+    let seen_frames = std::sync::atomic::AtomicU32::new(0);
+    let mut last_preview_url = String::new();
     let mut stream = response.bytes_stream();
 
     let mut consume = |frames: Vec<StreamFrame>| -> Result<(), String> {
@@ -361,31 +428,41 @@ pub async fn consume_generate_stream(
             if let Some(err) = frame.error {
                 return Err(err);
             }
-            let Some(image) = frame.image.filter(|b| !b.is_empty()) else {
-                continue;
-            };
-            let current_step = frame.step_index.unwrap_or(0).saturating_add(1);
+            seen_frames.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if let Some(image) = frame.image.as_ref().filter(|b| !b.is_empty()) {
+                last_preview_url = image_data_url(image);
+            }
+            let current_step = frame
+                .step_index
+                .map(|s| s.saturating_add(1))
+                .unwrap_or(seen_frames.load(std::sync::atomic::Ordering::Relaxed))
+                .clamp(1, total_steps.max(1));
+            let progress = frame
+                .progress
+                .unwrap_or((current_step as f64 / total_steps.max(1) as f64).clamp(0.0, 0.99));
             if frame.event_type == "final" {
-                emit_progress(
-                    app,
-                    GenerateProgress {
-                        progress: 1.0,
-                        current_step: total_steps,
-                        total_steps,
-                        preview_data_url: image_data_url(&image),
-                        phase: "saving".into(),
-                    },
-                );
-                finals.insert(frame.sample_index, image);
-            } else if last_preview.elapsed().as_millis() >= 110 || current_step >= total_steps {
+                if let Some(image) = frame.image.filter(|b| !b.is_empty()) {
+                    emit_progress(
+                        app,
+                        GenerateProgress {
+                            progress: 1.0,
+                            current_step: total_steps,
+                            total_steps,
+                            preview_data_url: image_data_url(&image),
+                            phase: "saving".into(),
+                        },
+                    );
+                    finals.insert(frame.sample_index, image);
+                }
+            } else if last_preview.elapsed().as_millis() >= 80 || current_step >= total_steps {
                 last_preview = std::time::Instant::now();
                 emit_progress(
                     app,
                     GenerateProgress {
-                        progress: (current_step as f64 / total_steps.max(1) as f64).clamp(0.0, 0.99),
+                        progress: progress.clamp(0.0, 0.99),
                         current_step,
                         total_steps,
-                        preview_data_url: image_data_url(&image),
+                        preview_data_url: last_preview_url.clone(),
                         phase: "streaming".into(),
                     },
                 );
@@ -420,6 +497,10 @@ pub async fn consume_generate_stream(
             }
             prefix.clear();
             continue;
+        }
+        if last_tick.elapsed().as_millis() >= 180 && seen_frames.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+            last_tick = std::time::Instant::now();
+            emit_time_progress(app, total_steps, started, "generating");
         }
         if mode == "zip" {
             zip_chunks.extend_from_slice(&chunk);

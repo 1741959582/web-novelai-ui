@@ -28,6 +28,13 @@ export const NAI_UC_PRESETS = [
   { label: "None（不使用预设）", value: 3 },
 ] as const;
 
+export const DIRECTOR_TOOLS = [
+  { label: "移除背景", value: "bg-removal", cost: 65 },
+  { label: "去除杂乱", value: "declutter", cost: 0 },
+  { label: "线稿提取", value: "lineart", cost: 0 },
+  { label: "草图化", value: "sketch", cost: 0 },
+] as const;
+
 export const SIZE_PRESETS = [
   { label: "竖图 832×1216", width: 832, height: 1216 },
   { label: "横图 1216×832", width: 1216, height: 832 },
@@ -96,6 +103,18 @@ export interface AppSettings {
   theme: string;
   token: string;
   streamPreviewEnabled: boolean;
+  huggingfaceToken: string;
+  localClTaggerEnabled: boolean;
+  localClTaggerThreshold: number;
+}
+
+export interface OpusGenerationUsage {
+  percent: number;
+  isNegative: boolean;
+  timeUntilNextPercent: number;
+  remainingImages?: number;
+  maxImages?: number;
+  dailyRefillImages?: number;
 }
 
 export interface AccountSummary {
@@ -105,6 +124,8 @@ export interface AccountSummary {
   anlasBalance: number | null;
   expiresAt: string | null;
   hasActiveSubscription: boolean;
+  opusUsage?: OpusGenerationUsage | null;
+  opusUsageUpdatedAt?: number | null;
 }
 
 export interface HistoryItem {
@@ -121,6 +142,13 @@ export interface HistoryItem {
   sampler: string;
   kind: string;
   sessionId?: string;
+  groupId?: string;
+}
+
+export interface HistoryGroup {
+  id: string;
+  name: string;
+  createdAt: string;
 }
 
 export interface CharCaption {
@@ -298,12 +326,15 @@ export interface MetadataReport {
 
 export const TABS = [
   { id: "generate", path: "/", label: "生成" },
-  { id: "inpaint", path: "/inpaint", label: "重绘" },
+  { id: "batch", path: "/batch", label: "批量" },
+  // { id: "inpaint", path: "/inpaint", label: "重绘" },
   { id: "postprocess", path: "/postprocess", label: "后期" },
   { id: "metadata", path: "/metadata", label: "原数据" },
   { id: "tools", path: "/tools", label: "工具" },
+  { id: "apng", path: "/apng", label: "APNG" },
+  { id: "reverse", path: "/reverse", label: "反推" },
   { id: "reference", path: "/reference", label: "参考预设" },
-  { id: "gallery", path: "/gallery", label: "在线画廊" },
+  { id: "gallery", path: "/gallery", label: "法典" },
   { id: "tavern", path: "/tavern", label: "酒馆" },
   { id: "records", path: "/records", label: "记录" },
   { id: "settings", path: "/settings", label: "设置" },

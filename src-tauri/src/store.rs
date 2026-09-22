@@ -7,7 +7,7 @@ use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct AppSettings {
     pub has_onboarded: bool,
     pub output_dir: String,
@@ -22,10 +22,37 @@ pub struct AppSettings {
     pub token: String,
     #[serde(default = "default_true")]
     pub stream_preview_enabled: bool,
+    #[serde(default)]
+    pub huggingface_token: String,
+    #[serde(default)]
+    pub local_cl_tagger_enabled: bool,
+    #[serde(default = "default_cl_threshold")]
+    pub local_cl_tagger_threshold: f64,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_cl_threshold() -> f64 {
+    0.55
+}
+
+fn keep_secret(incoming: &str, stored: &str) -> String {
+    let incoming = incoming.trim();
+    if incoming.is_empty() || incoming.eq_ignore_ascii_case("configured") {
+        stored.to_string()
+    } else {
+        incoming.to_string()
+    }
+}
+
+fn mask_secret(value: &str) -> String {
+    if value.trim().is_empty() {
+        String::new()
+    } else {
+        "configured".into()
+    }
 }
 
 impl Default for AppSettings {
@@ -42,8 +69,27 @@ impl Default for AppSettings {
             theme: "dark".into(),
             token: String::new(),
             stream_preview_enabled: true,
+            huggingface_token: String::new(),
+            local_cl_tagger_enabled: false,
+            local_cl_tagger_threshold: 0.55,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpusGenerationUsage {
+    pub percent: f64,
+    pub is_negative: bool,
+    pub time_until_next_percent: f64,
+    /// Live remaining V5 images. Official API only gives integer percent;
+    /// sharednai5 tracks this per generation (~17 images per 1%).
+    #[serde(default)]
+    pub remaining_images: f64,
+    #[serde(default)]
+    pub max_images: f64,
+    #[serde(default)]
+    pub daily_refill_images: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +101,10 @@ pub struct AccountSummary {
     pub anlas_balance: Option<i64>,
     pub expires_at: Option<String>,
     pub has_active_subscription: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opus_usage: Option<OpusGenerationUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opus_usage_updated_at: Option<i64>,
 }
 
 impl Default for AccountSummary {
@@ -66,6 +116,8 @@ impl Default for AccountSummary {
             anlas_balance: None,
             expires_at: None,
             has_active_subscription: false,
+            opus_usage: None,
+            opus_usage_updated_at: None,
         }
     }
 }
@@ -87,6 +139,16 @@ pub struct HistoryItem {
     pub kind: String,
     #[serde(default)]
     pub session_id: String,
+    #[serde(default)]
+    pub group_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryGroup {
+    pub id: String,
+    pub name: String,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,12 +196,14 @@ struct PersistFile {
     account: AccountSummary,
     history: Vec<HistoryItem>,
     #[serde(default)]
+    history_groups: Vec<HistoryGroup>,
+    #[serde(default)]
     sessions: Vec<SessionRecord>,
     #[serde(default)]
     current_session_id: Option<String>,
 }
 
-fn data_dir() -> Result<PathBuf, String> {
+pub fn data_dir() -> Result<PathBuf, String> {
     let base = dirs::data_dir().ok_or("无法定位用户数据目录")?;
     let dir = base.join("langbai-novelai-studio");
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -167,14 +231,30 @@ fn save_file(data: &PersistFile) -> Result<(), String> {
 }
 
 pub fn load_settings() -> AppSettings {
-    load_file().settings
+    let mut data = load_file();
+    if !data.settings.has_onboarded
+        && (!data.settings.token.is_empty() || data.account.has_token || !data.history.is_empty())
+    {
+        data.settings.has_onboarded = true;
+        let _ = save_file(&data);
+    }
+    data.settings
 }
 
 pub fn save_settings(mut next: AppSettings) -> Result<AppSettings, String> {
     let mut data = load_file();
-    let incoming = next.token.trim();
-    if incoming.is_empty() || incoming.eq_ignore_ascii_case("configured") {
-        next.token = data.settings.token.clone();
+    next.token = keep_secret(&next.token, &data.settings.token);
+    next.huggingface_token = keep_secret(&next.huggingface_token, &data.settings.huggingface_token);
+    next.local_cl_tagger_threshold = if next.local_cl_tagger_threshold <= 0.0 {
+        0.55
+    } else {
+        next.local_cl_tagger_threshold.clamp(0.01, 0.99)
+    };
+    if next.local_cl_tagger_enabled && !data.settings.local_cl_tagger_enabled {
+        let gpu = crate::gpu::detect();
+        if !gpu.usable {
+            return Err(gpu.reason);
+        }
     }
     data.settings = next.clone();
     save_file(&data)?;
@@ -182,12 +262,18 @@ pub fn save_settings(mut next: AppSettings) -> Result<AppSettings, String> {
 }
 
 pub fn public_settings(mut settings: AppSettings) -> AppSettings {
-    settings.token = if settings.token.is_empty() {
+    settings.token = mask_secret(&settings.token);
+    settings.huggingface_token = mask_secret(&settings.huggingface_token);
+    settings
+}
+
+pub fn get_huggingface_token() -> String {
+    let token = load_file().settings.huggingface_token.trim().to_string();
+    if token.eq_ignore_ascii_case("configured") {
         String::new()
     } else {
-        "configured".into()
-    };
-    settings
+        token
+    }
 }
 
 pub fn get_token() -> String {
@@ -215,6 +301,17 @@ pub fn set_account(account: AccountSummary) -> Result<(), String> {
 pub fn get_account() -> AccountSummary {
     let mut acc = load_file().account;
     acc.has_token = !get_token().is_empty();
+    if let Some(usage) = acc.opus_usage.as_mut() {
+        if usage.max_images <= 0.0 {
+            usage.max_images = 1700.0;
+        }
+        if usage.daily_refill_images <= 0.0 && usage.time_until_next_percent > 0.0 {
+            usage.daily_refill_images = (17.0 * (86_400.0 / usage.time_until_next_percent)).round();
+        }
+        if usage.remaining_images <= 0.0 && usage.percent > 0.0 && !usage.is_negative {
+            usage.remaining_images = (17.0 * usage.percent.clamp(0.0, 100.0)).round();
+        }
+    }
     acc
 }
 
@@ -310,6 +407,121 @@ pub fn history_delete(id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn history_groups_list() -> Vec<HistoryGroup> {
+    load_file().history_groups
+}
+
+#[tauri::command]
+pub fn history_group_create(name: String) -> Result<HistoryGroup, String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("分组名不能为空".into());
+    }
+    let mut data = load_file();
+    if data
+        .history_groups
+        .iter()
+        .any(|g| g.name.eq_ignore_ascii_case(&name))
+    {
+        return Err("已有同名分组".into());
+    }
+    let group = HistoryGroup {
+        id: Uuid::new_v4().to_string(),
+        name,
+        created_at: chrono::Local::now().to_rfc3339(),
+    };
+    data.history_groups.push(group.clone());
+    save_file(&data)?;
+    Ok(group)
+}
+
+#[tauri::command]
+pub fn history_group_rename(id: String, name: String) -> Result<HistoryGroup, String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("分组名不能为空".into());
+    }
+    let mut data = load_file();
+    if data
+        .history_groups
+        .iter()
+        .any(|g| g.id != id && g.name.eq_ignore_ascii_case(&name))
+    {
+        return Err("已有同名分组".into());
+    }
+    let group = data
+        .history_groups
+        .iter_mut()
+        .find(|g| g.id == id)
+        .ok_or_else(|| "找不到该分组".to_string())?;
+    group.name = name;
+    let cloned = group.clone();
+    save_file(&data)?;
+    Ok(cloned)
+}
+
+#[tauri::command]
+pub fn history_group_delete(id: String) -> Result<(), String> {
+    let mut data = load_file();
+    data.history_groups.retain(|g| g.id != id);
+    for item in &mut data.history {
+        if item.group_id == id {
+            item.group_id.clear();
+        }
+    }
+    save_file(&data)
+}
+
+#[tauri::command]
+pub fn history_set_group(id: String, group_id: String) -> Result<HistoryItem, String> {
+    let mut data = load_file();
+    if !group_id.is_empty() && !data.history_groups.iter().any(|g| g.id == group_id) {
+        return Err("找不到该分组".into());
+    }
+    let item = data
+        .history
+        .iter_mut()
+        .find(|h| h.id == id)
+        .ok_or_else(|| "找不到该历史记录".to_string())?;
+    item.group_id = group_id;
+    let cloned = item.clone();
+    save_file(&data)?;
+    Ok(cloned)
+}
+
+#[tauri::command]
+pub fn reveal_in_folder(path: String) -> Result<(), String> {
+    let file = PathBuf::from(&path);
+    if !file.exists() {
+        return Err("文件不存在，可能已被移动或删除。".into());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let native = file.to_string_lossy().replace('/', "\\");
+        std::process::Command::new("explorer")
+            .arg(format!("/select,{native}"))
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .args(["-R", &path])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    {
+        let dir = file.parent().unwrap_or(file.as_path());
+        std::process::Command::new("xdg-open")
+            .arg(dir)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub fn account_get() -> AccountSummary {
     get_account()
 }
@@ -338,20 +550,64 @@ pub fn open_output_dir() -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
-pub fn read_image_data_url(path: String) -> Result<String, String> {
-    let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+fn encode_image_data_url(bytes: &[u8]) -> String {
     let mime = if bytes.starts_with(&[0x89, 0x50, 0x4e, 0x47]) {
         "image/png"
     } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
         "image/jpeg"
+    } else if bytes.starts_with(&[0x52, 0x49, 0x46, 0x46]) {
+        "image/webp"
+    } else if bytes.starts_with(&[0x47, 0x49, 0x46]) {
+        "image/gif"
     } else {
         "application/octet-stream"
     };
-    Ok(format!(
+    format!(
         "data:{mime};base64,{}",
         base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes)
-    ))
+    )
+}
+
+fn looks_like_image(bytes: &[u8]) -> bool {
+    bytes.starts_with(&[0x89, 0x50, 0x4e, 0x47])
+        || bytes.starts_with(&[0xff, 0xd8, 0xff])
+        || bytes.starts_with(&[0x52, 0x49, 0x46, 0x46])
+        || bytes.starts_with(&[0x47, 0x49, 0x46])
+        || bytes.starts_with(&[0x42, 0x4d])
+}
+
+fn read_image_bytes_retry(path: &str) -> Result<Vec<u8>, String> {
+    let mut last = "文件为空".to_string();
+    for attempt in 0..5 {
+        if let Ok(meta) = fs::metadata(path) {
+            if meta.len() > 40 * 1024 * 1024 {
+                return Err("图片超过 40MB，无法直接导入。".into());
+            }
+        }
+        match fs::read(path) {
+            Ok(bytes) if !bytes.is_empty() => return Ok(bytes),
+            Ok(_) => last = "QQ 缓存还在写入，请再试一次。".into(),
+            Err(e) => last = e.to_string(),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(70 * (attempt + 1)));
+    }
+    Err(last)
+}
+
+#[tauri::command]
+pub async fn read_image_data_url(path: String) -> Result<String, String> {
+    if path.starts_with("http://") || path.starts_with("https://") {
+        return Err("远程图片请走 fetch_remote_image。".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let bytes = read_image_bytes_retry(&path)?;
+        if !looks_like_image(&bytes) {
+            return Err("拖入的不是图片文件。".into());
+        }
+        Ok(encode_image_data_url(&bytes))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 fn sort_sessions(sessions: &mut [SessionRecord]) {
