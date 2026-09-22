@@ -2,7 +2,7 @@
   "name": "web-novelai-ui",
   "version": "0.1.0",
   "private": true,
-  "description": "Langbai NovelAI Studio · Tauri + Vue 3 桌面端",
+  "description": "NAI Studio Web UI",
   "type": "module",
   "workspaces": [
     "apps/frontend"

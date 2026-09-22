@@ -309,6 +309,19 @@ pub fn http_client() -> Result<reqwest::Client, String> {
     build_client(&load_settings())
 }
 
+pub fn http_client_no_redirect() -> Result<reqwest::Client, String> {
+    let settings = load_settings();
+    let mut builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60 * 30))
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent("Langbai-NovelAI-Studio/1");
+    if let Some(proxy) = detect_proxy(&settings.proxy_url) {
+        let p = reqwest::Proxy::all(&proxy).map_err(|e| e.to_string())?;
+        builder = builder.proxy(p);
+    }
+    builder.build().map_err(|e| e.to_string())
+}
+
 fn build_client(settings: &AppSettings) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(180))

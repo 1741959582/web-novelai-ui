@@ -24,3 +24,4 @@ apps/frontend/env/.env
 *.nsis.zip
 bundle/
 models/
+src-tauri/resources/*.dll

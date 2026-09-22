@@ -29,7 +29,7 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-ort = { version = "=2.0.0-rc.10", features = ["download-binaries", "load-dynamic"] }
+ort = { version = "=2.0.0-rc.10", features = ["download-binaries", "copy-dylibs", "directml"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }

@@ -1,4 +1,4 @@
-use crate::nai::{format_reqwest, http_client};
+use crate::nai::{format_reqwest, http_client_no_redirect};
 use crate::store::load_settings;
 use crate::wd_tagger::{LabelConfidence, LabelGroup, WdTagResult};
 use base64::Engine;
@@ -11,7 +11,6 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
 const REPO: &str = "cella110n/cl_tagger_v2";
@@ -105,11 +104,12 @@ fn looks_complete(path: &std::path::Path) -> bool {
 }
 
 fn resolve_hf_token(override_token: Option<&str>) -> String {
-    let from_req = override_token.unwrap_or("").trim();
-    if !from_req.is_empty() {
+    let from_req = override_token.unwrap_or("").trim().trim_start_matches("Bearer ").trim();
+    if !from_req.is_empty() && !from_req.eq_ignore_ascii_case("configured") {
         return from_req.to_string();
     }
-    crate::store::get_huggingface_token()
+    let stored = crate::store::get_huggingface_token();
+    stored.trim().trim_start_matches("Bearer ").trim().to_string()
 }
 
 fn emit_download(app: &AppHandle, file: &str, received: u64, total: u64, message: &str) {
@@ -130,6 +130,54 @@ fn emit_download(app: &AppHandle, file: &str, received: u64, total: u64, message
     );
 }
 
+fn hf_failure(file: &str, status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap, body: &str) -> String {
+    let header = headers
+        .get("x-error-message")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .trim();
+    let body = body.trim().chars().take(180).collect::<String>();
+    let detail = if !header.is_empty() { header } else { body.as_str() };
+    let detail_lower = detail.to_ascii_lowercase();
+    if status.as_u16() == 401 || status.as_u16() == 403 {
+        if detail_lower.contains("restricted") || detail_lower.contains("gated") || detail_lower.contains("access") {
+            return format!(
+                "无法下载 {file}。请用创建这个 token 的账号打开 https://huggingface.co/{REPO} ，点 Agree 同意许可。Token 需要有 Read 权限。"
+            );
+        }
+        return format!("无法下载 {file}（HTTP {status}）。{detail}");
+    }
+    format!("下载 {file} 失败：HTTP {status} {detail}")
+}
+
+async fn hf_fetch(client: &reqwest::Client, token: &str, start: &str) -> Result<reqwest::Response, String> {
+    let mut url = start.to_string();
+    for _ in 0..8 {
+        let mut req = client.get(&url).header("Accept", "*/*");
+        if !token.is_empty() {
+            req = req.bearer_auth(token);
+        }
+        let response = req.send().await.map_err(format_reqwest)?;
+        if response.status().is_redirection() {
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if location.is_empty() {
+                return Err("Hugging Face 没有给出下载地址。".into());
+            }
+            let base = reqwest::Url::parse(&url).map_err(|e| e.to_string())?;
+            url = base.join(&location).map_err(|e| e.to_string())?.to_string();
+            continue;
+        }
+        return Ok(response);
+    }
+    Err("Hugging Face 下载跳转次数过多。".into())
+}
+
 async fn download_file(
     app: &AppHandle,
     client: &reqwest::Client,
@@ -143,30 +191,20 @@ async fn download_file(
     }
     let url = format!("https://huggingface.co/{REPO}/resolve/main/{VERSION}/{file}");
     emit_download(app, file, 0, 0, &format!("正在下载 {file}…"));
-    let mut req = client
-        .get(&url)
-        .header("User-Agent", "langbai-novelai-studio")
-        .timeout(Duration::from_secs(60 * 30));
-    if !token.is_empty() {
-        req = req.bearer_auth(token);
-    }
-    let res = req.send().await.map_err(format_reqwest)?;
-    let status = res.status();
-    if status.as_u16() == 401 || status.as_u16() == 403 {
-        return Err(format!(
-            "无法下载 {file}（HTTP {status}）。请先在 huggingface.co/{REPO} 同意许可，并填写有效的 Hugging Face token。"
-        ));
-    }
+    let response = hf_fetch(client, token, &url).await?;
+    let status = response.status();
     if !status.is_success() {
-        return Err(format!("下载 {file} 失败：HTTP {status}"));
+        let headers = response.headers().clone();
+        let body = response.text().await.unwrap_or_default();
+        return Err(hf_failure(file, status, &headers, &body));
     }
-    let total = res.content_length().unwrap_or(0);
+    let total = response.content_length().unwrap_or(0);
     if total > MAX_FILE_BYTES {
         return Err(format!("{file} 超过 3GB 上限，已中止。"));
     }
     let tmp = dest.with_extension("part");
     let mut file_handle = fs::File::create(&tmp).map_err(|e| format!("无法写入 {file}：{e}"))?;
-    let mut stream = res.bytes_stream();
+    let mut stream = response.bytes_stream();
     let mut received = 0u64;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(format_reqwest)?;
@@ -202,15 +240,15 @@ pub async fn cl_tagger_status() -> Result<ClTaggerStatus, String> {
 }
 
 #[tauri::command]
-pub async fn cl_tagger_download(app: AppHandle) -> Result<ClTaggerStatus, String> {
-    let token = resolve_hf_token(None);
+pub async fn cl_tagger_download(app: AppHandle, token: Option<String>) -> Result<ClTaggerStatus, String> {
+    let token = resolve_hf_token(token.as_deref());
     if token.is_empty() {
         return Err(format!(
             "本地模型需要 Hugging Face token。请先在 huggingface.co/{REPO} 同意许可，再把 token 填进设置。"
         ));
     }
     let dir = model_dir()?;
-    let client = http_client()?;
+    let client = http_client_no_redirect()?;
     for file in FILES {
         download_file(&app, &client, &token, file, &dir.join(file)).await?;
     }
@@ -271,7 +309,33 @@ fn load_session() -> Result<OrtSession, String> {
     })
 }
 
+#[cfg(windows)]
+fn prefer_app_dlls() {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let Some(dir) = exe.parent() else {
+        return;
+    };
+    let resources = dir.join("resources");
+    let dll_dir = if resources.join("DirectML.dll").is_file() {
+        resources
+    } else {
+        dir.to_path_buf()
+    };
+    let mut wide: Vec<u16> = std::os::windows::ffi::OsStrExt::encode_wide(dll_dir.as_os_str()).collect();
+    wide.push(0);
+    unsafe extern "system" {
+        fn SetDllDirectoryW(path: *const u16) -> i32;
+    }
+    unsafe {
+        SetDllDirectoryW(wide.as_ptr());
+    }
+}
+
 fn open_onnx(onnx: &std::path::Path) -> Result<ort::session::Session, String> {
+    #[cfg(windows)]
+    prefer_app_dlls();
     let builder = ort::session::Session::builder().map_err(|e| format!("ONNX 初始化失败：{e}"))?;
     #[cfg(windows)]
     let builder = {

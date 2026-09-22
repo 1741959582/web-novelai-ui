@@ -2,6 +2,19 @@
 
 中文 NovelAI 图像创作桌面端。左上角菜单进入各功能。下面按第一次打开的顺序说明，每项都有界面截图。
 
+## 下载与安装
+
+**[GitHub 最新发行版](https://github.com/caiweida/web-novelai-ui/releases/latest)**
+
+以下直链对应 **[v0.1.0](https://github.com/caiweida/web-novelai-ui/releases/tag/v0.1.0)**；后续版本请使用上面的「最新发行版」。
+
+| 平台 | 选择安装包 | 使用说明 |
+| --- | --- | --- |
+| Windows x64 · 安装版 | [Setup.exe](https://github.com/caiweida/web-novelai-ui/releases/download/v0.1.0/NAI-Studio-Web-UI-Setup-0.1.0.exe) | 长期使用建议选这个；安装向导、开始菜单快捷方式 |
+| Windows x64 · 便携版 | [便携版.zip](https://github.com/caiweida/web-novelai-ui/releases/download/v0.1.0/NAI-Studio-Web-UI-0.1.0-portable.zip) | 解压后双击 `web-novelai-ui.exe`；更新时下载新包替换整个文件夹 |
+
+需要 Windows 10 及以上。系统没有 WebView2 时，安装版会提示安装。第一次打开按向导填写 NovelAI Token。设置和生成的图片保存在本机，不在安装包旁边。
+
 ## 使用流程
 
 1. 第一次打开，按向导填写 NovelAI Token。本地打标可以跳过。
@@ -70,7 +83,7 @@ Token 只保存在本机，不要贴到截图或聊天里。
 2. 模型选 WD Tagger，或 CL Tagger v2。
 3. 点「开始反推」。完成后在右侧复制，或点「应用到生成」。
 
-WD 走公开空间，一般不用额外填写。CL 若已在设置里启用本地模型，就用本机显卡；否则走 Hugging Face 空间。匿名额度用完后，到「设置 → 本地打标」填 Hugging Face read token 再试。
+WD 走公开空间，一般不用额外填写。CL 若已在设置里启用本地模型，就用本机显卡；否则走 Hugging Face 空间。匿名额度用完后，到「设置 → 本地打标」按下面的步骤填写 Hugging Face read token。
 
 ![反推页：左侧选模型和阈值，右侧输出提示词](docs/assets/guide/reverse.jpg)
 
@@ -149,7 +162,25 @@ WD 走公开空间，一般不用额外填写。CL 若已在设置里启用本�
 
 可选。需要 NVIDIA 显卡，权重另外下载，不打包在程序里。不启用也不影响生图和 WD 反推。
 
-![设置：本地打标](docs/assets/guide/settings-tagger.jpg)
+下载权重需要 Hugging Face token，而且必须先用**同一个账号**在模型页同意许可。Token 只保存在本机，不要贴到截图或聊天里。输入框旁的 **?** 移入鼠标，可以看到同样的步骤。
+
+![鼠标移到问号上，显示 token 教程](docs/assets/guide/hf-token-help.jpg)
+
+**1. 同意许可。** 打开 [cella110n/cl_tagger_v2](https://huggingface.co/cella110n/cl_tagger_v2)，登录后点 Agree。页面上会写要分享联系方式才能访问文件。没点过 Agree，下载会返回 403。
+
+![模型页：登录后同意许可才能下载权重](docs/assets/guide/hf-model-top.jpg)
+
+**2. 创建 Read token。** 打开 [Access Tokens](https://huggingface.co/settings/tokens)，点 **New token**。名字随便写，Role 选 **read**，再点 **Generate a token**。复制 `hf_` 开头的那一串。
+
+![Access Tokens 页面，点 New token](docs/assets/guide/hf-token-list.jpg)
+
+![新建 token 时 Role 选择 read](docs/assets/guide/hf-token-create.jpg)
+
+如果页面上只有 Fine-grained、没有 read：勾选读取你已经同意的公开 gated 仓库，或只给 `cella110n/cl_tagger_v2` 读取权限。Write token 也能下载，但下载不需要写权限。
+
+**3. 填回本地打标。** 「设置 → 本地打标」，把 token 粘贴到 Hugging Face token，勾选「启用本地 CL Tagger v2」，点「下载模型到本机」。`model.onnx.data` 大约 2.2GB，进度显示在按钮上面。
+
+![设置：本地打标，问号里是同一份 token 教程](docs/assets/guide/settings-tagger.jpg)
 
 ### 性能
 
@@ -167,6 +198,7 @@ WD 走公开空间，一般不用额外填写。CL 若已在设置里启用本�
 | 余额或模型不可用 | 账号权限、Anlas，以及当前尺寸和张数 |
 | 超时、连接重置 | 先试直连；仍失败再在「存储与网络」填代理 |
 | 反推没有标签 | 看是 Hugging Face 额度用完，还是本地模型没下载 |
+| 本地模型下载 403 | 创建 token 的账号要在模型页点过 Agree，Role 用 read。步骤见上面「本地打标」 |
 
 ## 开发
 

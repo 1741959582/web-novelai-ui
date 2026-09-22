@@ -90,7 +90,9 @@ async function finish() {
   padding: 24px;
 }
 .panel {
-  width: min(560px, calc(100vw - 32px));
+  width: min(640px, calc(100vw - 48px));
+  max-width: min(640px, calc(100vw - 48px));
+  min-width: 0;
   max-height: calc(100vh - 48px);
   overflow: auto;
   background: #191b31;
@@ -99,7 +101,29 @@ async function finish() {
   padding: 22px 20px 18px;
   box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
+}
+.panel :deep(.panel),
+.panel :deep(.row),
+.panel :deep(.field),
+.panel :deep(input),
+.panel :deep(button) {
+  min-width: 0;
+  max-width: 100%;
+}
+.panel :deep(.hint) {
+  overflow-wrap: anywhere;
+}
+.panel :deep(.card-lite) {
+  justify-items: start;
+}
+.panel :deep(.row) {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+.panel :deep(.row > *) {
+  flex: 0 1 auto;
 }
 .step {
   margin: 0;

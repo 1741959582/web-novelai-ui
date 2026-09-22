@@ -247,8 +247,8 @@ export function clTaggerStatus() {
   return invoke<ClTaggerStatus>("cl_tagger_status");
 }
 
-export function clTaggerDownload() {
-  return invoke<ClTaggerStatus>("cl_tagger_download");
+export function clTaggerDownload(token?: string) {
+  return invoke<ClTaggerStatus>("cl_tagger_download", { token: token?.trim() || null });
 }
 
 export function clTaggerOpenDir() {

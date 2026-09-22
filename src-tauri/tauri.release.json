@@ -3,7 +3,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Langbai NovelAI Studio",
+        "title": "NAI Studio Web UI",
         "width": 1440,
         "height": 920,
         "minWidth": 1100,

@@ -1,4 +1,4 @@
-export const APP_NAME = "Langbai NovelAI Studio";
+export const APP_NAME = "NAI Studio Web UI";
 
 export const NAI_MODELS = [
   { label: "NAI Diffusion V5 Full（最新完整模型）", value: "nai-diffusion-5-full" },
