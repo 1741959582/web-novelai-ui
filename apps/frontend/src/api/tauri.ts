@@ -61,6 +61,10 @@ export function historySetGroup(id: string, groupId: string) {
   return invoke<HistoryItem>("history_set_group", { id, groupId, group_id: groupId });
 }
 
+export function historyArrangeGroups() {
+  return invoke<{ moved: number; missing: number; failed: number }>("history_arrange_groups");
+}
+
 export function revealInFolder(path: string) {
   return invoke<void>("reveal_in_folder", { path });
 }

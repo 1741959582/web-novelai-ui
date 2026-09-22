@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { NAI_MODELS, NAI_SAMPLERS, NAI_UC_PRESETS, isV4Plus, maxCharacterPrompts } from "@/types/nai";
 import { useAppStore } from "@/stores/app";
@@ -48,9 +48,19 @@ function setSize(job: BatchJob, value: string) {
   job.params.height = height;
 }
 
+function revealJob(id: string) {
+  if (!id) return;
+  openId.value = id;
+  void nextTick(() => {
+    document.getElementById(`batch-job-${id}`)?.scrollIntoView({ block: "nearest" });
+  });
+}
+
 onMounted(() => {
-  void store.boot();
+  void store.boot().then(() => revealJob(store.focusId));
 });
+
+watch(() => store.focusId, (id) => revealJob(id));
 
 function addBulk() {
   added.value = store.addFromBulk();
@@ -198,6 +208,7 @@ async function start() {
         <p v-if="!store.jobs.length" class="empty">还没有任务。左边贴主词后点「加入队列」，或从生成页导入一组。</p>
         <article
           v-for="(job, i) in store.jobs"
+          :id="`batch-job-${job.id}`"
           :key="job.id"
           class="job"
           :class="[job.status, { open: openId === job.id }]"

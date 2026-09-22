@@ -4,9 +4,11 @@ import { readImageDataUrl } from "@/api/tauri";
 import {
   DEFAULT_PARAMS,
   maxCharacterPrompts,
+  modelToNai,
   newCharacter,
   type CharCaption,
   type GenerateParams,
+  type HistoryItem,
 } from "@/types/nai";
 import { useAppStore } from "@/stores/app";
 
@@ -138,6 +140,7 @@ export const useBatchStore = defineStore("batch", () => {
   const running = ref(false);
   const stopRequested = ref(false);
   const currentId = ref("");
+  const focusId = ref("");
   const booted = ref(false);
 
   const pending = computed(() => jobs.value.filter((job) => job.status === "pending" || job.status === "error"));
@@ -242,6 +245,50 @@ export const useBatchStore = defineStore("batch", () => {
   function addFromBulk() {
     const drafts = parseBulkJobs(bulkText.value, [], sharedNeg.value);
     return addFromDrafts(drafts);
+  }
+
+  async function addFromHistory(items: HistoryItem[]) {
+    await boot();
+    if (!items.length) return 0;
+    const app = useAppStore();
+    const extras = items.map((item) => {
+      const model = modelToNai(item.model) || app.params.model;
+      const prompt = item.prompt || "";
+      const negativePrompt = item.negativePrompt || "";
+      return newJob({
+        prompt,
+        negativePrompt,
+        stylePrompt: "",
+        characters: [newCharacter()],
+        params: cloneParams({
+          ...app.params,
+          model,
+          width: item.width || app.params.width,
+          height: item.height || app.params.height,
+          steps: item.steps || app.params.steps,
+          sampler: item.sampler || app.params.sampler,
+          positivePrompt: prompt,
+          negativePrompt,
+          stylePrompt: "",
+          seed: 0,
+          seedMode: "random",
+        }),
+        copies: 1,
+        path: item.path,
+      });
+    });
+    jobs.value = [...jobs.value, ...extras];
+    focusId.value = extras[0].id;
+    for (const job of extras) {
+      if (!job.path) continue;
+      try {
+        const preview = await readImageDataUrl(job.path);
+        patch(job.id, { previewUrl: preview });
+      } catch {
+        /* the keyword is still editable without a thumbnail */
+      }
+    }
+    return extras.length;
   }
 
   function applySharedToAll() {
@@ -495,6 +542,7 @@ export const useBatchStore = defineStore("batch", () => {
     running,
     stopRequested,
     currentId,
+    focusId,
     pending,
     done,
     current,
@@ -503,6 +551,7 @@ export const useBatchStore = defineStore("batch", () => {
     addEmpty,
     importCurrent,
     addFromBulk,
+    addFromHistory,
     applySharedToAll,
     duplicate,
     remove,

@@ -3,17 +3,20 @@ import { computed, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useAppStore } from "@/stores/app";
 import { useApngStore, type ApngTab } from "@/stores/apng";
+import { useBatchStore } from "@/stores/batch";
 import { readImageDataUrl, type SavedImage } from "@/api/tauri";
 import NaiIcon from "@/components/NaiIcon.vue";
 import type { HistoryItem } from "@/types/nai";
 
 const store = useAppStore();
 const apng = useApngStore();
+const batch = useBatchStore();
 const router = useRouter();
 const thumbs = ref<Record<string, string>>({});
 const newGroupName = ref("");
 const renameName = ref("");
 const renaming = ref(false);
+const arranging = ref(false);
 const busyId = ref("");
 const picked = ref<string[]>([]);
 const sending = ref(false);
@@ -74,6 +77,18 @@ async function createGroup() {
   }
 }
 
+async function arrangeGroups() {
+  if (arranging.value) return;
+  arranging.value = true;
+  try {
+    await store.arrangeHistoryGroups();
+  } catch (e) {
+    store.status = e instanceof Error ? e.message : String(e);
+  } finally {
+    arranging.value = false;
+  }
+}
+
 async function saveRename() {
   const group = activeGroup.value;
   const name = renameName.value.trim();
@@ -89,7 +104,7 @@ async function saveRename() {
 async function removeGroup() {
   const group = activeGroup.value;
   if (!group) return;
-  if (!window.confirm(`删除分组「${group.name}」？图片不会被删除。`)) return;
+  if (!window.confirm(`删除分组「${group.name}」？图片会移回输出目录，不会被删除。`)) return;
   await store.deleteHistoryGroup(group.id);
   renaming.value = false;
 }
@@ -167,6 +182,25 @@ async function sendPicked(target: ApngTab) {
   }
 }
 
+async function sendToBatch() {
+  const chosen = items.value.filter((item) => picked.value.includes(item.id));
+  if (!chosen.length || sending.value) return;
+  sending.value = true;
+  store.status = `正在把 ${chosen.length} 条关键词加入批量任务…`;
+  try {
+    const count = await batch.addFromHistory(chosen);
+    await router.push("/batch");
+    store.status = count
+      ? `已加入 ${count} 条批量任务，展开后可以改关键词`
+      : "没有可导入的图片";
+    if (count) picked.value = [];
+  } catch (e) {
+    store.status = e instanceof Error ? e.message : String(e);
+  } finally {
+    sending.value = false;
+  }
+}
+
 async function copyItem(item: HistoryItem) {
   busyId.value = item.id;
   try {
@@ -228,6 +262,9 @@ async function deleteItem(item: HistoryItem) {
           />
           <button type="button" class="ghost" :disabled="!newGroupName.trim()" @click="createGroup">创建</button>
         </div>
+        <button type="button" class="ghost arrange" :disabled="arranging" @click="arrangeGroups">
+          {{ arranging ? "正在整理…" : "放入分组文件夹" }}
+        </button>
         <div v-if="activeGroup" class="group-acts">
           <template v-if="renaming">
             <input v-model="renameName" @keydown.enter.prevent="saveRename" @keydown.esc="renaming = false" />
@@ -257,6 +294,7 @@ async function deleteItem(item: HistoryItem) {
           >
             {{ target.label }}
           </button>
+          <button type="button" :disabled="!picked.length || sending" @click="sendToBatch">导入批量</button>
         </div>
       </div>
 
@@ -371,6 +409,7 @@ header { display: flex; justify-content: space-between; align-items: center; mar
 }
 .ghost:disabled { opacity: 0.45; }
 .ghost.danger { color: #f3b4b4; border-color: #5a2f3a; }
+.ghost.arrange { width: 100%; color: #f5f3c2; }
 .hint { color: var(--muted); font-size: 13px; }
 .groups {
   display: grid;

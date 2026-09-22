@@ -386,6 +386,109 @@ fn sanitize(name: &str) -> String {
         .collect()
 }
 
+fn folder_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c.is_control() || r#"<>:"/\|?*"#.contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let cleaned = cleaned.trim().trim_matches(|c: char| c == '.' || c == ' ');
+    if cleaned.is_empty() {
+        "分组".into()
+    } else {
+        cleaned.chars().take(80).collect()
+    }
+}
+
+fn group_folder(name: &str) -> PathBuf {
+    default_output_dir().join(folder_name(name))
+}
+
+fn paths_eq(a: &str, b: &str) -> bool {
+    let left = PathBuf::from(a);
+    let right = PathBuf::from(b);
+    if left == right {
+        return true;
+    }
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
+}
+
+fn replace_stored_path(data: &mut PersistFile, from: &str, to: &str) {
+    if from == to {
+        return;
+    }
+    for item in &mut data.history {
+        if paths_eq(&item.path, from) {
+            item.path = to.to_string();
+        }
+    }
+    for session in &mut data.sessions {
+        if paths_eq(&session.thumbnail_path, from) {
+            session.thumbnail_path = to.to_string();
+        }
+        for path in &mut session.image_paths {
+            if paths_eq(path, from) {
+                *path = to.to_string();
+            }
+        }
+    }
+}
+
+fn place_file(src: &Path, dest_dir: &Path) -> Result<PathBuf, String> {
+    if !src.is_file() {
+        return Err(format!("找不到文件 {}", src.display()));
+    }
+    fs::create_dir_all(dest_dir).map_err(|e| format!("无法创建文件夹 {}：{e}", dest_dir.display()))?;
+    let file_name = src
+        .file_name()
+        .ok_or_else(|| "无效文件名".to_string())?;
+    if let (Ok(current), Ok(dir)) = (src.canonicalize(), dest_dir.canonicalize()) {
+        if current.parent() == Some(dir.as_path()) {
+            return Ok(src.to_path_buf());
+        }
+    }
+    let mut dest = dest_dir.join(file_name);
+    if dest.exists() && !paths_eq(&src.to_string_lossy(), &dest.to_string_lossy()) {
+        let stem = Path::new(file_name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("image");
+        let ext = Path::new(file_name)
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("png");
+        dest = unique_path(dest_dir, stem, ext);
+    }
+    if paths_eq(&src.to_string_lossy(), &dest.to_string_lossy()) {
+        return Ok(dest);
+    }
+    if fs::rename(src, &dest).is_err() {
+        fs::copy(src, &dest).map_err(|e| format!("移动失败：{e}"))?;
+        fs::remove_file(src).map_err(|e| format!("移动后无法删除原文件：{e}"))?;
+    }
+    Ok(dest)
+}
+
+fn move_history_path(data: &mut PersistFile, path: &str, dest_dir: &Path) -> Result<bool, String> {
+    let src = PathBuf::from(path);
+    if !src.is_file() {
+        return Ok(false);
+    }
+    let dest = place_file(&src, dest_dir)?;
+    let next = dest.to_string_lossy().into_owned();
+    let changed = !paths_eq(path, &next);
+    replace_stored_path(data, path, &next);
+    Ok(changed)
+}
+
 #[tauri::command]
 pub fn settings_get() -> AppSettings {
     public_settings(load_settings())
@@ -454,15 +557,68 @@ pub fn history_group_rename(id: String, name: String) -> Result<HistoryGroup, St
         .iter_mut()
         .find(|g| g.id == id)
         .ok_or_else(|| "找不到该分组".to_string())?;
-    group.name = name;
+    let old_name = group.name.clone();
+    group.name = name.clone();
     let cloned = group.clone();
+    let old_dir = group_folder(&old_name);
+    let new_dir = group_folder(&name);
+    if old_dir != new_dir && old_dir.is_dir() {
+        if new_dir.exists() {
+            let entries = fs::read_dir(&old_dir).map_err(|e| e.to_string())?;
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    let old = path.to_string_lossy().into_owned();
+                    let _ = move_history_path(&mut data, &old, &new_dir);
+                }
+            }
+        } else if let Some(parent) = new_dir.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            fs::rename(&old_dir, &new_dir).map_err(|e| format!("重命名分组文件夹失败：{e}"))?;
+            rewrite_dir_prefix(&mut data, &old_dir, &new_dir);
+        }
+    }
     save_file(&data)?;
     Ok(cloned)
+}
+
+fn rewrite_dir_prefix(data: &mut PersistFile, old_dir: &Path, new_dir: &Path) {
+    let rewrite = |path: &str| -> String {
+        let buf = PathBuf::from(path);
+        let old_parts: Vec<_> = old_dir.components().collect();
+        let parts: Vec<_> = buf.components().collect();
+        if parts.len() >= old_parts.len() && parts[..old_parts.len()] == old_parts[..] {
+            let rest: PathBuf = parts[old_parts.len()..].iter().collect();
+            return new_dir.join(rest).to_string_lossy().into_owned();
+        }
+        path.to_string()
+    };
+    for item in &mut data.history {
+        item.path = rewrite(&item.path);
+    }
+    for session in &mut data.sessions {
+        session.thumbnail_path = rewrite(&session.thumbnail_path);
+        for path in &mut session.image_paths {
+            *path = rewrite(path);
+        }
+    }
 }
 
 #[tauri::command]
 pub fn history_group_delete(id: String) -> Result<(), String> {
     let mut data = load_file();
+    let root = default_output_dir();
+    let paths: Vec<String> = data
+        .history
+        .iter()
+        .filter(|item| item.group_id == id)
+        .map(|item| item.path.clone())
+        .collect();
+    for path in paths {
+        if Path::new(&path).is_file() {
+            let _ = move_history_path(&mut data, &path, &root);
+        }
+    }
     data.history_groups.retain(|g| g.id != id);
     for item in &mut data.history {
         if item.group_id == id {
@@ -478,6 +634,24 @@ pub fn history_set_group(id: String, group_id: String) -> Result<HistoryItem, St
     if !group_id.is_empty() && !data.history_groups.iter().any(|g| g.id == group_id) {
         return Err("找不到该分组".into());
     }
+    let path = data
+        .history
+        .iter()
+        .find(|h| h.id == id)
+        .map(|h| h.path.clone())
+        .ok_or_else(|| "找不到该历史记录".to_string())?;
+    let dest = if group_id.is_empty() {
+        default_output_dir()
+    } else {
+        let name = data
+            .history_groups
+            .iter()
+            .find(|g| g.id == group_id)
+            .map(|g| g.name.clone())
+            .ok_or_else(|| "找不到该分组".to_string())?;
+        group_folder(&name)
+    };
+    move_history_path(&mut data, &path, &dest)?;
     let item = data
         .history
         .iter_mut()
@@ -487,6 +661,57 @@ pub fn history_set_group(id: String, group_id: String) -> Result<HistoryItem, St
     let cloned = item.clone();
     save_file(&data)?;
     Ok(cloned)
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArrangeGroupsResult {
+    pub moved: u32,
+    pub missing: u32,
+    pub failed: u32,
+}
+
+#[tauri::command]
+pub fn history_arrange_groups() -> Result<ArrangeGroupsResult, String> {
+    let mut data = load_file();
+    let groups: Vec<(String, String)> = data
+        .history_groups
+        .iter()
+        .map(|g| (g.id.clone(), g.name.clone()))
+        .collect();
+    let plan: Vec<(String, PathBuf)> = data
+        .history
+        .iter()
+        .filter(|item| !item.group_id.is_empty())
+        .filter_map(|item| {
+            let name = groups
+                .iter()
+                .find(|(id, _)| id == &item.group_id)?
+                .1
+                .clone();
+            Some((item.path.clone(), group_folder(&name)))
+        })
+        .collect();
+    let mut moved = 0u32;
+    let mut missing = 0u32;
+    let mut failed = 0u32;
+    for (path, dir) in plan {
+        if !Path::new(&path).is_file() {
+            missing += 1;
+            continue;
+        }
+        match move_history_path(&mut data, &path, &dir) {
+            Ok(true) => moved += 1,
+            Ok(false) => {}
+            Err(_) => failed += 1,
+        }
+    }
+    save_file(&data)?;
+    Ok(ArrangeGroupsResult {
+        moved,
+        missing,
+        failed,
+    })
 }
 
 #[tauri::command]
@@ -715,4 +940,20 @@ pub fn session_new() -> Result<String, String> {
     data.current_session_id = None;
     save_file(&data)?;
     Ok(String::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::folder_name;
+
+    #[test]
+    fn folder_name_keeps_group_title() {
+        assert_eq!(folder_name("卡提"), "卡提");
+    }
+
+    #[test]
+    fn folder_name_strips_windows_reserved_chars() {
+        assert_eq!(folder_name(r#"a/b:c*?"#), "a_b_c__");
+        assert_eq!(folder_name("  ...  "), "分组");
+    }
 }

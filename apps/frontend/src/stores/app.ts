@@ -15,6 +15,7 @@ import {
   historyGroupsList,
   historyList,
   historySetGroup,
+  historyArrangeGroups,
   revealInFolder,
   readImageDataUrl,
   sessionDelete,
@@ -389,22 +390,40 @@ export const useAppStore = defineStore("app", () => {
   async function renameHistoryGroup(id: string, name: string) {
     const group = await historyGroupRename(id, name);
     historyGroups.value = historyGroups.value.map((g) => (g.id === id ? group : g));
-    status.value = `已重命名为「${group.name}」`;
+    history.value = await historyList();
+    sessions.value = await sessionsList();
+    status.value = `已重命名为「${group.name}」，文件夹已一起改名`;
     return group;
   }
 
   async function deleteHistoryGroup(id: string) {
     await historyGroupDelete(id);
     historyGroups.value = historyGroups.value.filter((g) => g.id !== id);
-    history.value = history.value.map((h) => (itemGroupId(h) === id ? { ...h, groupId: "" } : h));
+    history.value = await historyList();
+    sessions.value = await sessionsList();
     if (selectedHistoryGroupId.value === id) selectedHistoryGroupId.value = "";
-    status.value = "已删除分组，图片仍保留在历史中";
+    status.value = "已删除分组，图片已移回输出目录";
   }
 
   async function setHistoryItemGroup(id: string, groupId: string) {
     const next = await historySetGroup(id, groupId);
-    history.value = history.value.map((h) => (h.id === id ? { ...h, groupId: next.groupId || "" } : h));
+    history.value = history.value.map((h) => (h.id === id ? next : h));
+    if (currentItem.value?.id === id) currentItem.value = next;
+    const group = historyGroups.value.find((g) => g.id === groupId);
+    status.value = group ? `已放入文件夹「${group.name}」` : "已移回输出目录";
     return next;
+  }
+
+  async function arrangeHistoryGroups() {
+    const result = await historyArrangeGroups();
+    history.value = await historyList();
+    sessions.value = await sessionsList();
+    status.value = result.moved
+      ? `已把 ${result.moved} 张图片放进对应分组文件夹`
+      : "分组里的图片已经在对应文件夹里";
+    if (result.missing) status.value += `，${result.missing} 张文件找不到`;
+    if (result.failed) status.value += `，${result.failed} 张移动失败`;
+    return result;
   }
 
   async function assignSelectedGroup(items: HistoryItem[]) {
@@ -1156,6 +1175,7 @@ export const useAppStore = defineStore("app", () => {
     renameHistoryGroup,
     deleteHistoryGroup,
     setHistoryItemGroup,
+    arrangeHistoryGroups,
     copyHistoryImage,
     revealHistoryItem,
     setPositionMode,

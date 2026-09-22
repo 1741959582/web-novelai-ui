@@ -25,6 +25,7 @@ pub fn run() {
             store::history_group_rename,
             store::history_group_delete,
             store::history_set_group,
+            store::history_arrange_groups,
             store::reveal_in_folder,
             store::account_get,
             store::pick_output_dir,
