@@ -109,7 +109,7 @@ async function download() {
   }
   busy.value = true;
   downloadPct.value = 1;
-  downloadMsg.value = "开始下载模型（约 1GB+，只保存在本机）…";
+  downloadMsg.value = "开始下载模型（约 2GB，只保存在本机；连不上官网会改试镜像）…";
   message.value = downloadMsg.value;
   try {
     if (typed) store.settings.huggingfaceToken = typed;
@@ -145,7 +145,7 @@ onUnmounted(() => {
   <div class="panel">
     <p class="hint">
       第一次安装会检测 NVIDIA 显卡。显存足够才允许启用本地
-      <code>cl_tagger_v2</code>（v2_00 ONNX）。权重有许可限制，程序不会内置；开发时下到项目 <code>models/</code>，安装后下到程序安装目录的 <code>models/</code>。
+      <code>cl_tagger_v2</code>（v2_00 ONNX）。权重有许可限制，程序不会内置；开发时下到项目 <code>models/</code>，安装后下到程序安装目录的 <code>models/</code>。连不上 huggingface.co 时会自动改试 hf-mirror.com，也可在下面填写代理。
     </p>
     <div class="card-lite">
       <strong>显卡</strong>
@@ -178,6 +178,13 @@ onUnmounted(() => {
         type="password"
         autocomplete="off"
         :placeholder="store.settings.huggingfaceToken === 'configured' ? '已配置，输入新 token 可覆盖' : 'hf_... 只保存在本机'"
+      />
+    </div>
+    <div class="field">
+      <label>代理（可选）</label>
+      <input
+        v-model="store.settings.proxyUrl"
+        placeholder="留空自动检测；连不上可填 http://127.0.0.1:7890"
       />
     </div>
     <label class="check" :class="{ off: gpu && !gpu.usable }">
@@ -287,7 +294,7 @@ onUnmounted(() => {
   flex: 0 0 auto;
 }
 .help:hover, .help:focus-visible { border-color: var(--heading); outline: none; }
-.note { color: var(--heading); font-size: 13px; margin: 0; }
+.note { color: var(--heading); font-size: 13px; margin: 0; white-space: pre-wrap; word-break: break-word; }
 .path { word-break: break-all; user-select: text; }
 code { font-size: 12px; }
 </style>

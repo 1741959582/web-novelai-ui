@@ -310,20 +310,39 @@ pub fn http_client() -> Result<reqwest::Client, String> {
 }
 
 pub fn http_client_no_redirect() -> Result<reqwest::Client, String> {
+    download_client(true)
+}
+
+pub fn http_client_no_redirect_direct() -> Result<reqwest::Client, String> {
+    download_client(false)
+}
+
+pub fn proxy_is_configured() -> bool {
+    detect_proxy(&load_settings().proxy_url).is_some()
+}
+
+fn download_client(use_detected_proxy: bool) -> Result<reqwest::Client, String> {
     let settings = load_settings();
     let mut builder = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60 * 30))
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(60 * 60 * 4))
         .redirect(reqwest::redirect::Policy::none())
+        .tcp_nodelay(true)
         .user_agent("Langbai-NovelAI-Studio/1");
-    if let Some(proxy) = detect_proxy(&settings.proxy_url) {
-        let p = reqwest::Proxy::all(&proxy).map_err(|e| e.to_string())?;
-        builder = builder.proxy(p);
+    if use_detected_proxy {
+        if let Some(proxy) = detect_proxy(&settings.proxy_url) {
+            let p = reqwest::Proxy::all(&proxy).map_err(|e| e.to_string())?;
+            builder = builder.proxy(p);
+        }
+    } else {
+        builder = builder.no_proxy();
     }
     builder.build().map_err(|e| e.to_string())
 }
 
 fn build_client(settings: &AppSettings) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(20))
         .timeout(std::time::Duration::from_secs(180))
         .user_agent("Langbai-NovelAI-Studio/1");
     if let Some(proxy) = detect_proxy(&settings.proxy_url) {
@@ -355,6 +374,10 @@ fn detect_proxy(explicit: &str) -> Option<String> {
             }
         }
     }
+    #[cfg(windows)]
+    if let Some(proxy) = windows_internet_proxy() {
+        return Some(proxy);
+    }
     if port_open(7890) {
         return Some("http://127.0.0.1:7890".into());
     }
@@ -368,6 +391,90 @@ fn detect_proxy(explicit: &str) -> Option<String> {
         return Some("socks5://127.0.0.1:10808".into());
     }
     None
+}
+
+#[cfg(windows)]
+fn windows_internet_proxy() -> Option<String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    let output = std::process::Command::new("reg")
+        .args([
+            "query",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_windows_internet_proxy(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_windows_internet_proxy(reg_query: &str) -> Option<String> {
+    let mut enabled = false;
+    let mut server = String::new();
+    for line in reg_query.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        let name = parts[0];
+        let value = parts[2..].join(" ");
+        if name.eq_ignore_ascii_case("ProxyEnable") {
+            let lower = value.to_ascii_lowercase();
+            enabled = lower.ends_with('1') || lower == "0x1" || lower == "true";
+        } else if name.eq_ignore_ascii_case("ProxyServer") {
+            server = value;
+        }
+    }
+    if !enabled {
+        return None;
+    }
+    normalize_proxy_server(&server)
+}
+
+fn normalize_proxy_server(server: &str) -> Option<String> {
+    let server = server.trim();
+    if server.is_empty() || server.eq_ignore_ascii_case("direct") {
+        return None;
+    }
+    if server.contains('=') {
+        let mut http = None;
+        let mut https = None;
+        let mut socks = None;
+        for part in server.split(';') {
+            let Some((key, value)) = part.split_once('=') else {
+                continue;
+            };
+            let value = value.trim();
+            if value.is_empty() {
+                continue;
+            }
+            match key.trim().to_ascii_lowercase().as_str() {
+                "https" => https = Some(value.to_string()),
+                "http" => http = Some(value.to_string()),
+                "socks" | "socks5" => socks = Some(value.to_string()),
+                _ => {}
+            }
+        }
+        if let Some(value) = https.or(http) {
+            return Some(with_proxy_scheme(&value, "http"));
+        }
+        if let Some(value) = socks {
+            return Some(with_proxy_scheme(&value, "socks5"));
+        }
+        return None;
+    }
+    Some(with_proxy_scheme(server, "http"))
+}
+
+fn with_proxy_scheme(value: &str, scheme: &str) -> String {
+    if value.contains("://") {
+        value.to_string()
+    } else {
+        format!("{scheme}://{value}")
+    }
 }
 
 fn strip_b64(value: &str) -> &str {
@@ -1724,5 +1831,41 @@ pub async fn translate_text(text: String, langpair: Option<String>) -> Result<St
         return Err("翻译结果为空。".into());
     }
     Ok(translated)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_proxy_server, parse_windows_internet_proxy};
+
+    #[test]
+    fn parses_reg_query_proxy() {
+        let text = r#"
+HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Internet Settings
+    ProxyEnable    REG_DWORD    0x1
+    ProxyServer    REG_SZ    127.0.0.1:7890
+"#;
+        assert_eq!(
+            parse_windows_internet_proxy(text).as_deref(),
+            Some("http://127.0.0.1:7890")
+        );
+    }
+
+    #[test]
+    fn ignores_disabled_windows_proxy() {
+        let text = r#"
+    ProxyEnable    REG_DWORD    0x0
+    ProxyServer    REG_SZ    127.0.0.1:7890
+"#;
+        assert!(parse_windows_internet_proxy(text).is_none());
+    }
+
+    #[test]
+    fn prefers_https_entry_in_proxy_list() {
+        assert_eq!(
+            normalize_proxy_server("http=127.0.0.1:7890;https=127.0.0.1:7890;socks=127.0.0.1:7891")
+                .as_deref(),
+            Some("http://127.0.0.1:7890")
+        );
+    }
 }
 

@@ -6,12 +6,12 @@
 
 **[GitHub 最新发行版](https://github.com/caiweida/web-novelai-ui/releases/latest)**
 
-以下直链对应 **[v0.1.0](https://github.com/caiweida/web-novelai-ui/releases/tag/v0.1.0)**；后续版本请使用上面的「最新发行版」。
+以下直链对应 **[v0.1.1](https://github.com/caiweida/web-novelai-ui/releases/tag/v0.1.1)**；后续版本请使用上面的「最新发行版」。
 
 | 平台 | 选择安装包 | 使用说明 |
 | --- | --- | --- |
-| Windows x64 · 安装版 | [Setup.exe](https://github.com/caiweida/web-novelai-ui/releases/download/v0.1.0/NAI-Studio-Web-UI-Setup-0.1.0.exe) | 长期使用建议选这个；安装向导、开始菜单快捷方式 |
-| Windows x64 · 便携版 | [便携版.zip](https://github.com/caiweida/web-novelai-ui/releases/download/v0.1.0/NAI-Studio-Web-UI-0.1.0-portable.zip) | 解压后双击 `web-novelai-ui.exe`；更新时下载新包替换整个文件夹 |
+| Windows x64 · 安装版 | [Setup.exe](https://github.com/caiweida/web-novelai-ui/releases/download/v0.1.1/NAI-Studio-Web-UI-Setup-0.1.1.exe) | 长期使用建议选这个；安装向导、开始菜单快捷方式 |
+| Windows x64 · 便携版 | [便携版.zip](https://github.com/caiweida/web-novelai-ui/releases/download/v0.1.1/NAI-Studio-Web-UI-0.1.1-portable.zip) | 解压后双击 `web-novelai-ui.exe`；更新时下载新包替换整个文件夹 |
 
 需要 Windows 10 及以上。系统没有 WebView2 时，安装版会提示安装。第一次打开按向导填写 NovelAI Token。设置和生成的图片保存在本机，不在安装包旁边。
 
@@ -178,7 +178,7 @@ WD 走公开空间，一般不用额外填写。CL 若已在设置里启用本�
 
 如果页面上只有 Fine-grained、没有 read：勾选读取你已经同意的公开 gated 仓库，或只给 `cella110n/cl_tagger_v2` 读取权限。Write token 也能下载，但下载不需要写权限。
 
-**3. 填回本地打标。** 「设置 → 本地打标」，把 token 粘贴到 Hugging Face token，勾选「启用本地 CL Tagger v2」，点「下载模型到本机」。`model.onnx.data` 大约 2.2GB，进度显示在按钮上面。
+**3. 填回本地打标。** 「设置 → 本地打标」，把 token 粘贴到 Hugging Face token，勾选「启用本地 CL Tagger v2」，点「下载模型到本机」。`model.onnx.data` 大约 2.2GB，进度显示在按钮上面。连不上 huggingface.co 时会自动改试 hf-mirror.com；仍失败就在同一页填写代理。
 
 ![设置：本地打标，问号里是同一份 token 教程](docs/assets/guide/settings-tagger.jpg)
 
@@ -197,6 +197,7 @@ WD 走公开空间，一般不用额外填写。CL 若已在设置里启用本�
 | Token 验证失败或 401 | Token 是否完整、是不是 `pst-` 开头。不要粘贴浏览器 Cookie |
 | 余额或模型不可用 | 账号权限、Anlas，以及当前尺寸和张数 |
 | 超时、连接重置 | 先试直连；仍失败再在「存储与网络」填代理 |
+| 本地模型下载超时或缺文件 | 安装版会自动改试 hf-mirror.com。仍失败就在本地打标页填写代理，例如 `http://127.0.0.1:7890`。中断后可再点下载续传 |
 | 反推没有标签 | 看是 Hugging Face 额度用完，还是本地模型没下载 |
 | 本地模型下载 403 | 创建 token 的账号要在模型页点过 Agree，Role 用 read。步骤见上面「本地打标」 |
 

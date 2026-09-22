@@ -1,6 +1,6 @@
 [package]
 name = "web-novelai-ui"
-version = "0.1.0"
+version = "0.1.1"
 description = "Langbai NovelAI Studio Tauri host"
 authors = ["langbai"]
 edition = "2021"
@@ -20,7 +20,7 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
 dirs = "5"
 encoding_rs = "0.8"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "socks", "json", "multipart", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["native-tls", "socks", "json", "multipart", "stream", "system-proxy"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

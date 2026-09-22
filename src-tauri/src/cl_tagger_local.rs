@@ -1,4 +1,6 @@
-use crate::nai::{format_reqwest, http_client_no_redirect};
+use crate::nai::{
+    http_client_no_redirect, http_client_no_redirect_direct, proxy_is_configured,
+};
 use crate::store::load_settings;
 use crate::wd_tagger::{LabelConfidence, LabelGroup, WdTagResult};
 use base64::Engine;
@@ -8,8 +10,8 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
-use std::io::Write;
-use std::path::PathBuf;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, Emitter};
 
@@ -97,10 +99,121 @@ pub fn status() -> Result<ClTaggerStatus, String> {
     })
 }
 
-fn looks_complete(path: &std::path::Path) -> bool {
-    fs::metadata(path)
-        .map(|meta| meta.is_file() && meta.len() > 64)
-        .unwrap_or(false)
+const HF_OFFICIAL: &str = "https://huggingface.co";
+const HF_MIRROR: &str = "https://hf-mirror.com";
+
+fn min_file_bytes(file: &str) -> u64 {
+    if file.ends_with(".onnx.data") {
+        50 * 1024 * 1024
+    } else {
+        256
+    }
+}
+
+fn looks_like_lfs_pointer(bytes: &[u8]) -> bool {
+    let n = bytes.len().min(80);
+    String::from_utf8_lossy(&bytes[..n]).starts_with("version https://git-lfs")
+}
+
+fn looks_like_html(bytes: &[u8]) -> bool {
+    let head = String::from_utf8_lossy(&bytes[..bytes.len().min(256)])
+        .trim_start()
+        .to_ascii_lowercase();
+    head.starts_with("<!doctype html") || head.starts_with("<html")
+}
+
+fn file_head(path: &Path) -> Vec<u8> {
+    let mut buf = [0u8; 256];
+    let Ok(mut file) = fs::File::open(path) else {
+        return Vec::new();
+    };
+    let n = file.read(&mut buf).unwrap_or(0);
+    buf[..n].to_vec()
+}
+
+fn looks_complete(path: &Path) -> bool {
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if meta.len() < min_file_bytes(name) {
+        return false;
+    }
+    let head = file_head(path);
+    !looks_like_html(&head) && !looks_like_lfs_pointer(&head)
+}
+
+fn hf_endpoints() -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(ep) = std::env::var("HF_ENDPOINT") {
+        let ep = ep.trim().trim_end_matches('/').to_string();
+        if !ep.is_empty() {
+            out.push(ep);
+        }
+    }
+    out.push(HF_OFFICIAL.into());
+    out.push(HF_MIRROR.into());
+    out.dedup();
+    out
+}
+
+fn hf_resolve_url(base: &str, file: &str) -> String {
+    format!(
+        "{}/{REPO}/resolve/main/{VERSION}/{file}",
+        base.trim_end_matches('/')
+    )
+}
+
+fn host_needs_hf_token(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return true;
+    };
+    let host = parsed.host_str().unwrap_or("").to_ascii_lowercase();
+    if host.contains("cdn-lfs")
+        || host.contains("cas-bridge")
+        || host.contains("xethub")
+        || host.contains("cloudfront")
+        || host.contains("amazonaws")
+        || host.contains("azureedge")
+    {
+        return false;
+    }
+    host.contains("huggingface") || host.contains("hf-mirror") || host.ends_with(".hf.co")
+}
+
+fn should_retry_message(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    m.contains("timeout")
+        || m.contains("timed out")
+        || m.contains("connect")
+        || m.contains("10060")
+        || m.contains("10061")
+        || m.contains("10054")
+        || m.contains("connection reset")
+        || m.contains("connection refused")
+        || m.contains("error sending request")
+        || m.contains("dns")
+        || m.contains("请求超时")
+        || m.contains("无法连接")
+        || m.contains("network is unreachable")
+}
+
+fn format_hf_reqwest(err: reqwest::Error) -> String {
+    let mut msg = err.to_string();
+    let mut src = std::error::Error::source(&err);
+    while let Some(s) = src {
+        msg.push_str(" → ");
+        msg.push_str(&s.to_string());
+        src = s.source();
+    }
+    if err.is_timeout() || err.is_connect() {
+        format!("连不上 Hugging Face。{msg}")
+    } else {
+        msg
+    }
 }
 
 fn resolve_hf_token(override_token: Option<&str>) -> String {
@@ -140,7 +253,7 @@ fn hf_failure(file: &str, status: reqwest::StatusCode, headers: &reqwest::header
     let detail = if !header.is_empty() { header } else { body.as_str() };
     let detail_lower = detail.to_ascii_lowercase();
     if status.as_u16() == 401 || status.as_u16() == 403 {
-        if detail_lower.contains("restricted") || detail_lower.contains("gated") || detail_lower.contains("access") {
+        if detail_lower.contains("restricted") || detail_lower.contains("gated") || detail_lower.contains("access") || detail.is_empty() {
             return format!(
                 "无法下载 {file}。请用创建这个 token 的账号打开 https://huggingface.co/{REPO} ，点 Agree 同意许可。Token 需要有 Read 权限。"
             );
@@ -150,14 +263,22 @@ fn hf_failure(file: &str, status: reqwest::StatusCode, headers: &reqwest::header
     format!("下载 {file} 失败：HTTP {status} {detail}")
 }
 
-async fn hf_fetch(client: &reqwest::Client, token: &str, start: &str) -> Result<reqwest::Response, String> {
+async fn hf_fetch(
+    client: &reqwest::Client,
+    token: &str,
+    start: &str,
+    resume_from: u64,
+) -> Result<reqwest::Response, String> {
     let mut url = start.to_string();
     for _ in 0..8 {
         let mut req = client.get(&url).header("Accept", "*/*");
-        if !token.is_empty() {
+        if host_needs_hf_token(&url) && !token.is_empty() {
             req = req.bearer_auth(token);
         }
-        let response = req.send().await.map_err(format_reqwest)?;
+        if resume_from > 0 {
+            req = req.header("Range", format!("bytes={resume_from}-"));
+        }
+        let response = req.send().await.map_err(format_hf_reqwest)?;
         if response.status().is_redirection() {
             let location = response
                 .headers()
@@ -178,39 +299,47 @@ async fn hf_fetch(client: &reqwest::Client, token: &str, start: &str) -> Result<
     Err("Hugging Face 下载跳转次数过多。".into())
 }
 
-async fn download_file(
+async fn download_from(
     app: &AppHandle,
     client: &reqwest::Client,
     token: &str,
     file: &str,
-    dest: &std::path::Path,
+    dest: &Path,
+    url: &str,
 ) -> Result<(), String> {
-    if looks_complete(dest) {
-        emit_download(app, file, 1, 1, &format!("{file} 已存在，跳过"));
-        return Ok(());
-    }
-    let url = format!("https://huggingface.co/{REPO}/resolve/main/{VERSION}/{file}");
-    emit_download(app, file, 0, 0, &format!("正在下载 {file}…"));
-    let response = hf_fetch(client, token, &url).await?;
+    let tmp = dest.with_extension("part");
+    let existing = fs::metadata(&tmp).map(|meta| meta.len()).unwrap_or(0);
+    let response = hf_fetch(client, token, url, existing).await?;
     let status = response.status();
+    if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE && existing > 0 {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("{file} 续传范围无效，已清除临时文件，请再试一次。"));
+    }
     if !status.is_success() {
         let headers = response.headers().clone();
         let body = response.text().await.unwrap_or_default();
         return Err(hf_failure(file, status, &headers, &body));
     }
-    let total = response.content_length().unwrap_or(0);
-    if total > MAX_FILE_BYTES {
+    let resume = status == reqwest::StatusCode::PARTIAL_CONTENT && existing > 0;
+    let remaining = response.content_length().unwrap_or(0);
+    let total = if resume { existing.saturating_add(remaining) } else { remaining };
+    if total > MAX_FILE_BYTES || remaining > MAX_FILE_BYTES {
         return Err(format!("{file} 超过 3GB 上限，已中止。"));
     }
-    let tmp = dest.with_extension("part");
-    let mut file_handle = fs::File::create(&tmp).map_err(|e| format!("无法写入 {file}：{e}"))?;
+    let mut file_handle = if resume {
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&tmp)
+            .map_err(|e| format!("无法续写 {file}：{e}"))?
+    } else {
+        fs::File::create(&tmp).map_err(|e| format!("无法写入 {file}：{e}"))?
+    };
     let mut stream = response.bytes_stream();
-    let mut received = 0u64;
+    let mut received = if resume { existing } else { 0 };
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(format_reqwest)?;
+        let chunk = chunk.map_err(format_hf_reqwest)?;
         received += chunk.len() as u64;
         if received > MAX_FILE_BYTES {
-            let _ = fs::remove_file(&tmp);
             return Err(format!("{file} 超过 3GB 上限，已中止。"));
         }
         file_handle
@@ -225,13 +354,63 @@ async fn download_file(
         );
     }
     drop(file_handle);
-    if received < 64 {
+    if total > 0 && received < total {
+        return Err(format!("{file} 下载中断（{received}/{total}），再点下载会从断点续传。"));
+    }
+    if received < min_file_bytes(file) {
         let _ = fs::remove_file(&tmp);
         return Err(format!("{file} 下载内容过小，已放弃。"));
+    }
+    let head = file_head(&tmp);
+    if looks_like_html(&head) || looks_like_lfs_pointer(&head) {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("{file} 下到的不是模型文件（页面或 Git LFS 指针）。请检查 token 和许可。"));
     }
     fs::rename(&tmp, dest).map_err(|e| format!("保存 {file} 失败：{e}"))?;
     emit_download(app, file, received, received.max(total), &format!("{file} 已完成"));
     Ok(())
+}
+
+async fn download_file(app: &AppHandle, token: &str, file: &str, dest: &Path) -> Result<(), String> {
+    if looks_complete(dest) {
+        emit_download(app, file, 1, 1, &format!("{file} 已存在，跳过"));
+        return Ok(());
+    }
+    let mut clients = vec![("当前网络", http_client_no_redirect()?)];
+    if proxy_is_configured() {
+        clients.push(("直连", http_client_no_redirect_direct()?));
+    }
+    let mut errors = Vec::new();
+    for (net_label, client) in &clients {
+        for base in hf_endpoints() {
+            let url = hf_resolve_url(&base, file);
+            emit_download(app, file, 0, 0, &format!("正在从 {base} 下载 {file}…"));
+            match download_from(app, client, token, file, dest, &url).await {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    let retry = should_retry_message(&err)
+                        || err.contains("HTTP 5")
+                        || err.contains("HTTP 429")
+                        || err.contains("HTTP 408");
+                    errors.push(format!("{base}（{net_label}）：{err}"));
+                    if retry {
+                        continue;
+                    }
+                    if err.contains("Agree") || err.contains("HTTP 401") || err.contains("HTTP 403") {
+                        return Err(err);
+                    }
+                }
+            }
+        }
+    }
+    Err(format!(
+        "无法下载 {file}。已尝试 huggingface.co 和 hf-mirror.com。请检查网络，或在本页填写代理（如 http://127.0.0.1:7890）。{}",
+        if errors.is_empty() {
+            String::new()
+        } else {
+            format!("\n{}", errors.join("\n"))
+        }
+    ))
 }
 
 #[tauri::command]
@@ -248,9 +427,8 @@ pub async fn cl_tagger_download(app: AppHandle, token: Option<String>) -> Result
         ));
     }
     let dir = model_dir()?;
-    let client = http_client_no_redirect()?;
     for file in FILES {
-        download_file(&app, &client, &token, file, &dir.join(file)).await?;
+        download_file(&app, &token, file, &dir.join(file)).await?;
     }
     drop_session();
     status()
@@ -567,5 +745,28 @@ mod tests {
         assert_eq!(idx[0], "1girl");
         assert_eq!(idx[2], "solo");
         assert_eq!(cats.get("1girl").map(String::as_str), Some("General"));
+    }
+
+    #[test]
+    fn endpoints_include_official_and_mirror() {
+        let list = hf_endpoints();
+        assert!(list.iter().any(|u| u.contains("huggingface.co")));
+        assert!(list.iter().any(|u| u.contains("hf-mirror.com")));
+    }
+
+    #[test]
+    fn skips_token_on_cdn_hosts() {
+        assert!(host_needs_hf_token("https://huggingface.co/cella110n/cl_tagger_v2/resolve/main/v2_00/model.onnx"));
+        assert!(host_needs_hf_token("https://hf-mirror.com/cella110n/cl_tagger_v2/resolve/main/v2_00/model.onnx"));
+        assert!(!host_needs_hf_token("https://cdn-lfs.huggingface.co/repos/xx/model.onnx"));
+        assert!(!host_needs_hf_token("https://cas-bridge.xethub.hf.co/xet/foo"));
+    }
+
+    #[test]
+    fn rejects_html_and_lfs_pointer() {
+        assert!(looks_like_html(b"<!DOCTYPE html><html>"));
+        assert!(looks_like_lfs_pointer(b"version https://git-lfs.github.com/spec/v1\noid sha256:abc"));
+        assert!(!looks_like_html(b"{\"idx_to_tag\":{}}"));
+        assert!(should_retry_message("tcp connect error (os error 10060)"));
     }
 }
