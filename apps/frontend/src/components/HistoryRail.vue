@@ -1,18 +1,31 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
+import { useRouter } from "vue-router";
 import { useAppStore } from "@/stores/app";
-import { useApngStore } from "@/stores/apng";
-import { readImageDataUrl } from "@/api/tauri";
+import { useApngStore, type ApngTab } from "@/stores/apng";
+import { readImageDataUrl, type SavedImage } from "@/api/tauri";
 import NaiIcon from "@/components/NaiIcon.vue";
 import type { HistoryItem } from "@/types/nai";
 
 const store = useAppStore();
 const apng = useApngStore();
+const router = useRouter();
 const thumbs = ref<Record<string, string>>({});
 const newGroupName = ref("");
 const renameName = ref("");
 const renaming = ref(false);
 const busyId = ref("");
+const picked = ref<string[]>([]);
+const sending = ref(false);
+let pickAnchor = "";
+
+const sendTargets: { id: ApngTab; label: string }[] = [
+  { id: "disguise", label: "APNG伪装" },
+  { id: "gif", label: "合成GIF" },
+  { id: "restore", label: "还原真图" },
+  { id: "meta", label: "清除元数据" },
+  { id: "mosaic", label: "打马赛克" },
+];
 
 const items = computed(() => store.visibleHistory());
 const activeGroup = computed(() =>
@@ -35,6 +48,8 @@ async function loadThumbs() {
 watch(
   () => [store.historyOpen, items.value.map((h) => h.id).join("|")] as const,
   () => {
+    const ids = new Set(items.value.map((item) => item.id));
+    picked.value = picked.value.filter((id) => ids.has(id));
     if (store.historyOpen) void loadThumbs();
   },
   { immediate: true },
@@ -90,10 +105,66 @@ async function changeItemGroup(item: HistoryItem, groupId: string) {
   }
 }
 
+function togglePick(id: string, shift = false) {
+  if (shift && pickAnchor) {
+    const ids = items.value.map((item) => item.id);
+    const a = ids.indexOf(pickAnchor);
+    const b = ids.indexOf(id);
+    if (a >= 0 && b >= 0) {
+      const [lo, hi] = a < b ? [a, b] : [b, a];
+      const set = new Set(picked.value);
+      ids.slice(lo, hi + 1).forEach((item) => set.add(item));
+      picked.value = [...set];
+      return;
+    }
+  }
+  pickAnchor = id;
+  picked.value = picked.value.includes(id)
+    ? picked.value.filter((item) => item !== id)
+    : [...picked.value, id];
+}
+
+function selectVisible() {
+  picked.value = items.value.map((item) => item.id);
+  pickAnchor = picked.value[0] || "";
+}
+
+async function dataUrlFor(item: HistoryItem) {
+  if (thumbs.value[item.id]) return thumbs.value[item.id];
+  const url = await readImageDataUrl(item.path);
+  thumbs.value = { ...thumbs.value, [item.id]: url };
+  return url;
+}
+
 async function addApng(item: HistoryItem) {
-  const url = thumbs.value[item.id] || await readImageDataUrl(item.path);
+  const url = await dataUrlFor(item);
   const ok = await apng.addReal(url, item.id);
+  await router.push("/apng");
   store.status = ok ? `已清掉元数据并加入伪装队列（${apng.items.length}）` : "伪装队列已满";
+}
+
+async function sendPicked(target: ApngTab) {
+  const chosen = items.value.filter((item) => picked.value.includes(item.id));
+  if (!chosen.length || sending.value) return;
+  sending.value = true;
+  store.status = `正在准备 ${chosen.length} 张…`;
+  try {
+    const files: SavedImage[] = [];
+    for (const item of chosen) {
+      files.push({ path: item.path, dataUrl: await dataUrlFor(item) });
+    }
+    const count = await apng.importFiles(target, files);
+    await router.push("/apng");
+    const label = sendTargets.find((item) => item.id === target)?.label || "APNG";
+    store.status = count
+      ? `已把 ${count} 张加入「${label}」`
+      : "没有加进去，队列可能已满";
+    if (count) picked.value = [];
+  } catch (e) {
+    store.status = e instanceof Error ? e.message : String(e);
+  } finally {
+    sending.value = false;
+  }
 }
 
 async function copyItem(item: HistoryItem) {
@@ -170,12 +241,38 @@ async function deleteItem(item: HistoryItem) {
         </div>
       </div>
 
+      <div v-if="items.length" class="pick-bar">
+        <div class="pick-head">
+          <span>已选 {{ picked.length }}</span>
+          <button type="button" class="ghost" @click="selectVisible">全选</button>
+          <button type="button" class="ghost" :disabled="!picked.length" @click="picked = []">取消</button>
+        </div>
+        <div class="pick-actions">
+          <button
+            v-for="target in sendTargets"
+            :key="target.id"
+            type="button"
+            :disabled="!picked.length || sending"
+            @click="sendPicked(target.id)"
+          >
+            {{ target.label }}
+          </button>
+        </div>
+      </div>
+
       <p v-if="!items.length" class="hint">
         {{ store.history.length ? "这个分组里还没有图片。" : "生成后的图片会出现在这里。" }}
       </p>
-      <div v-for="item in items" :key="item.id" class="item" :class="{ busy: busyId === item.id }">
+      <div v-for="item in items" :key="item.id" class="item" :class="{ busy: busyId === item.id, picked: picked.includes(item.id) }">
         <button class="thumb" type="button" title="预览；双击载入参数" @click="store.showHistory(item)" @dblclick="store.applyHistory(item)">
           <img v-if="thumbs[item.id]" :src="thumbs[item.id]" alt="" />
+          <label class="tick" title="多选，按住 Shift 可连选" @click.stop @dblclick.stop>
+            <input
+              type="checkbox"
+              :checked="picked.includes(item.id)"
+              @click.prevent.stop="togglePick(item.id, ($event as MouseEvent).shiftKey)"
+            />
+          </label>
         </button>
         <div class="meta">
           <button class="title" type="button" title="在资源管理器中显示" @click="revealItem(item)">
@@ -274,6 +371,35 @@ header { display: flex; justify-content: space-between; align-items: center; mar
   gap: 6px;
   margin-bottom: 12px;
 }
+.pick-bar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  margin: 0 -12px 10px;
+  padding: 8px 12px;
+  background: #191b31;
+  border-bottom: 1px solid var(--bg3);
+  display: grid;
+  gap: 6px;
+}
+.pick-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: rgba(255,255,255,0.72);
+  font-size: 12px;
+}
+.pick-head span { margin-right: auto; }
+.pick-actions { display: flex; flex-wrap: wrap; gap: 4px; }
+.pick-actions button {
+  border: 0;
+  border-radius: 6px;
+  background: #2e3152;
+  color: #f5f3c2;
+  padding: 4px 7px;
+  font-size: 11px;
+}
+.pick-actions button:disabled { opacity: 0.4; }
 .groups select,
 .groups input,
 .group-pick {
@@ -306,14 +432,28 @@ header { display: flex; justify-content: space-between; align-items: center; mar
   margin-bottom: 6px;
 }
 .item:hover,
-.item.busy { background: var(--bg3); }
+.item.busy,
+.item.picked { background: var(--bg3); }
 .thumb {
+  position: relative;
   padding: 0;
   border: 0;
   background: transparent;
   width: 48px;
   height: 64px;
 }
+.tick {
+  position: absolute;
+  left: 2px;
+  top: 2px;
+  width: 16px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+  background: rgba(14, 15, 33, 0.72);
+  border-radius: 3px;
+}
+.tick input { margin: 0; }
 .item img { width: 48px; height: 64px; object-fit: cover; border-radius: 4px; }
 .meta { min-width: 0; }
 .title {

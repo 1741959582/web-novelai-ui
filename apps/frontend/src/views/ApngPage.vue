@@ -346,31 +346,60 @@ function sendQueueToGif() {
   app.status = `已把队列里的 ${frames.length} 帧放进 GIF`;
 }
 
+function focusExtra(index: number) {
+  if (index <= 0 || index >= extra.value.length) return;
+  const next = [...extra.value];
+  const [item] = next.splice(index, 1);
+  extra.value = [item, ...next];
+}
+
+async function applyPending() {
+  const batch = store.takePending();
+  if (!batch.length) return;
+  if (store.tab === "restore") {
+    extra.value = batch;
+    return;
+  }
+  if (store.tab === "meta" || store.tab === "mosaic") {
+    extra.value = await Promise.all(batch.map(async (file) => ({ ...file, dataUrl: await cleanPreview(file.dataUrl) })));
+  }
+}
+
+watch(() => store.pendingTick, () => {
+  void applyPending();
+}, { immediate: true });
+
 async function restore() {
-  const src = extra.value[0]?.dataUrl;
-  if (!src) {
+  if (!extra.value.length) {
     app.status = "先选一张伪装图，要原文件，不能是截图";
     return;
   }
-  const outs = await run(() => apngRestore(src));
+  const outs: SavedImage[] = [];
+  await run(async () => {
+    for (const src of extra.value) outs.push(...(await apngRestore(src.dataUrl)));
+  });
   extra.value = outs;
-  app.status = outs[0] ? `已还原到 ${outs[0].path}` : "没有拆出隐藏帧";
+  app.status = outs[0] ? `已还原 ${outs.length} 张，第一张在 ${outs[0].path}` : "没有拆出隐藏帧";
 }
 
 async function strip() {
-  const src = extra.value[0]?.dataUrl;
-  if (!src) return;
-  const saved = await run(() => apngStrip(src));
-  extra.value = [saved];
-  app.status = `已清除元数据：${saved.path}`;
+  if (!extra.value.length) return;
+  const outs: SavedImage[] = [];
+  await run(async () => {
+    for (const src of extra.value) outs.push(await apngStrip(src.dataUrl));
+  });
+  extra.value = outs;
+  app.status = outs.length > 1 ? `已清除 ${outs.length} 张元数据` : `已清除元数据：${outs[0]?.path || ""}`;
 }
 
 async function mosaic() {
-  const src = extra.value[0]?.dataUrl;
-  if (!src) return;
-  const saved = await run(() => apngMosaic(src, store.mosaicBlock));
-  extra.value = [saved];
-  app.status = `已打马赛克：${saved.path}`;
+  if (!extra.value.length) return;
+  const outs: SavedImage[] = [];
+  await run(async () => {
+    for (const src of extra.value) outs.push(await apngMosaic(src.dataUrl, store.mosaicBlock));
+  });
+  extra.value = outs;
+  app.status = outs.length > 1 ? `已给 ${outs.length} 张打马赛克` : `已打马赛克：${outs[0]?.path || ""}`;
 }
 
 let timer = 0;
@@ -501,9 +530,15 @@ onUnmounted(() => {
         <label class="file">本地文件<input type="file" accept="image/*" @change="fromFiles(($event.target as HTMLInputElement).files, store.tab)" /></label>
         <label v-if="store.tab === 'mosaic'">块 <input v-model.number="store.mosaicBlock" type="number" min="4" max="64" /></label>
         <span class="spacer" />
-        <button v-if="store.tab === 'restore'" type="button" class="primary" :disabled="busy" @click="restore">还原当前</button>
-        <button v-else-if="store.tab === 'meta'" type="button" class="primary" :disabled="busy" @click="strip">清除并保存</button>
-        <button v-else type="button" class="primary" :disabled="busy" @click="mosaic">打马赛克</button>
+        <button v-if="store.tab === 'restore'" type="button" class="primary" :disabled="busy" @click="restore">
+          {{ extra.length > 1 ? `还原全部 ${extra.length}` : "还原当前" }}
+        </button>
+        <button v-else-if="store.tab === 'meta'" type="button" class="primary" :disabled="busy" @click="strip">
+          {{ extra.length > 1 ? `清除全部 ${extra.length}` : "清除并保存" }}
+        </button>
+        <button v-else type="button" class="primary" :disabled="busy" @click="mosaic">
+          {{ extra.length > 1 ? `打码全部 ${extra.length}` : "打马赛克" }}
+        </button>
       </div>
       <div class="stage" :class="{ single: store.tab !== 'restore' }">
         <article class="pane">
@@ -519,6 +554,19 @@ onUnmounted(() => {
             <img :src="extra[extra.length - 1].dataUrl" alt="" />
           </div>
         </article>
+      </div>
+      <div v-if="extra.length > 1" class="queue">
+        <button
+          v-for="(file, i) in extra"
+          :key="`${file.path}-${i}`"
+          type="button"
+          class="shot"
+          :class="{ on: i === 0 }"
+          @click="focusExtra(i)"
+        >
+          <img :src="file.dataUrl" alt="" />
+          <i>{{ i + 1 }}</i>
+        </button>
       </div>
       <p v-if="extra[0]" class="path">{{ extra[0].path }}</p>
     </template>

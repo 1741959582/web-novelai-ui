@@ -1,6 +1,6 @@
 import { acceptHMRUpdate, defineStore } from "pinia";
 import { ref } from "vue";
-import { apngClean } from "@/api/tauri";
+import { apngClean, type SavedImage } from "@/api/tauri";
 
 export interface ApngShot {
   id: string;
@@ -61,6 +61,8 @@ export const useApngStore = defineStore("apng", () => {
   const padColor = ref("#ffffff");
   const fitFirst = ref(false);
   const mosaicBlock = ref(16);
+  const pending = ref<SavedImage[]>([]);
+  const pendingTick = ref(0);
 
   async function addReal(dataUrl: string, name = "生成图") {
     if (items.value.length >= MAX_QUEUE) return false;
@@ -96,6 +98,37 @@ export const useApngStore = defineStore("apng", () => {
         ? item
         : { ...item, status: "pending", outPath: "", outUrl: "", error: "" },
     );
+  }
+
+  function takePending() {
+    const files = pending.value;
+    pending.value = [];
+    return files;
+  }
+
+  async function importFiles(target: ApngTab, files: SavedImage[]) {
+    if (!files.length) return 0;
+    if (target === "disguise") {
+      let n = 0;
+      for (const file of files) {
+        const name = file.path.split(/[/\\]/).pop() || "真图";
+        if (await addReal(file.dataUrl, name)) n += 1;
+      }
+      return n;
+    }
+    if (target === "gif") {
+      tab.value = "gif";
+      let n = 0;
+      for (const file of files) {
+        const name = file.path.split(/[/\\]/).pop() || "帧";
+        if (await addGif(file.dataUrl, name)) n += 1;
+      }
+      return n;
+    }
+    tab.value = target;
+    pending.value = files;
+    pendingTick.value += 1;
+    return files.length;
   }
 
   async function addGif(dataUrl: string, name = "生成图") {
@@ -149,11 +182,14 @@ export const useApngStore = defineStore("apng", () => {
     padColor,
     fitFirst,
     mosaicBlock,
+    pendingTick,
     addReal,
     addAnimation,
     setCover,
     invalidate,
     addGif,
+    takePending,
+    importFiles,
     removeItem,
     moveItem,
     patchItem,
