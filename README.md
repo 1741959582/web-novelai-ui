@@ -6,14 +6,14 @@
 
 **[GitHub 最新发行版](https://github.com/caiweida/web-novelai-ui/releases/latest)**
 
-以下直链对应 **[v0.1.1](https://github.com/caiweida/web-novelai-ui/releases/tag/v0.1.1)**；后续版本请使用上面的「最新发行版」。
+以下直链对应 **[v0.1.2](https://github.com/caiweida/web-novelai-ui/releases/tag/v0.1.2)**；后续版本请使用上面的「最新发行版」。
 
 | 平台 | 选择安装包 | 使用说明 |
 | --- | --- | --- |
-| Windows x64 · 安装版 | [Setup.exe](https://github.com/caiweida/web-novelai-ui/releases/download/v0.1.1/NAI-Studio-Web-UI-Setup-0.1.1.exe) | 长期使用建议选这个；安装向导、开始菜单快捷方式 |
-| Windows x64 · 便携版 | [便携版.zip](https://github.com/caiweida/web-novelai-ui/releases/download/v0.1.1/NAI-Studio-Web-UI-0.1.1-portable.zip) | 解压后双击 `web-novelai-ui.exe`；更新时下载新包替换整个文件夹 |
+| Windows x64 · 安装版 | [Setup.exe](https://github.com/caiweida/web-novelai-ui/releases/download/v0.1.2/NAI-Studio-Web-UI-Setup-0.1.2.exe) | 长期使用建议选这个；安装向导、开始菜单快捷方式 |
+| Windows x64 · 便携版 | [便携版.zip](https://github.com/caiweida/web-novelai-ui/releases/download/v0.1.2/NAI-Studio-Web-UI-0.1.2-portable.zip) | 解压后双击 `web-novelai-ui.exe`；更新时下载新包替换整个文件夹 |
 
-需要 Windows 10 及以上。系统没有 WebView2 时，安装版会提示安装。第一次打开按向导填写 NovelAI Token。设置和生成的图片保存在本机，不在安装包旁边。
+需要 Windows 10 及以上。系统没有 WebView2 时，安装版会提示安装。第一次打开按向导填写 NovelAI Token。设置和生成的图片保存在本机，不在安装包旁边。启动后会读取 GitHub Release，有新版本时顶栏可以一键下载安装包。
 
 ## 使用流程
 
@@ -94,7 +94,7 @@ WD 走公开空间，一般不用额外填写。CL 若已在设置里启用本�
 1. 选「内置封面」或「自定义封面」。
 2. 「加真图」或从生成页粘贴。加入时会清掉 NovelAI 元数据。
 3. 左边是对方看到的封面，右边是点开后的画面。
-4. 点「伪装当前」或「全部伪装」，再用「复制图片」贴到聊天窗口。
+4. 点「伪装当前」或「全部伪装」，再用「复制图片」或在预览上右键，粘贴到聊天窗口。复制的是 APNG 文件本身，不是预览位图。
 
 ![APNG 伪装：封面预览和点开效果](docs/assets/guide/apng.jpg)
 

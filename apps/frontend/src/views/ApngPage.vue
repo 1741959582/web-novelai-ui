@@ -258,7 +258,7 @@ async function disguiseCurrent(copy = false) {
   const saved = await run(() => disguiseOne(item));
   if (copy) {
     await copyImageFiles([saved.path]);
-    app.status = "已伪装并复制文件，去聊天窗口粘贴的是原文件";
+    app.status = "已伪装并复制 APNG 文件，到聊天窗口 Ctrl+V 粘贴";
     return;
   }
   app.status = `已伪装：缩略图是封面，点开才是真图。${saved.path}`;
@@ -282,13 +282,31 @@ async function disguiseAll() {
 
 async function copyCurrent() {
   const item = selected.value;
-  if (!item) return;
+  if (!item) {
+    app.status = "先把真图放进队列";
+    return;
+  }
   if (item.status !== "done" || !item.outPath) {
     await disguiseCurrent(true);
     return;
   }
   await run(() => copyImageFiles([item.outPath]));
-  app.status = "已复制图片文件，粘贴出去的是文件本身";
+  app.status = "已复制 APNG 文件，到聊天窗口 Ctrl+V 粘贴";
+}
+
+function onCopyApng(ev: Event) {
+  ev.preventDefault();
+  void copyCurrent();
+}
+
+function onCopyShortcut(ev: ClipboardEvent) {
+  const target = ev.target as HTMLElement | null;
+  if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) {
+    return;
+  }
+  if (store.tab !== "disguise" || !selected.value) return;
+  ev.preventDefault();
+  void copyCurrent();
 }
 
 function applyName() {
@@ -359,6 +377,7 @@ let timer = 0;
 let lastTick = 0;
 onMounted(() => {
   window.addEventListener("paste", onPaste);
+  window.addEventListener("copy", onCopyShortcut);
   timer = window.setInterval(() => {
     const item = selected.value;
     if (!item || item.frames.length < 2) return;
@@ -370,6 +389,7 @@ onMounted(() => {
 });
 onUnmounted(() => {
   window.removeEventListener("paste", onPaste);
+  window.removeEventListener("copy", onCopyShortcut);
   window.clearInterval(timer);
 });
 </script>
@@ -401,15 +421,15 @@ onUnmounted(() => {
       <div class="stage">
         <article class="pane">
           <b>对方视角 · 不点开时</b>
-          <div class="view">
-            <img v-if="coverPreview" :src="coverPreview" alt="" />
-            <p v-else>队列里选一张真图后，这里显示聊天缩略图</p>
+          <div class="view" @contextmenu="onCopyApng">
+            <img v-if="coverPreview" :src="coverPreview" alt="" draggable="false" @dragstart.prevent />
+            <p v-else>队列里选一张真图后，这里显示聊天缩略图。右键或「复制图片」会复制伪装 APNG 文件。</p>
           </div>
         </article>
         <article class="pane">
           <b>点开效果 · {{ selected && selected.frames.length > 1 ? `${selected.frames.length} 帧` : "真图" }}</b>
-          <div class="view">
-            <img v-if="realPreview" :src="realPreview" alt="" />
+          <div class="view" @contextmenu="onCopyApng">
+            <img v-if="realPreview" :src="realPreview" alt="" draggable="false" @dragstart.prevent />
             <p v-else>Ctrl+V 或从生成页丢进来。进来就会清掉提示词和隐写</p>
           </div>
         </article>
@@ -586,7 +606,7 @@ input[type="text"], input:not([type]), .grow, .name {
   place-items: center;
   padding: 8px;
 }
-.view img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.view img { max-width: 100%; max-height: 100%; object-fit: contain; -webkit-user-drag: none; user-select: none; }
 .view p, .empty, .path {
   margin: 0;
   color: rgba(255,255,255,0.45);

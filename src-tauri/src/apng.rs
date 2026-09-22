@@ -505,33 +505,173 @@ pub fn apng_restore(image: String) -> Result<Vec<SavedImage>, String> {
     Ok(vec![save_bytes(&encode_gif(&frames, 400)?, ".gif", Some("restored"))?])
 }
 
+fn clipboard_path(path: &Path) -> Option<String> {
+    if !path.is_file() {
+        return None;
+    }
+    let abs = fs::canonicalize(path).unwrap_or_else(|_| {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(path))
+                .unwrap_or_else(|_| path.to_path_buf())
+        }
+    });
+    let text = abs.to_string_lossy();
+    let text = text
+        .strip_prefix(r"\\?\UNC\")
+        .map(|rest| format!(r"\\{rest}"))
+        .unwrap_or_else(|| text.strip_prefix(r"\\?\").unwrap_or(&text).to_string());
+    let text = text.replace('/', "\\");
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn hdrop_bytes(paths: &[String]) -> Vec<u8> {
+    let mut wide: Vec<u16> = Vec::new();
+    for path in paths {
+        wide.extend(path.encode_utf16());
+        wide.push(0);
+    }
+    wide.push(0);
+    let mut buf = vec![0u8; 20 + wide.len() * 2];
+    buf[0..4].copy_from_slice(&20u32.to_le_bytes());
+    buf[16..20].copy_from_slice(&1i32.to_le_bytes());
+    for (i, unit) in wide.into_iter().enumerate() {
+        let at = 20 + i * 2;
+        buf[at..at + 2].copy_from_slice(&unit.to_le_bytes());
+    }
+    buf
+}
+
 #[tauri::command]
 pub fn copy_image_files(paths: Vec<String>) -> Result<(), String> {
     let existing: Vec<String> = paths
-        .into_iter()
-        .filter(|p| Path::new(p).is_file())
+        .iter()
+        .map(Path::new)
+        .filter_map(clipboard_path)
         .collect();
     if existing.is_empty() {
         return Err("没有可复制的图片文件".into());
     }
-    let list = existing
-        .iter()
-        .map(|p| format!("'{}'", p.replace('\'', "''")))
-        .collect::<Vec<_>>()
-        .join(",");
-    let script = format!("Set-Clipboard -LiteralPath @({list})");
-    let out = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output()
-        .map_err(|e| format!("复制文件失败：{e}"))?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        return Err(if err.trim().is_empty() {
-            "复制文件失败".into()
-        } else {
-            err.trim().to_string()
-        });
+    #[cfg(windows)]
+    {
+        return windows_copy_files(&existing);
     }
+    #[cfg(not(windows))]
+    {
+        let _ = existing;
+        Err("当前系统不支持复制图片文件".into())
+    }
+}
+
+#[cfg(windows)]
+fn windows_copy_files(paths: &[String]) -> Result<(), String> {
+    let hdrop = hdrop_bytes(paths);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("clipboard".into())
+        .spawn(move || {
+            let result = unsafe { windows_set_clipboard(&hdrop) };
+            let _ = tx.send(result);
+        })
+        .map_err(|e| format!("复制文件失败：{e}"))?;
+    rx.recv()
+        .map_err(|_| "复制文件失败：剪贴板线程中断".to_string())?
+}
+
+#[cfg(windows)]
+unsafe fn windows_set_clipboard(hdrop: &[u8]) -> Result<(), String> {
+    use std::ffi::c_void;
+    type Handle = *mut c_void;
+    const CF_HDROP: u32 = 15;
+    const GMEM_MOVEABLE: u32 = 0x0002;
+    const GMEM_ZEROINIT: u32 = 0x0040;
+    const DROPEFFECT_COPY: u32 = 1;
+    #[link(name = "ole32")]
+    extern "system" {
+        fn OleInitialize(reserved: *mut c_void) -> i32;
+        fn OleUninitialize();
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn OpenClipboard(hwnd: *mut c_void) -> i32;
+        fn CloseClipboard() -> i32;
+        fn EmptyClipboard() -> i32;
+        fn SetClipboardData(format: u32, mem: Handle) -> Handle;
+        fn RegisterClipboardFormatW(name: *const u16) -> u32;
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GlobalAlloc(flags: u32, bytes: usize) -> Handle;
+        fn GlobalLock(mem: Handle) -> *mut c_void;
+        fn GlobalUnlock(mem: Handle) -> i32;
+        fn GlobalFree(mem: Handle) -> Handle;
+    }
+    fn alloc_moveable(bytes: &[u8]) -> Result<Handle, String> {
+        unsafe {
+            let mem = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, bytes.len());
+            if mem.is_null() {
+                return Err("申请剪贴板内存失败".into());
+            }
+            let lock = GlobalLock(mem);
+            if lock.is_null() {
+                GlobalFree(mem);
+                return Err("锁定剪贴板内存失败".into());
+            }
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), lock as *mut u8, bytes.len());
+            GlobalUnlock(mem);
+            Ok(mem)
+        }
+    }
+
+    let hr = OleInitialize(std::ptr::null_mut());
+    if hr < 0 {
+        return Err("初始化剪贴板失败".into());
+    }
+    let mut opened = false;
+    for _ in 0..25 {
+        if OpenClipboard(std::ptr::null_mut()) != 0 {
+            opened = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    if !opened {
+        OleUninitialize();
+        return Err("无法打开剪贴板，请稍后再试".into());
+    }
+    EmptyClipboard();
+    let drop_mem = match alloc_moveable(hdrop) {
+        Ok(mem) => mem,
+        Err(err) => {
+            CloseClipboard();
+            OleUninitialize();
+            return Err(err);
+        }
+    };
+    if SetClipboardData(CF_HDROP, drop_mem).is_null() {
+        GlobalFree(drop_mem);
+        CloseClipboard();
+        OleUninitialize();
+        return Err("写入文件到剪贴板失败".into());
+    }
+    let effect = DROPEFFECT_COPY.to_le_bytes();
+    let effect_name: Vec<u16> = "Preferred DropEffect\0".encode_utf16().collect();
+    let effect_fmt = RegisterClipboardFormatW(effect_name.as_ptr());
+    if effect_fmt != 0 {
+        if let Ok(mem) = alloc_moveable(&effect) {
+            if SetClipboardData(effect_fmt, mem).is_null() {
+                GlobalFree(mem);
+            }
+        }
+    }
+    CloseClipboard();
+    OleUninitialize();
     Ok(())
 }
 
@@ -663,4 +803,23 @@ pub async fn pick_images(app: tauri::AppHandle) -> Result<Vec<SavedImage>, Strin
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hdrop_bytes;
+
+    #[test]
+    fn hdrop_payload_is_wide_and_double_null() {
+        let raw = hdrop_bytes(&["C:\\temp\\a.png".into()]);
+        assert_eq!(&raw[0..4], &20u32.to_le_bytes());
+        assert_eq!(&raw[16..20], &1i32.to_le_bytes());
+        assert_eq!(raw[raw.len() - 2..], [0, 0]);
+        let wide: Vec<u16> = raw[20..]
+            .chunks(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        let text = String::from_utf16_lossy(&wide);
+        assert!(text.starts_with("C:\\temp\\a.png"));
+    }
 }

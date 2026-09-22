@@ -37,6 +37,19 @@ function go(path: string) {
       <span class="status">{{ store.status }}</span>
     </header>
 
+    <div
+      v-if="store.updateInfo?.available && store.updateDismissed !== store.updateInfo.latest"
+      class="update-bar"
+    >
+      <span>发现新版本 {{ store.updateInfo.latest }}（当前 {{ store.updateInfo.current }}）</span>
+      <span v-if="store.updateBusy" class="upd-msg">{{ store.updateMsg || `下载中 ${store.updatePct}%` }}</span>
+      <button type="button" class="upd-go" :disabled="store.updateBusy" @click="store.applyAppUpdate()">
+        {{ store.updateBusy ? "更新中…" : "立即更新" }}
+      </button>
+      <button type="button" @click="store.openUpdatePage()">打开发行页</button>
+      <button type="button" :disabled="store.updateBusy" @click="store.dismissUpdate()">稍后</button>
+    </div>
+
     <div v-if="menuOpen" class="menu-back" @click="menuOpen = false">
       <nav class="menu" @click.stop>
         <RouterLink
@@ -91,6 +104,24 @@ function go(path: string) {
 .anlas :deep(.nai-icon) { color: var(--heading); }
 .grow { flex: 1; }
 .status { color: var(--muted); font-size: 12px; max-width: 42%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.update-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  background: #2a2d4c;
+  color: #fff;
+  font-size: 13px;
+}
+.update-bar .upd-msg { color: var(--heading); }
+.update-bar button {
+  border: 0;
+  border-radius: 6px;
+  background: #3d4270;
+  color: #fff;
+  padding: 6px 10px;
+}
+.update-bar .upd-go { background: #f5f3c2; color: #0e0f21; font-weight: 700; }
 .main { flex: 1; min-height: 0; overflow: hidden; position: relative; }
 .main > * { height: 100%; min-height: 0; }
 .menu-back {

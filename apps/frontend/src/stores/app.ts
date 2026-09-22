@@ -27,6 +27,10 @@ import {
   settingsGet,
   settingsSave,
   tokenVerify,
+  checkAppUpdate,
+  installAppUpdate,
+  openLatestRelease,
+  type AppUpdateInfo,
   type QuickEntry,
   type ReferencePreset,
 } from "@/api/tauri";
@@ -136,7 +140,14 @@ export const useAppStore = defineStore("app", () => {
   const genPhase = ref("");
   const streamFrames = ref<string[]>([]);
   const streamReplaying = ref(false);
+  const appVersion = ref("");
+  const updateInfo = ref<AppUpdateInfo | null>(null);
+  const updateBusy = ref(false);
+  const updatePct = ref(0);
+  const updateMsg = ref("");
+  const updateDismissed = ref("");
   let unlistenProgress: UnlistenFn | undefined;
+  let unlistenUpdate: UnlistenFn | undefined;
   let genTick: number | undefined;
   let genStartedAt = 0;
   let lastProgressAt = 0;
@@ -154,6 +165,7 @@ export const useAppStore = defineStore("app", () => {
       ready.value = true;
       showSessionDialog.value = settings.value.hasOnboarded && sessions.value.length > 0;
       status.value = hasToken.value ? "API 已配置" : "请先在设置中填写 Token";
+      void checkForAppUpdate();
       unlistenProgress = await listen<{
         progress: number;
         currentStep: number;
@@ -179,6 +191,10 @@ export const useAppStore = defineStore("app", () => {
             }
           }
         }
+      });
+      unlistenUpdate = await listen<{ received: number; total: number; percent: number; message: string }>("app-update", (event) => {
+        updatePct.value = Math.round(event.payload.percent);
+        updateMsg.value = event.payload.message;
       });
     } catch {
       status.value = "未连接到 Tauri 宿主，请用 npm run dev 启动桌面窗口";
@@ -1026,6 +1042,47 @@ export const useAppStore = defineStore("app", () => {
     status.value = "已开始下载";
   }
 
+  async function checkForAppUpdate() {
+    try {
+      const info = await checkAppUpdate();
+      appVersion.value = info.current;
+      updateInfo.value = info;
+      if (info.available) {
+        status.value = `发现新版本 ${info.latest}`;
+      }
+    } catch (e) {
+      appVersion.value = appVersion.value || "";
+      if (!updateInfo.value) {
+        /* keep quiet on boot; settings page will show the error */
+        updateMsg.value = e instanceof Error ? e.message : String(e);
+      }
+    }
+  }
+
+  function dismissUpdate() {
+    if (updateInfo.value) updateDismissed.value = updateInfo.value.latest;
+  }
+
+  async function applyAppUpdate() {
+    if (!updateInfo.value || updateBusy.value) return;
+    updateBusy.value = true;
+    updatePct.value = 1;
+    updateMsg.value = "正在下载新版本…";
+    try {
+      await installAppUpdate(updateInfo.value);
+      status.value = "已启动更新";
+    } catch (e) {
+      updateMsg.value = e instanceof Error ? e.message : String(e);
+      status.value = updateMsg.value;
+    } finally {
+      updateBusy.value = false;
+    }
+  }
+
+  async function openUpdatePage() {
+    await openLatestRelease(updateInfo.value?.htmlUrl || "");
+  }
+
   return {
     settings,
     account,
@@ -1041,6 +1098,12 @@ export const useAppStore = defineStore("app", () => {
     previewUrl,
     status,
     busy,
+    appVersion,
+    updateInfo,
+    updateBusy,
+    updatePct,
+    updateMsg,
+    updateDismissed,
     i2iImage,
     i2iStrength,
     i2iNoise,
@@ -1130,6 +1193,10 @@ export const useAppStore = defineStore("app", () => {
     useCurrentAsI2i,
     downloadCurrentImage,
     currentPreview,
+    checkForAppUpdate,
+    dismissUpdate,
+    applyAppUpdate,
+    openUpdatePage,
   };
 });
 

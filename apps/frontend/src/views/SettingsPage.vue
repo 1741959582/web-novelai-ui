@@ -5,7 +5,7 @@ import { useAppStore } from "@/stores/app";
 import ClTaggerPanel from "@/components/ClTaggerPanel.vue";
 import NaiIcon from "@/components/NaiIcon.vue";
 
-type Tab = "api" | "storage" | "tags" | "tagger" | "perf";
+type Tab = "api" | "storage" | "tags" | "tagger" | "perf" | "about";
 
 const store = useAppStore();
 const tab = ref<Tab>("api");
@@ -79,6 +79,10 @@ async function save() {
         <NaiIcon name="sparkle" :size="16" />
         <span>性能</span>
       </button>
+      <button type="button" :class="{ on: tab === 'about' }" @click="tab = 'about'">
+        <NaiIcon name="globe" :size="16" />
+        <span>关于与更新</span>
+      </button>
     </nav>
 
     <section class="content">
@@ -147,13 +151,36 @@ async function save() {
         <ClTaggerPanel />
       </div>
 
-      <div v-else class="card">
+      <div v-else-if="tab === 'perf'" class="card">
         <h2>性能</h2>
         <label class="check">
           <input v-model="store.settings.streamPreviewEnabled" type="checkbox" @change="store.saveSettings()" />
           流式预览（逐步显示生成过程，失败时自动回退 ZIP）
         </label>
         <p class="hint">也可在生成画布右上角开关流式预览。</p>
+      </div>
+
+      <div v-else class="card">
+        <h2>关于与更新</h2>
+        <p class="hint">当前版本 {{ store.updateInfo?.current || store.appVersion || "—" }}</p>
+        <p class="hint">
+          GitHub 最新版
+          {{ store.updateInfo ? (store.updateInfo.available ? store.updateInfo.latest : "已是最新") : "尚未检查" }}
+        </p>
+        <p class="hint">启动时会读取 GitHub Release。有新包时顶栏会出现更新条，下载安装包后自动打开安装程序。</p>
+        <p v-if="store.updateBusy" class="hint">{{ store.updateMsg || `下载中 ${store.updatePct}%` }}</p>
+        <div class="actions">
+          <button class="btn" type="button" :disabled="store.updateBusy" @click="store.checkForAppUpdate()">检查更新</button>
+          <button
+            class="btn primary"
+            type="button"
+            :disabled="store.updateBusy || !store.updateInfo?.available"
+            @click="store.applyAppUpdate()"
+          >
+            {{ store.updateBusy ? "更新中…" : "立即更新" }}
+          </button>
+          <button class="btn" type="button" @click="store.openUpdatePage()">打开发行页</button>
+        </div>
       </div>
 
       <p v-if="message" class="note">{{ message }}</p>

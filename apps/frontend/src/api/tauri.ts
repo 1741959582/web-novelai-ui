@@ -554,3 +554,30 @@ export function apngRestore(image: string) {
 export function pickImages() {
   return invoke<SavedImage[]>("pick_images");
 }
+
+export interface AppUpdateInfo {
+  current: string;
+  latest: string;
+  notes: string;
+  htmlUrl: string;
+  setupUrl?: string | null;
+  portableUrl?: string | null;
+  available: boolean;
+  portable: boolean;
+}
+
+export function appVersion() {
+  return invoke<string>("app_version");
+}
+
+export function checkAppUpdate() {
+  return invoke<AppUpdateInfo>("check_app_update");
+}
+
+export function openLatestRelease(url?: string) {
+  return invoke<void>("open_latest_release", { url: url || "" });
+}
+
+export function installAppUpdate(info: AppUpdateInfo) {
+  return invoke<void>("install_app_update", { info });
+}

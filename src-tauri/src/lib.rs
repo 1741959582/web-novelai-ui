@@ -9,6 +9,7 @@ mod quicktag;
 mod reference_presets;
 mod reverse_tasks;
 mod store;
+mod update;
 mod wd_tagger;
 
 pub fn run() {
@@ -75,6 +76,10 @@ pub fn run() {
             apng::apng_restore,
             apng::pick_images,
             apng::copy_image_files,
+            update::app_version,
+            update::check_app_update,
+            update::open_latest_release,
+            update::install_app_update,
             png_meta::inspect_image,
             png_meta::inspect_image_bytes,
         ])
