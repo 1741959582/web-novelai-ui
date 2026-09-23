@@ -11,6 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
+use tauri::{AppHandle, Emitter};
 
 const RAW_FLOOR: f32 = 0.05;
 const FACE_CONF: f32 = 0.35;
@@ -323,25 +324,71 @@ pub fn censor_open_dir() -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CensorDownloadProgress {
+    id: String,
+    title: String,
+    received: u64,
+    total: u64,
+    percent: f64,
+    message: String,
+}
+
+fn emit_download(app: &AppHandle, id: &str, title: &str, received: u64, total: u64) {
+    let percent = if total > 0 {
+        (received as f64 / total as f64 * 100.0).clamp(0.0, 100.0)
+    } else {
+        0.0
+    };
+    let message = if total > 0 {
+        format!("正在下载 {title} {} / {}", bytes_label(received), bytes_label(total))
+    } else if received > 0 {
+        format!("正在下载 {title} {}", bytes_label(received))
+    } else {
+        format!("正在连接 {title}…")
+    };
+    let _ = app.emit(
+        "censor-download",
+        CensorDownloadProgress {
+            id: id.into(),
+            title: title.into(),
+            received,
+            total,
+            percent,
+            message,
+        },
+    );
+}
+
+fn bytes_label(n: u64) -> String {
+    if n >= 1024 * 1024 {
+        format!("{:.1} MB", n as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{} KB", n / 1024)
+    }
+}
+
 #[tauri::command]
-pub async fn censor_download(id: String) -> Result<CensorStatus, String> {
+pub async fn censor_download(app: AppHandle, id: String) -> Result<CensorStatus, String> {
     let spec = builtin(&id).ok_or_else(|| format!("只能下载内置模型，{id} 请手动放进模型目录"))?;
     let dest = models_dir()?.join(spec.file);
     if dest.is_file() && fs::metadata(&dest).map(|meta| meta.len()).unwrap_or(0) > 1024 * 1024 {
+        emit_download(&app, spec.id, spec.title, 1, 1);
         return status();
     }
     let urls: Vec<String> = spec.urls.iter().map(|url| (*url).to_string()).collect();
-    download_to(&urls, &dest).await?;
+    download_to(&app, spec.id, spec.title, &urls, &dest).await?;
     let _ = hub().lock().unwrap_or_else(|err| err.into_inner()).remove(&id);
     status()
 }
 
-async fn download_to(urls: &[String], dest: &Path) -> Result<(), String> {
+async fn download_to(app: &AppHandle, id: &str, title: &str, urls: &[String], dest: &Path) -> Result<(), String> {
     let client = crate::nai::http_client_no_redirect()?;
     let tmp = dest.with_extension("part");
     let mut errors = Vec::new();
     for url in urls {
-        if let Err(err) = fetch_one(&client, url, &tmp).await {
+        if let Err(err) = fetch_one(app, id, title, &client, url, &tmp).await {
             let _ = fs::remove_file(&tmp);
             errors.push(format!("{url}\n{err}"));
             continue;
@@ -365,7 +412,14 @@ async fn download_to(urls: &[String], dest: &Path) -> Result<(), String> {
     Err(format!("模型下载失败。\n{}", errors.join("\n")))
 }
 
-async fn fetch_one(client: &reqwest::Client, start: &str, dest: &Path) -> Result<(), String> {
+async fn fetch_one(
+    app: &AppHandle,
+    id: &str,
+    title: &str,
+    client: &reqwest::Client,
+    start: &str,
+    dest: &Path,
+) -> Result<(), String> {
     let mut url = start.to_string();
     for _ in 0..8 {
         let response = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -391,11 +445,16 @@ async fn fetch_one(client: &reqwest::Client, start: &str, dest: &Path) -> Result
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
+        let total = response.content_length().unwrap_or(0);
         let mut file = fs::File::create(dest).map_err(|e| e.to_string())?;
         let mut stream = response.bytes_stream();
+        let mut received = 0u64;
+        emit_download(app, id, title, 0, total);
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| e.to_string())?;
+            received += chunk.len() as u64;
             std::io::Write::write_all(&mut file, &chunk).map_err(|e| e.to_string())?;
+            emit_download(app, id, title, received, total);
         }
         return Ok(());
     }

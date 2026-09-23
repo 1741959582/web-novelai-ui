@@ -2,6 +2,11 @@
 
 从新到旧。安装包在 [最新发行版](https://github.com/caiweida/web-novelai-ui/releases/latest)。已安装的程序启动后会读到新版本，顶栏可以点「立即更新」。
 
+## [0.1.13](https://github.com/caiweida/web-novelai-ui/releases/tag/v0.1.13)
+
+- 打码模型批量下载时，某一个失败会自动继续下一个。
+- 下载过程显示进度条和已下载大小。
+
 ## [0.1.12](https://github.com/caiweida/web-novelai-ui/releases/tag/v0.1.12)
 
 - 检查更新会显示「检查中」，失败时写出原因，不再点了没反应。

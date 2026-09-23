@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { onMounted, onUnmounted, ref } from "vue";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { censorDownload, censorOpenDir, censorStatus, danbooruStatus, downloadDanbooru, openOutputDir, pickOutputDir, type CensorEngineInfo } from "@/api/tauri";
 import { useAppStore } from "@/stores/app";
 import ClTaggerPanel from "@/components/ClTaggerPanel.vue";
@@ -16,13 +17,24 @@ const tagLib = ref({ downloaded: false, count: 0 });
 const censorEngines = ref<CensorEngineInfo[]>([]);
 const censorDir = ref("");
 const censorBusy = ref("");
+const censorPct = ref(0);
+const censorProgress = ref("");
+let unlistenCensor: UnlistenFn | undefined;
 
 onMounted(async () => {
+  unlistenCensor = await listen<{ percent: number; message: string }>("censor-download", (event) => {
+    censorPct.value = Math.max(0, Math.min(100, Math.round(event.payload.percent)));
+    censorProgress.value = event.payload.message;
+  });
   try {
     tagLib.value = await danbooruStatus();
   } catch {
     /* ignore */
   }
+});
+
+onUnmounted(() => {
+  unlistenCensor?.();
 });
 
 async function loadCensor() {
@@ -42,19 +54,33 @@ async function downloadCensor(id = "") {
     return;
   }
   censorBusy.value = pending[0].id;
+  censorPct.value = 0;
+  const failed: string[] = [];
+  let saved = 0;
   try {
     for (const engine of pending) {
       censorBusy.value = engine.id;
-      message.value = `正在下载 ${engine.title}…`;
-      const status = await censorDownload(engine.id);
-      censorEngines.value = status.engines;
-      censorDir.value = status.dir;
+      censorPct.value = 0;
+      censorProgress.value = `正在下载 ${engine.title}…`;
+      message.value = censorProgress.value;
+      try {
+        const status = await censorDownload(engine.id);
+        censorEngines.value = status.engines;
+        censorDir.value = status.dir;
+        saved += 1;
+        censorPct.value = 100;
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        failed.push(`${engine.title}：${reason.split("\n")[0]}`);
+        message.value = `${engine.title} 下载失败，继续下一个`;
+      }
     }
-    message.value = "打码模型已下载到本机目录";
-  } catch (error) {
-    message.value = error instanceof Error ? error.message : String(error);
+    if (!failed.length) message.value = saved > 1 ? `已下载 ${saved} 个打码模型` : "打码模型已下载到本机目录";
+    else if (saved) message.value = `已下载 ${saved} 个，失败 ${failed.length} 个。${failed.join("；")}`;
+    else message.value = failed.join("；");
   } finally {
     censorBusy.value = "";
+    censorProgress.value = "";
   }
 }
 
@@ -202,6 +228,10 @@ async function save() {
           </button>
         </div>
         <p v-if="!censorEngines.length" class="hint">还没有读到模型列表。</p>
+        <div v-if="censorBusy" class="progress">
+          <span>{{ censorProgress || "下载中…" }}</span>
+          <i :style="{ width: `${Math.max(censorPct ? 4 : 0, censorPct)}%` }" />
+        </div>
         <div class="actions">
           <button class="btn primary" type="button" :disabled="!!censorBusy" @click="downloadCensor()">
             {{ censorBusy ? "下载中…" : "下载未就绪的模型" }}
@@ -310,4 +340,21 @@ async function save() {
 .model b { font-weight: 600; }
 .model span { color: rgba(255,255,255,0.55); font-size: 12px; }
 .note { color: var(--heading); font-size: 13px; margin-top: 16px; }
+.progress {
+  position: relative;
+  min-height: 28px;
+  padding: 6px 8px;
+  border: 1px solid var(--bg3);
+  border-radius: 6px;
+  overflow: hidden;
+  font-size: 12px;
+  color: rgba(255,255,255,0.72);
+}
+.progress i {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 3px;
+  background: #f5f3c2;
+}
 </style>
