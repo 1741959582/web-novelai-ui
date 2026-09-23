@@ -48,6 +48,7 @@ pub fn run() {
             danbooru::danbooru_status,
             danbooru::download_danbooru,
             danbooru::suggest_tags,
+            danbooru::danbooru_semantic_search,
             danbooru::lookup_tags,
             danbooru::add_custom_tag,
             wd_tagger::wd_tag_image,

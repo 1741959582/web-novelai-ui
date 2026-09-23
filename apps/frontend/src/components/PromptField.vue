@@ -197,6 +197,7 @@ onBeforeUnmount(() => {
       @blur="onBlur"
     />
     <div class="bar">
+      <slot name="tools" />
       <button type="button" class="tag-btn" :class="{ on: showTags }" :disabled="!chips.length" @click="showTags = !showTags">
         标签{{ chips.length ? ` ${chips.length}` : "" }}
       </button>
@@ -253,6 +254,8 @@ textarea {
 .bar {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
   margin-top: 6px;
 }
 .tag-btn {

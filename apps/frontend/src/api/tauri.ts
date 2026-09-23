@@ -185,6 +185,23 @@ export function suggestTags(query: string, limit = 8) {
   return invoke<TagSuggestion[]>("suggest_tags", { query, limit });
 }
 
+export interface SemanticTag {
+  tag: string;
+  cnName: string;
+  category: string;
+  count: number;
+  wiki: string;
+}
+
+export function danbooruSemanticSearch(query: {
+  query: string;
+  searchMode?: string;
+  category?: string;
+  showNsfw?: boolean;
+}) {
+  return invoke<SemanticTag[]>("danbooru_semantic_search", { query });
+}
+
 export interface TagLookup {
   tag: string;
   found: boolean;

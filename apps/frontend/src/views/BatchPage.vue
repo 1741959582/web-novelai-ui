@@ -6,6 +6,7 @@ import { useAppStore } from "@/stores/app";
 import { useBatchStore, type BatchJob, type BatchList } from "@/stores/batch";
 import NaiIcon from "@/components/NaiIcon.vue";
 import PromptField from "@/components/PromptField.vue";
+import DanbooruBubble from "@/components/DanbooruBubble.vue";
 import { loadAutoComplete } from "@/utils/promptTools";
 import { RESOLUTION_TABLE } from "@/utils/resolution";
 
@@ -263,7 +264,14 @@ async function start() {
               :enabled="autoComplete"
               placeholder="Character prompt..."
               @update:model-value="store.updateSharedCharacter(c.id, { prompt: $event })"
-            />
+            >
+              <template #tools>
+                <DanbooruBubble
+                  :text="c.prompt"
+                  @apply="store.updateSharedCharacter(c.id, { prompt: $event })"
+                />
+              </template>
+            </PromptField>
             <PromptField
               v-else
               :model-value="c.negativePrompt"
@@ -349,7 +357,11 @@ async function start() {
           </div>
           <div v-if="openId === job.id" class="editor">
             <label>主关键词
-              <PromptField v-model="job.prompt" :enabled="autoComplete" placeholder="主提示词" />
+              <PromptField v-model="job.prompt" :enabled="autoComplete" placeholder="主提示词">
+                <template #tools>
+                  <DanbooruBubble :text="job.prompt" @apply="job.prompt = $event" />
+                </template>
+              </PromptField>
             </label>
             <label>负面
               <PromptField v-model="job.negativePrompt" :enabled="autoComplete" placeholder="lowres, worst quality..." />
@@ -393,7 +405,14 @@ async function start() {
                   :enabled="autoComplete"
                   placeholder="Character prompt..."
                   @update:model-value="store.updateCharacter(job.id, c.id, { prompt: $event })"
-                />
+                >
+                  <template #tools>
+                    <DanbooruBubble
+                      :text="c.prompt"
+                      @apply="store.updateCharacter(job.id, c.id, { prompt: $event })"
+                    />
+                  </template>
+                </PromptField>
                 <PromptField
                   v-else
                   :model-value="c.negativePrompt"

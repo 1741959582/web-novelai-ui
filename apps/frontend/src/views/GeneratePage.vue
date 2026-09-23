@@ -19,6 +19,7 @@ import OpusUsageBar from "@/components/OpusUsageBar.vue";
 import ReferencePanel from "@/components/ReferencePanel.vue";
 import PromptField from "@/components/PromptField.vue";
 import PromptToolbox from "@/components/PromptToolbox.vue";
+import DanbooruBubble from "@/components/DanbooruBubble.vue";
 import { loadAutoComplete } from "@/utils/promptTools";
 
 const store = useAppStore();
@@ -502,7 +503,14 @@ function resetAi() {
           v-model="promptValue"
           :enabled="autoComplete"
           :placeholder="promptTab === 'prompt' ? 'Enter your prompt here...' : 'lowres, worst quality...'"
-        />
+        >
+          <template v-if="promptTab === 'prompt'" #tools>
+            <DanbooruBubble
+              :text="store.params.positivePrompt"
+              @apply="store.params.positivePrompt = $event"
+            />
+          </template>
+        </PromptField>
         <PromptToolbox
           v-model="promptValue"
           v-model:auto-complete="autoComplete"
@@ -568,7 +576,14 @@ function resetAi() {
             :enabled="autoComplete"
             placeholder="Character prompt..."
             @update:model-value="store.updateCharacter(c.id, { prompt: $event })"
-          />
+          >
+            <template #tools>
+              <DanbooruBubble
+                :text="c.prompt"
+                @apply="store.updateCharacter(c.id, { prompt: $event })"
+              />
+            </template>
+          </PromptField>
           <PromptField
             v-else
             :model-value="c.negativePrompt"

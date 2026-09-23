@@ -452,3 +452,84 @@ pub fn add_custom_tag(name: String, cn: String, category: Option<u32>) -> Result
     }
     Ok(to_lookup(&name.replace('_', " "), Some(&tag)))
 }
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SemanticQuery {
+    pub query: String,
+    pub search_mode: Option<String>,
+    pub category: Option<String>,
+    pub show_nsfw: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SemanticTag {
+    pub tag: String,
+    pub cn_name: String,
+    pub category: String,
+    pub count: u64,
+    pub wiki: String,
+}
+
+fn semantic_categories(category: &str) -> Vec<&'static str> {
+    match category {
+        "general" => vec!["General"],
+        "character" => vec!["Character"],
+        "copyright" => vec!["Copyright"],
+        _ => vec!["General", "Character", "Copyright"],
+    }
+}
+
+#[tauri::command]
+pub async fn danbooru_semantic_search(query: SemanticQuery) -> Result<Vec<SemanticTag>, String> {
+    let text = query.query.trim();
+    if text.is_empty() {
+        return Err("先写要找的描述".into());
+    }
+    let mode = query.search_mode.unwrap_or_else(|| "full_scene".into());
+    let category = query.category.unwrap_or_else(|| "all".into());
+    let client = http_client()?;
+    let res = client
+        .post("https://sakizuki-danboorusearch.hf.space/api/search")
+        .header("User-Agent", "Langbai-NovelAI-Studio/1")
+        .json(&serde_json::json!({
+            "query": text,
+            "top_k": 5,
+            "limit": 24,
+            "popularity_weight": 0.15,
+            "show_nsfw": query.show_nsfw.unwrap_or(false),
+            "use_segmentation": true,
+            "search_mode": mode,
+            "target_categories": semantic_categories(&category),
+        }))
+        .send()
+        .await
+        .map_err(format_reqwest)?;
+    let status = res.status();
+    if !status.is_success() {
+        if status.as_u16() == 502 || status.as_u16() == 503 {
+            return Err("标签搜索正在启动，等十几秒再试".into());
+        }
+        return Err(format!("标签搜索失败 HTTP {status}"));
+    }
+    let body: serde_json::Value = res.json().await.map_err(format_reqwest)?;
+    let Some(rows) = body.get("results").and_then(|value| value.as_array()) else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for row in rows {
+        let tag = row.get("tag").and_then(|value| value.as_str()).unwrap_or("").trim();
+        if tag.is_empty() {
+            continue;
+        }
+        out.push(SemanticTag {
+            tag: tag.to_string(),
+            cn_name: row.get("cn_name").and_then(|value| value.as_str()).unwrap_or("").to_string(),
+            category: row.get("category").and_then(|value| value.as_str()).unwrap_or("").to_string(),
+            count: row.get("count").and_then(|value| value.as_u64()).unwrap_or(0),
+            wiki: row.get("wiki").and_then(|value| value.as_str()).unwrap_or("").to_string(),
+        });
+    }
+    Ok(out)
+}
