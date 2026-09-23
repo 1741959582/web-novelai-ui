@@ -1,4 +1,5 @@
 mod apng;
+mod censor;
 mod cl_tagger_local;
 mod danbooru;
 mod gpu;
@@ -9,6 +10,7 @@ mod quicktag;
 mod reference_presets;
 mod reverse_tasks;
 mod store;
+mod tavern;
 mod update;
 mod wd_tagger;
 
@@ -28,6 +30,7 @@ pub fn run() {
             store::history_set_group,
             store::history_arrange_groups,
             store::file_cleaned_images,
+            store::copy_numbered_images,
             store::reveal_in_folder,
             store::account_get,
             store::pick_output_dir,
@@ -76,8 +79,14 @@ pub fn run() {
             apng::apng_clean,
             apng::apng_strip,
             apng::apng_mosaic,
+            censor::censor_status,
+            censor::censor_download,
+            censor::censor_open_dir,
+            censor::censor_apply,
+            censor::censor_save_png,
             apng::apng_restore,
             apng::pick_images,
+            apng::pick_image_folder,
             apng::copy_image_files,
             update::app_version,
             update::check_app_update,
@@ -85,6 +94,14 @@ pub fn run() {
             update::install_app_update,
             png_meta::inspect_image,
             png_meta::inspect_image_bytes,
+            tavern::tavern_read,
+            tavern::tavern_write,
+            tavern::tavern_remove,
+            tavern::tavern_open_dir,
+            tavern::tavern_export_file,
+            tavern::tavern_llm_chat,
+            tavern::tavern_llm_cancel,
+            tavern::tavern_llm_models,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

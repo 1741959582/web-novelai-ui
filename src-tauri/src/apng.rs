@@ -20,7 +20,7 @@ pub struct SavedImage {
     pub data_url: String,
 }
 
-fn decode_data_url(input: &str) -> Result<RgbaImage, String> {
+pub(crate) fn decode_data_url(input: &str) -> Result<RgbaImage, String> {
     let raw = if let Some((_, b64)) = input.split_once("base64,") {
         base64::engine::general_purpose::STANDARD
             .decode(b64.trim())
@@ -350,6 +350,10 @@ fn unique_filename(dir: &Path, name: Option<&str>, ext: &str) -> String {
     format!("{}{ext}", Uuid::new_v4())
 }
 
+pub(crate) fn save_png_image(img: &RgbaImage, label: &str) -> Result<SavedImage, String> {
+    save_bytes(&encode_png(img)?, ".png", Some(label))
+}
+
 fn save_bytes(bytes: &[u8], ext: &str, name: Option<&str>) -> Result<SavedImage, String> {
     let dir = default_output_dir().join("apng");
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -363,6 +367,12 @@ fn save_bytes(bytes: &[u8], ext: &str, name: Option<&str>) -> Result<SavedImage,
             base64::engine::general_purpose::STANDARD.encode(bytes)
         ),
     })
+}
+
+pub(crate) fn clean_png_bytes(path: &Path) -> Result<Vec<u8>, String> {
+    let bytes = fs::read(path).map_err(|e| format!("读取图片失败：{e}"))?;
+    let img = image::load_from_memory(&bytes).map_err(|e| format!("解析图片失败：{e}"))?;
+    encode_png(&strip_metadata(img.to_rgba8()))
 }
 
 fn encode_png(img: &RgbaImage) -> Result<Vec<u8>, String> {
@@ -771,6 +781,80 @@ fn decode_filtered(raw: &[u8], w: u32, h: u32) -> Option<RgbaImage> {
     Some(img)
 }
 
+fn is_image_path(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|ext| ext.to_str()).unwrap_or("").to_ascii_lowercase().as_str(),
+        "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp"
+    )
+}
+
+fn collect_images(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+    if out.len() >= 200 {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut files = Vec::new();
+    let mut dirs = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            dirs.push(path);
+        } else if is_image_path(&path) {
+            files.push(path);
+        }
+    }
+    files.sort_by(|a, b| natural_file_cmp(a, b));
+    dirs.sort_by(|a, b| natural_file_cmp(a, b));
+    for path in files {
+        out.push(path);
+        if out.len() >= 200 {
+            return;
+        }
+    }
+    for path in dirs {
+        collect_images(&path, out);
+        if out.len() >= 200 {
+            return;
+        }
+    }
+}
+
+fn saved_from_path(path: &Path) -> Option<SavedImage> {
+    let bytes = fs::read(path).ok()?;
+    let ext = path.extension().and_then(|item| item.to_str()).unwrap_or("png").to_ascii_lowercase();
+    let mime = match ext.as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        _ => "image/png",
+    };
+    Some(SavedImage {
+        path: path.to_string_lossy().into_owned(),
+        data_url: format!(
+            "data:{mime};base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        ),
+    })
+}
+
+#[tauri::command]
+pub async fn pick_image_folder(app: tauri::AppHandle) -> Result<Vec<SavedImage>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let folder = app.dialog().file().blocking_pick_folder();
+    let Some(folder) = folder else {
+        return Ok(Vec::new());
+    };
+    let Some(root) = folder.into_path().ok() else {
+        return Ok(Vec::new());
+    };
+    let mut files = Vec::new();
+    collect_images(&root, &mut files);
+    Ok(files.iter().filter_map(|path| saved_from_path(path)).collect())
+}
+
 #[tauri::command]
 pub async fn pick_images(app: tauri::AppHandle) -> Result<Vec<SavedImage>, String> {
     use tauri_plugin_dialog::DialogExt;
@@ -807,12 +891,58 @@ pub async fn pick_images(app: tauri::AppHandle) -> Result<Vec<SavedImage>, Strin
             });
         }
     }
+    out.sort_by(|a, b| natural_file_cmp(Path::new(&a.path), Path::new(&b.path)));
     Ok(out)
+}
+
+fn natural_file_cmp(a: &Path, b: &Path) -> std::cmp::Ordering {
+    let an = a.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    let bn = b.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    natural_str_cmp(&an, &bn).then_with(|| an.cmp(&bn))
+}
+
+fn natural_str_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    let mut ia = a.chars().peekable();
+    let mut ib = b.chars().peekable();
+    loop {
+        match (ia.peek().copied(), ib.peek().copied()) {
+            (None, None) => return std::cmp::Ordering::Equal,
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (Some(ca), Some(cb)) if ca.is_ascii_digit() && cb.is_ascii_digit() => {
+                let mut sa = String::new();
+                let mut sb = String::new();
+                while ia.peek().is_some_and(|ch| ch.is_ascii_digit()) {
+                    sa.push(ia.next().unwrap());
+                }
+                while ib.peek().is_some_and(|ch| ch.is_ascii_digit()) {
+                    sb.push(ib.next().unwrap());
+                }
+                let na = sa.trim_start_matches('0');
+                let nb = sb.trim_start_matches('0');
+                let na = if na.is_empty() { "0" } else { na };
+                let nb = if nb.is_empty() { "0" } else { nb };
+                let ord = na.len().cmp(&nb.len()).then_with(|| na.cmp(nb));
+                if ord != std::cmp::Ordering::Equal {
+                    return ord;
+                }
+            }
+            (Some(ca), Some(cb)) => {
+                ia.next();
+                ib.next();
+                let ord = ca.to_ascii_lowercase().cmp(&cb.to_ascii_lowercase());
+                if ord != std::cmp::Ordering::Equal {
+                    return ord;
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::hdrop_bytes;
+    use super::{hdrop_bytes, natural_str_cmp};
+    use std::cmp::Ordering;
 
     #[test]
     fn hdrop_payload_is_wide_and_double_null() {
@@ -826,5 +956,13 @@ mod tests {
             .collect();
         let text = String::from_utf16_lossy(&wide);
         assert!(text.starts_with("C:\\temp\\a.png"));
+    }
+
+    #[test]
+    fn image_names_sort_like_the_folder() {
+        let mut names = vec!["13.png", "2.png", "10.png", "1.png", "03.png"];
+        names.sort_by(|a, b| natural_str_cmp(a, b));
+        assert_eq!(names, vec!["1.png", "2.png", "03.png", "10.png", "13.png"]);
+        assert_eq!(natural_str_cmp("1.png", "10.png"), Ordering::Less);
     }
 }

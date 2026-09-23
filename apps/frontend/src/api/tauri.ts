@@ -559,6 +559,14 @@ export function apngStrip(image: string, name = "") {
   return invoke<SavedImage>("apng_strip", { image, name });
 }
 
+export function copyNumberedImages(items: { path: string; sourcePath: string; name?: string }[], destDir: string) {
+  return invoke<{ moved: number; skipped: number; paths: string[] }>("copy_numbered_images", {
+    items,
+    destDir,
+    dest_dir: destDir,
+  });
+}
+
 export function fileCleanedImages(items: { path: string; sourcePath: string; name?: string }[], destDir: string) {
   return invoke<{ moved: number; skipped: number; paths: string[] }>("file_cleaned_images", {
     items,
@@ -571,12 +579,72 @@ export function apngMosaic(image: string, block = 16) {
   return invoke<SavedImage>("apng_mosaic", { image, block });
 }
 
+export interface CensorEngineInfo {
+  id: string;
+  title: string;
+  present: boolean;
+  kind: string;
+  defaultConf: number;
+  builtin: boolean;
+  file: string;
+}
+
+export interface CensorStatus {
+  dir: string;
+  faceReady: boolean;
+  engines: CensorEngineInfo[];
+}
+
+export interface CensorResult {
+  path: string;
+  dataUrl: string;
+  hits: number;
+  block: number;
+  note: string;
+}
+
+export function censorStatus() {
+  return invoke<CensorStatus>("censor_status");
+}
+
+export function censorDownload(id: string) {
+  return invoke<CensorStatus>("censor_download", { id });
+}
+
+export function censorOpenDir() {
+  return invoke<void>("censor_open_dir");
+}
+
+export function censorSavePng(image: string) {
+  return invoke<SavedImage>("censor_save_png", { image });
+}
+
+export function censorApply(request: {
+  image: string;
+  engines: { id: string; conf: number }[];
+  parts: string[];
+  precise: boolean;
+  faceGuard: boolean;
+  faceGuardMale: boolean;
+  shape: string;
+  mode: string;
+  dilate: number;
+  strength: number;
+  minBlock: number;
+}) {
+  return invoke<CensorResult>("censor_apply", { request });
+}
+
 export function apngRestore(image: string) {
   return invoke<SavedImage[]>("apng_restore", { image });
 }
 
 export function pickImages() {
   return invoke<SavedImage[]>("pick_images");
+}
+
+export function pickImageFolder() {
+  return invoke<SavedImage[]>("pick_image_folder");
 }
 
 export interface AppUpdateInfo {

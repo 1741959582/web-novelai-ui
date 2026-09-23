@@ -3,7 +3,7 @@ import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { NAI_MODELS, NAI_SAMPLERS, NAI_UC_PRESETS, isV4Plus, maxCharacterPrompts } from "@/types/nai";
 import { useAppStore } from "@/stores/app";
-import { useBatchStore, type BatchJob } from "@/stores/batch";
+import { useBatchStore, type BatchJob, type BatchList } from "@/stores/batch";
 import NaiIcon from "@/components/NaiIcon.vue";
 import PromptField from "@/components/PromptField.vue";
 import { loadAutoComplete } from "@/utils/promptTools";
@@ -14,6 +14,7 @@ const store = useBatchStore();
 const router = useRouter();
 const autoComplete = ref(loadAutoComplete());
 const openId = ref("");
+const nameInput = ref<HTMLInputElement | null>(null);
 const added = ref(0);
 const picked = ref<string[]>([]);
 const findText = ref("");
@@ -125,6 +126,36 @@ function goGenerate() {
   void router.push("/");
 }
 
+function listLabel(list: BatchList) {
+  const current = list.id === store.activeListId;
+  const name = current ? store.listName : list.name;
+  const count = current ? store.jobs.length : list.jobs.length;
+  return `${name}（${count}）`;
+}
+
+function onSwitchList(event: Event) {
+  store.switchList((event.target as HTMLSelectElement).value);
+  picked.value = [];
+  openId.value = "";
+}
+
+async function createTask() {
+  store.createList();
+  picked.value = [];
+  openId.value = "";
+  await nextTick();
+  nameInput.value?.focus();
+  nameInput.value?.select();
+}
+
+function removeTask() {
+  const name = store.listName.trim() || "当前任务";
+  if (store.jobs.length && !window.confirm(`删除「${name}」？里面的 ${store.jobs.length} 条任务会一起去掉。`)) return;
+  store.removeList();
+  picked.value = [];
+  openId.value = "";
+}
+
 async function start() {
   const selected = pickedIds.value.length;
   const redoingAll = !selected && !store.pending.length && store.done.length > 0;
@@ -153,6 +184,24 @@ async function start() {
       </button>
       <button v-else class="btn danger" type="button" @click="store.requestStop()">当前完成后停止</button>
     </header>
+
+    <div class="taskbar">
+      <label>任务名称
+        <input
+          ref="nameInput"
+          v-model="store.listName"
+          maxlength="40"
+          :disabled="store.running"
+          placeholder="给这组任务取个名字"
+        />
+      </label>
+      <select :value="store.activeListId" :disabled="store.running" aria-label="切换任务" @change="onSwitchList">
+        <option v-for="list in store.lists" :key="list.id" :value="list.id">{{ listLabel(list) }}</option>
+      </select>
+      <button class="btn" type="button" :disabled="store.running" @click="store.saveList()">保存</button>
+      <button class="btn" type="button" :disabled="store.running" @click="createTask">新建任务</button>
+      <button class="btn" type="button" :disabled="store.running" @click="removeTask">删除任务</button>
+    </div>
 
     <div v-if="store.running || app.busy" class="live">
       <div class="live-img">
@@ -432,8 +481,43 @@ async function start() {
 }
 .top > * { flex: none; white-space: nowrap; }
 .top h2 { margin: 0; font-size: 18px; }
+.taskbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px 8px;
+  flex-wrap: wrap;
+}
+.taskbar label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 240px;
+  min-width: 0;
+  white-space: nowrap;
+}
+.taskbar input,
+.taskbar select {
+  background: var(--bg0);
+  color: inherit;
+  border: 1px solid var(--bg3);
+  border-radius: 8px;
+  padding: 6px 8px;
+}
+.taskbar input { flex: 1; min-width: 120px; }
+.taskbar select { flex: none; max-width: 240px; }
+.taskbar .btn { flex: none; white-space: nowrap; }
 .spacer { flex: 1 0 8px; }
 .queue-head { justify-content: space-between; margin-bottom: 8px; }
+.queue-head .row { flex: none; }
+.queue-head .ghost {
+  flex: none;
+  white-space: nowrap;
+  min-width: 5.5em;
+  padding: 6px 14px;
+  text-align: center;
+}
 .replace-bar {
   display: flex;
   align-items: center;

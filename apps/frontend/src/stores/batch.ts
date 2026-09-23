@@ -38,6 +38,15 @@ export interface BatchDraft {
 }
 
 const STORAGE_KEY = "nai-batch-queue";
+const LISTS_KEY = "nai-batch-lists";
+
+export interface BatchList {
+  id: string;
+  name: string;
+  jobs: BatchJob[];
+  bulkText: string;
+  updatedAt: number;
+}
 
 export function cloneParams(src: Partial<GenerateParams> = {}): GenerateParams {
   return { ...DEFAULT_PARAMS, ...src };
@@ -171,6 +180,11 @@ export const useBatchStore = defineStore("batch", () => {
   const currentId = ref("");
   const focusId = ref("");
   const booted = ref(false);
+  const opened = blankList("任务 1");
+  const lists = ref<BatchList[]>([opened]);
+  const activeListId = ref(opened.id);
+  const listName = ref(opened.name);
+  let applying = false;
 
   const pending = computed(() => jobs.value.filter((job) => job.status === "pending" || job.status === "error"));
   const done = computed(() => jobs.value.filter((job) => job.status === "done"));
@@ -559,45 +573,155 @@ export const useBatchStore = defineStore("batch", () => {
     }
   }
 
+  function note(text: string) {
+    useAppStore().status = text;
+  }
+
+  function snapshotActive() {
+    const id = activeListId.value;
+    if (!id) return;
+    const name = listName.value.trim().slice(0, 40) || "未命名任务";
+    if (listName.value !== name) listName.value = name;
+    lists.value = lists.value.map((list) =>
+      list.id === id
+        ? { ...list, name, jobs: persistable(jobs.value), bulkText: bulkText.value, updatedAt: Date.now() }
+        : list,
+    );
+  }
+
+  function persistLibrary() {
+    if (!booted.value) return;
+    snapshotActive();
+    try {
+      localStorage.setItem(
+        LISTS_KEY,
+        JSON.stringify({ activeId: activeListId.value, lists: lists.value }),
+      );
+    } catch {
+      /* ignore quota */
+    }
+  }
+
+  let previewGen = 0;
+  async function loadPreviews() {
+    const gen = ++previewGen;
+    const listId = activeListId.value;
+    for (const job of [...jobs.value]) {
+      if (!job.path) continue;
+      try {
+        const preview = await readImageDataUrl(job.path);
+        if (gen !== previewGen || activeListId.value !== listId) return;
+        if (!jobs.value.some((item) => item.id === job.id)) continue;
+        patch(job.id, { previewUrl: preview });
+      } catch {
+        /* the row stays usable without a thumbnail */
+      }
+    }
+  }
+
+  function applyList(list: BatchList) {
+    applying = true;
+    activeListId.value = list.id;
+    listName.value = list.name;
+    bulkText.value = list.bulkText || "";
+    jobs.value = list.jobs.map((job) => hydrateJob(job));
+    currentId.value = "";
+    applying = false;
+    void loadPreviews();
+  }
+
+  function saveList() {
+    if (!booted.value) return;
+    persistLibrary();
+    const current = lists.value.find((list) => list.id === activeListId.value);
+    note(`已保存「${current?.name || listName.value}」，共 ${jobs.value.length} 条`);
+  }
+
+  function createList() {
+    if (running.value) return;
+    snapshotActive();
+    const list = blankList(nextListName(lists.value));
+    lists.value = [...lists.value, list];
+    applyList(list);
+    persistLibrary();
+    note(`已新建「${list.name}」，上一组任务已保存`);
+  }
+
+  function switchList(id: string) {
+    if (running.value || id === activeListId.value) return;
+    const next = lists.value.find((list) => list.id === id);
+    if (!next) return;
+    snapshotActive();
+    applyList(next);
+    note(`已切换到「${next.name}」，共 ${jobs.value.length} 条`);
+  }
+
+  function removeList() {
+    if (running.value) return;
+    const name = listName.value.trim() || "当前任务";
+    if (lists.value.length <= 1) {
+      applying = true;
+      jobs.value = [];
+      bulkText.value = "";
+      listName.value = "任务 1";
+      applying = false;
+      persistLibrary();
+      note(`已清空「${name}」`);
+      return;
+    }
+    const rest = lists.value.filter((list) => list.id !== activeListId.value);
+    const next = rest.reduce((best, list) => (list.updatedAt > best.updatedAt ? list : best), rest[0]);
+    lists.value = rest;
+    applyList(next);
+    persistLibrary();
+    note(`已删除「${name}」`);
+  }
+
   async function boot() {
     if (booted.value) return;
-    booted.value = true;
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) return;
-      const parsed = JSON.parse(raw) as BatchJob[];
-      if (!Array.isArray(parsed)) return;
-      jobs.value = parsed.map((job) =>
-        newJob({
-          ...job,
-          params: cloneParams(job.params),
-          characters: cloneCharacters(job.characters?.length ? job.characters : [newCharacter()]),
-          status: job.status === "running" ? "pending" : job.status,
-          previewUrl: "",
-        }),
-      );
-      for (const job of jobs.value) {
-        if (!job.path) continue;
-        try {
-          job.previewUrl = await readImageDataUrl(job.path);
-        } catch {
-          job.previewUrl = "";
+      const saved = readLibrary();
+      if (!saved.lists.length) {
+        const legacy = readLegacyJobs();
+        if (legacy.length) {
+          const migrated = blankList("任务 1");
+          migrated.jobs = legacy;
+          saved.lists = [migrated];
+          saved.activeId = migrated.id;
         }
       }
+      if (!saved.lists.length) {
+        const first = blankList("任务 1");
+        saved.lists = [first];
+        saved.activeId = first.id;
+      }
+      lists.value = saved.lists;
+      const active = saved.lists.find((list) => list.id === saved.activeId) || saved.lists[0];
+      applying = true;
+      activeListId.value = active.id;
+      listName.value = active.name;
+      bulkText.value = active.bulkText || "";
+      jobs.value = active.jobs.map((job) => hydrateJob(job));
+      applying = false;
+      booted.value = true;
+      persistLibrary();
+      localStorage.removeItem(STORAGE_KEY);
+      await loadPreviews();
     } catch {
+      booted.value = true;
+      const first = blankList("任务 1");
+      lists.value = [first];
+      activeListId.value = first.id;
+      listName.value = first.name;
       jobs.value = [];
     }
   }
 
   watch(
-    jobs,
-    (list) => {
-      if (!booted.value) return;
-      try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(persistable(list)));
-      } catch {
-        /* ignore quota */
-      }
+    [jobs, listName, bulkText],
+    () => {
+      if (!booted.value || applying) return;
+      persistLibrary();
     },
     { deep: true },
   );
@@ -616,6 +740,9 @@ export const useBatchStore = defineStore("batch", () => {
     stopRequested,
     currentId,
     focusId,
+    lists,
+    activeListId,
+    listName,
     pending,
     done,
     current,
@@ -642,8 +769,57 @@ export const useBatchStore = defineStore("batch", () => {
     sendToGenerate,
     requestStop,
     runQueue,
+    saveList,
+    createList,
+    switchList,
+    removeList,
   };
 });
+
+function blankList(name: string): BatchList {
+  return { id: crypto.randomUUID(), name, jobs: [], bulkText: "", updatedAt: Date.now() };
+}
+
+function nextListName(lists: BatchList[]) {
+  const used = new Set(lists.map((list) => list.name));
+  let n = lists.length + 1;
+  while (used.has(`任务 ${n}`)) n += 1;
+  return `任务 ${n}`;
+}
+
+function hydrateJob(job: BatchJob) {
+  return newJob({
+    ...job,
+    params: cloneParams(job.params),
+    characters: cloneCharacters(job.characters?.length ? job.characters : [newCharacter()]),
+    status: job.status === "running" ? "pending" : job.status,
+    previewUrl: "",
+  });
+}
+
+function readLegacyJobs(): BatchJob[] {
+  const raw = localStorage.getItem(STORAGE_KEY);
+  if (!raw) return [];
+  const parsed = JSON.parse(raw) as BatchJob[];
+  return Array.isArray(parsed) ? parsed : [];
+}
+
+function readLibrary(): { activeId: string; lists: BatchList[] } {
+  const raw = localStorage.getItem(LISTS_KEY);
+  if (!raw) return { activeId: "", lists: [] };
+  const parsed = JSON.parse(raw) as { activeId?: string; lists?: BatchList[] };
+  if (!parsed || !Array.isArray(parsed.lists)) return { activeId: "", lists: [] };
+  const next = parsed.lists
+    .filter((item) => item && typeof item.id === "string" && Array.isArray(item.jobs))
+    .map((item) => ({
+      id: item.id,
+      name: String(item.name || "未命名任务").slice(0, 40),
+      jobs: item.jobs,
+      bulkText: typeof item.bulkText === "string" ? item.bulkText : "",
+      updatedAt: Number(item.updatedAt) || Date.now(),
+    }));
+  return { activeId: typeof parsed.activeId === "string" ? parsed.activeId : "", lists: next };
+}
 
 if (import.meta.hot) {
   import.meta.hot.accept(acceptHMRUpdate(useBatchStore, import.meta.hot));

@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
-import { danbooruStatus, downloadDanbooru, openOutputDir, pickOutputDir } from "@/api/tauri";
+import { censorDownload, censorOpenDir, censorStatus, danbooruStatus, downloadDanbooru, openOutputDir, pickOutputDir, type CensorEngineInfo } from "@/api/tauri";
 import { useAppStore } from "@/stores/app";
 import ClTaggerPanel from "@/components/ClTaggerPanel.vue";
 import NaiIcon from "@/components/NaiIcon.vue";
 
-type Tab = "api" | "storage" | "tags" | "tagger" | "perf" | "about";
+type Tab = "api" | "storage" | "tags" | "tagger" | "censor" | "perf" | "about";
 
 const store = useAppStore();
 const tab = ref<Tab>("api");
@@ -13,6 +13,9 @@ const tokenDraft = ref("");
 const message = ref("");
 const tagBusy = ref(false);
 const tagLib = ref({ downloaded: false, count: 0 });
+const censorEngines = ref<CensorEngineInfo[]>([]);
+const censorDir = ref("");
+const censorBusy = ref("");
 
 onMounted(async () => {
   try {
@@ -21,6 +24,39 @@ onMounted(async () => {
     /* ignore */
   }
 });
+
+async function loadCensor() {
+  try {
+    const status = await censorStatus();
+    censorEngines.value = status.engines;
+    censorDir.value = status.dir;
+  } catch (error) {
+    message.value = error instanceof Error ? error.message : String(error);
+  }
+}
+
+async function downloadCensor(id = "") {
+  const pending = censorEngines.value.filter((engine) => !engine.present && (!id || engine.id === id));
+  if (!pending.length) {
+    message.value = "打码模型都已就绪";
+    return;
+  }
+  censorBusy.value = pending[0].id;
+  try {
+    for (const engine of pending) {
+      censorBusy.value = engine.id;
+      message.value = `正在下载 ${engine.title}…`;
+      const status = await censorDownload(engine.id);
+      censorEngines.value = status.engines;
+      censorDir.value = status.dir;
+    }
+    message.value = "打码模型已下载到本机目录";
+  } catch (error) {
+    message.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    censorBusy.value = "";
+  }
+}
 
 async function downloadTags() {
   if (tagBusy.value) return;
@@ -74,6 +110,10 @@ async function save() {
       <button type="button" :class="{ on: tab === 'tagger' }" @click="tab = 'tagger'">
         <NaiIcon name="diamond" :size="16" />
         <span>本地打标</span>
+      </button>
+      <button type="button" :class="{ on: tab === 'censor' }" @click="tab = 'censor'; loadCensor()">
+        <NaiIcon name="folder" :size="16" />
+        <span>打码模型</span>
       </button>
       <button type="button" :class="{ on: tab === 'perf' }" @click="tab = 'perf'">
         <NaiIcon name="sparkle" :size="16" />
@@ -149,6 +189,27 @@ async function save() {
       <div v-else-if="tab === 'tagger'" class="card">
         <h2>本地打标</h2>
         <ClTaggerPanel />
+      </div>
+
+      <div v-else-if="tab === 'censor'" class="card">
+        <h2>打码模型</h2>
+        <p class="hint">和安装包一样放在 GitHub Release 上，不打包进程序。下载后保存到本机打码目录，打马赛克页会直接使用。</p>
+        <div v-for="engine in censorEngines" :key="engine.id" class="model">
+          <b>{{ engine.title }}</b>
+          <span>{{ engine.present ? "已就绪" : "未下载" }}</span>
+          <button class="btn" type="button" :disabled="!!censorBusy || engine.present" @click="downloadCensor(engine.id)">
+            {{ censorBusy === engine.id ? "下载中…" : "下载" }}
+          </button>
+        </div>
+        <p v-if="!censorEngines.length" class="hint">还没有读到模型列表。</p>
+        <div class="actions">
+          <button class="btn primary" type="button" :disabled="!!censorBusy" @click="downloadCensor()">
+            {{ censorBusy ? "下载中…" : "下载未就绪的模型" }}
+          </button>
+          <button class="btn" type="button" @click="censorOpenDir()">打开模型目录</button>
+          <button class="btn" type="button" @click="loadCensor()">刷新</button>
+        </div>
+        <p class="hint">{{ censorDir }}</p>
       </div>
 
       <div v-else-if="tab === 'perf'" class="card">
@@ -235,6 +296,16 @@ async function save() {
   gap: 10px;
 }
 .check { display: flex; gap: 8px; align-items: center; margin: 8px 0; }
-.actions { margin-top: 8px; }
+.actions { margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap; }
+.model {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--bg3);
+}
+.model b { font-weight: 600; }
+.model span { color: rgba(255,255,255,0.55); font-size: 12px; }
 .note { color: var(--heading); font-size: 13px; margin-top: 16px; }
 </style>

@@ -1,6 +1,6 @@
 {
   "name": "web-novelai-ui",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "private": true,
   "description": "NAI Studio Web UI",
   "type": "module",

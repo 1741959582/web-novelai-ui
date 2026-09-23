@@ -1012,6 +1012,34 @@ pub fn file_cleaned_images(items: Vec<FiledImage>, dest_dir: Option<String>) -> 
 }
 
 #[tauri::command]
+pub fn copy_numbered_images(items: Vec<FiledImage>, dest_dir: String) -> Result<FiledImagesResult, String> {
+    let dest_dir = PathBuf::from(dest_dir.trim());
+    if dest_dir.as_os_str().is_empty() {
+        return Err("先选择目录".into());
+    }
+    fs::create_dir_all(&dest_dir).map_err(|e| format!("无法创建文件夹 {}：{e}", dest_dir.display()))?;
+    let mut moved = 0u32;
+    let mut skipped = 0u32;
+    let mut paths = Vec::with_capacity(items.len());
+    for item in items {
+        let src = PathBuf::from(&item.path);
+        if !src.is_file() {
+            skipped += 1;
+            paths.push(String::new());
+            continue;
+        }
+        let stem = ordered_stem(&item.name);
+        let stem = if stem.is_empty() { "mosaic".to_string() } else { stem };
+        let dest = unique_path(&dest_dir, &stem, "png");
+        let bytes = crate::apng::clean_png_bytes(&src)?;
+        fs::write(&dest, bytes).map_err(|e| format!("保存到 {} 失败：{e}", dest.display()))?;
+        moved += 1;
+        paths.push(dest.to_string_lossy().into_owned());
+    }
+    Ok(FiledImagesResult { moved, skipped, paths })
+}
+
+#[tauri::command]
 pub fn reveal_in_folder(path: String) -> Result<(), String> {
     let file = PathBuf::from(&path);
     if !file.exists() {

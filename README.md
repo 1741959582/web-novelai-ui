@@ -6,12 +6,12 @@
 
 **[GitHub 最新发行版](https://github.com/caiweida/web-novelai-ui/releases/latest)**
 
-以下直链对应 **[v0.1.9](https://github.com/caiweida/web-novelai-ui/releases/tag/v0.1.9)**；后续版本请使用上面的「最新发行版」。
+以下直链对应 **[v0.1.10](https://github.com/caiweida/web-novelai-ui/releases/tag/v0.1.10)**；后续版本请使用上面的「最新发行版」。
 
 | 平台 | 选择安装包 | 使用说明 |
 | --- | --- | --- |
-| Windows x64 · 安装版 | [Setup.exe](https://github.com/caiweida/web-novelai-ui/releases/download/v0.1.9/NAI-Studio-Web-UI-Setup-0.1.9.exe) | 长期使用建议选这个；安装向导、开始菜单快捷方式 |
-| Windows x64 · 便携版 | [便携版.zip](https://github.com/caiweida/web-novelai-ui/releases/download/v0.1.9/NAI-Studio-Web-UI-0.1.9-portable.zip) | 解压后双击 `web-novelai-ui.exe`；更新时下载新包替换整个文件夹 |
+| Windows x64 · 安装版 | [Setup.exe](https://github.com/caiweida/web-novelai-ui/releases/download/v0.1.10/NAI-Studio-Web-UI-Setup-0.1.10.exe) | 长期使用建议选这个；安装向导、开始菜单快捷方式 |
+| Windows x64 · 便携版 | [便携版.zip](https://github.com/caiweida/web-novelai-ui/releases/download/v0.1.10/NAI-Studio-Web-UI-0.1.10-portable.zip) | 解压后双击 `web-novelai-ui.exe`；更新时下载新包替换整个文件夹 |
 
 需要 Windows 10 及以上。系统没有 WebView2 时，安装版会提示安装。第一次打开按向导填写 NovelAI Token。设置和生成的图片保存在本机，不在安装包旁边。启动后会读取 GitHub Release，有新版本时顶栏可以一键下载安装包。
 
@@ -128,13 +128,29 @@ WD 走公开空间，一般不用额外填写。CL 若已在设置里启用本�
 
 ![记录](docs/assets/guide/records.jpg)
 
-## 后期、酒馆
+## 酒馆
 
-菜单里有这两项，页面还是占位，云端超分、Director Tools 和酒馆对话生图尚未接入。
+和角色卡对话，边聊边用 NovelAI 出插图。对话模型支持 DeepSeek、xAI（Grok）以及任意 OpenAI 兼容接口。
+
+1. 左侧「接口」选择 DeepSeek 或 xAI，填入 API Key，可点「获取列表」选模型。Key 只保存在本机，请求走「设置」里的代理。
+2. 「角色卡」导入 SillyTavern 的 PNG / JSON 角色卡（V1/V2/V3，含卡内世界书），也可以新建。可导出为 PNG 或 JSON 卡。
+3. 「角色tag」预载角色的固定外貌提示词（对应 NAI V4+ 的角色提示词框），勾选「出场」即可在插图中使用。可从生成页一键导入。
+4. 「画风」预载画师串、质量词等，出图时写进画风提示词。
+5. 右侧插图栏选择出图方式：
+   - **手动**：点消息上的 🎨 让 AI 构思提示词，✍️ 手写提示词；
+   - **确认后生图**：每次回复后 AI 自动写好提示词，检查修改后点「生成插图」；
+   - **全自动**：每次回复后自动构思并出图。
+6. 出图使用生成页当前的模型、采样器、步数和 CFG；尺寸可以让 AI 按构图选横竖，或跟随生成页。
+
+角色卡编辑里可以设置默认出场角色和默认画风，导出卡片时会一起写入 `extensions.nai_studio`，别人导入后直接可用。聊天支持流式输出、停止、重新生成与左右切换回复、编辑和删除消息、多个对话存档、世界书关键词触发、推理模型思考过程显示。
+
+酒馆数据保存在用户数据目录下的 `langbai-novelai-studio/tavern/`。
+
+## 后期
+
+菜单里有这一项，页面还是占位，云端超分和 Director Tools 尚未接入。
 
 ![后期占位页](docs/assets/guide/postprocess.jpg)
-
-![酒馆占位页](docs/assets/guide/tavern.jpg)
 
 ## 设置
 
