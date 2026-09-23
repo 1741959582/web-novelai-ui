@@ -15,12 +15,14 @@ const router = useRouter();
 const autoComplete = ref(loadAutoComplete());
 const openId = ref("");
 const added = ref(0);
+const picked = ref<string[]>([]);
+const findText = ref("");
+const replaceText = ref("");
 const charTab = ref<Record<string, "prompt" | "uc">>({});
 const maxShared = computed(() => maxCharacterPrompts(app.params.model));
 const canShared = computed(() => isV4Plus(app.params.model));
 
 const livePreview = computed(() => app.genPreview || app.previewUrl);
-const canRun = computed(() => !store.running && !app.busy && store.pending.length > 0);
 const progress = computed(() => Math.min(1, Math.max(0, app.genProgress)));
 const sizeOptions = computed(() => {
   const seen = new Set<string>();
@@ -62,6 +64,42 @@ onMounted(() => {
 
 watch(() => store.focusId, (id) => revealJob(id));
 
+const pickedIds = computed(() => picked.value.filter((id) => store.jobs.some((job) => job.id === id)));
+const allPicked = computed(() => store.jobs.length > 0 && pickedIds.value.length === store.jobs.length);
+const canRun = computed(() => {
+  if (store.running || app.busy) return false;
+  if (pickedIds.value.length) return true;
+  return store.pending.length > 0 || store.done.length > 0;
+});
+const startLabel = computed(() => {
+  if (pickedIds.value.length) return `重新生成已选（${pickedIds.value.length}）`;
+  if (!store.pending.length && store.done.length) return "重新生成";
+  return "开始排队生成";
+});
+
+function selectAll() {
+  picked.value = store.jobs.map((job) => job.id);
+}
+
+function togglePick(id: string) {
+  picked.value = picked.value.includes(id) ? picked.value.filter((item) => item !== id) : [...picked.value, id];
+}
+
+function replaceSelected() {
+  const result = store.replacePrompts(pickedIds.value, findText.value, replaceText.value);
+  if (!findText.value.trim()) {
+    app.status = "先填写要替换的提示词";
+    return;
+  }
+  if (!pickedIds.value.length) {
+    app.status = "先勾选要替换的任务，或点全选";
+    return;
+  }
+  app.status = result.hits
+    ? `已在 ${result.jobs} 条任务里把「${findText.value.trim()}」替换成「${replaceText.value.trim() || "空"}」，共 ${result.hits} 处`
+    : "选中的任务里没有这个提示词";
+}
+
 function addBulk() {
   added.value = store.addFromBulk();
   app.status = added.value ? `已加入 ${added.value} 条任务` : "没有解析到任务";
@@ -88,8 +126,17 @@ function goGenerate() {
 }
 
 async function start() {
-  await store.runQueue();
-  if (store.done.length && !store.pending.length) app.status = `批量完成，共 ${store.done.length} 张`;
+  const selected = pickedIds.value.length;
+  const redoingAll = !selected && !store.pending.length && store.done.length > 0;
+  await store.runQueue(pickedIds.value);
+  if (store.jobs.some((job) => job.status === "error")) return;
+  if (selected) {
+    app.status = `已重新生成已选的 ${selected} 条`;
+    return;
+  }
+  if (store.done.length && !store.pending.length) {
+    app.status = redoingAll ? `已重新生成 ${store.done.length} 张` : `批量完成，共 ${store.done.length} 张`;
+  }
 }
 </script>
 
@@ -102,7 +149,7 @@ async function start() {
       <button class="btn" type="button" :disabled="store.running" @click="store.importCurrent()">导入当前生成页</button>
       <button class="btn" type="button" :disabled="store.running" @click="store.addEmpty()">加空任务</button>
       <button v-if="!store.running" class="btn primary" type="button" :disabled="!canRun" @click="start">
-        开始排队生成
+        {{ startLabel }}
       </button>
       <button v-else class="btn danger" type="button" @click="store.requestStop()">当前完成后停止</button>
     </header>
@@ -204,6 +251,14 @@ async function start() {
             <button class="ghost" type="button" :disabled="store.running" @click="store.clearAll()">清空</button>
           </div>
         </div>
+        <div v-if="store.jobs.length" class="replace-bar">
+          <button class="ghost" type="button" :disabled="store.running || allPicked" @click="selectAll">全选</button>
+          <button class="ghost" type="button" :disabled="store.running || !pickedIds.length" @click="picked = []">取消</button>
+          <span class="hint">已选 {{ pickedIds.length }}</span>
+          <input v-model="findText" :disabled="store.running" placeholder="要替换的提示词" />
+          <input v-model="replaceText" :disabled="store.running" placeholder="替换成" @keydown.enter.prevent="replaceSelected" />
+          <button class="btn" type="button" :disabled="store.running || !pickedIds.length || !findText.trim()" @click="replaceSelected">替换</button>
+        </div>
         <div class="queue-scroll">
         <p v-if="!store.jobs.length" class="empty">还没有任务。左边贴主词后点「加入队列」，或从生成页导入一组。</p>
         <article
@@ -211,8 +266,17 @@ async function start() {
           :id="`batch-job-${job.id}`"
           :key="job.id"
           class="job"
-          :class="[job.status, { open: openId === job.id }]"
+          :class="[job.status, { open: openId === job.id, picked: pickedIds.includes(job.id) }]"
         >
+          <div class="job-line">
+          <input
+            class="pick"
+            type="checkbox"
+            :checked="pickedIds.includes(job.id)"
+            :disabled="store.running"
+            :aria-label="`选择任务 ${i + 1}`"
+            @change="togglePick(job.id)"
+          />
           <button class="job-main" type="button" @click="toggle(job)">
             <img v-if="job.previewUrl" :src="job.previewUrl" alt="" />
             <span v-else class="ph">{{ i + 1 }}</span>
@@ -226,6 +290,7 @@ async function start() {
             </div>
             <em>{{ statusLabel(job) }}</em>
           </button>
+          </div>
           <div class="job-acts">
             <button class="ghost" type="button" :disabled="store.running" title="上移" @click="store.move(job.id, -1)">↑</button>
             <button class="ghost" type="button" :disabled="store.running" title="下移" @click="store.move(job.id, 1)">↓</button>
@@ -369,6 +434,29 @@ async function start() {
 .top h2 { margin: 0; font-size: 18px; }
 .spacer { flex: 1 0 8px; }
 .queue-head { justify-content: space-between; margin-bottom: 8px; }
+.replace-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.replace-bar input {
+  flex: 1 1 140px;
+  min-width: 120px;
+  background: var(--bg0);
+  color: inherit;
+  border: 1px solid var(--bg3);
+  border-radius: 8px;
+  padding: 6px 8px;
+}
+.job-line {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+}
+.pick { margin-left: 8px; accent-color: var(--heading); }
+.job.picked { border-color: var(--heading); }
 .hint {
   color: var(--muted);
   font-size: 12px;

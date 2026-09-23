@@ -220,7 +220,7 @@ pub async fn inspect_image_bytes(base64_data: String) -> Result<MetadataReport, 
     .map_err(|e| e.to_string())?
 }
 
-fn inspect_bytes(bytes: &[u8]) -> Result<MetadataReport, String> {
+pub(crate) fn inspect_bytes(bytes: &[u8]) -> Result<MetadataReport, String> {
     if bytes.len() < 8 || &bytes[..8] != b"\x89PNG\r\n\x1a\n" {
         return Ok(empty_report());
     }

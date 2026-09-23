@@ -13,6 +13,7 @@ import {
   historyGroupDelete,
   historyGroupRename,
   historyGroupsList,
+  historyImportFolder,
   historyList,
   historySetGroup,
   historyArrangeGroups,
@@ -403,6 +404,14 @@ export const useAppStore = defineStore("app", () => {
     sessions.value = await sessionsList();
     if (selectedHistoryGroupId.value === id) selectedHistoryGroupId.value = "";
     status.value = "已删除分组，图片已移回输出目录";
+  }
+
+  async function importMetadataFolder() {
+    const gid = selectedHistoryGroupId.value;
+    const groupId = gid && gid !== "__ungrouped" ? gid : "";
+    const result = await historyImportFolder(groupId);
+    if (!result.cancelled) history.value = await historyList();
+    return result;
   }
 
   async function setHistoryItemGroup(id: string, groupId: string) {
@@ -1179,6 +1188,7 @@ export const useAppStore = defineStore("app", () => {
     createHistoryGroup,
     renameHistoryGroup,
     deleteHistoryGroup,
+    importMetadataFolder,
     setHistoryItemGroup,
     arrangeHistoryGroups,
     copyHistoryImage,

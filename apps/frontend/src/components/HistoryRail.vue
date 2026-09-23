@@ -20,6 +20,7 @@ const arranging = ref(false);
 const busyId = ref("");
 const picked = ref<string[]>([]);
 const sending = ref(false);
+const importing = ref(false);
 let pickAnchor = "";
 
 const sendTargets: { id: ApngTab; label: string }[] = [
@@ -188,6 +189,38 @@ async function sendPicked(target: ApngTab) {
   }
 }
 
+async function importFolder() {
+  if (importing.value) return;
+  importing.value = true;
+  store.status = "正在扫描文件夹里的图片…";
+  try {
+    const result = await store.importMetadataFolder();
+    if (result.cancelled) {
+      store.status = "已取消选择文件夹";
+      return;
+    }
+    if (!result.scanned) {
+      store.status = "这个文件夹里没有 PNG。";
+      return;
+    }
+    if (!result.imported && result.already) {
+      store.status = `扫描了 ${result.scanned} 张，${result.already} 张已经在历史里。`;
+      return;
+    }
+    if (!result.imported) {
+      store.status = `扫描了 ${result.scanned} 张，没有带元数据的图片。`;
+      return;
+    }
+    const extra = result.skipped ? `，跳过 ${result.skipped} 张没有元数据的` : "";
+    const dup = result.already ? `，${result.already} 张已在历史里` : "";
+    store.status = `已导入 ${result.imported} 张带元数据的图片${extra}${dup}。`;
+  } catch (e) {
+    store.status = e instanceof Error ? e.message : String(e);
+  } finally {
+    importing.value = false;
+  }
+}
+
 async function sendToBatch() {
   const chosen = items.value.filter((item) => picked.value.includes(item.id));
   if (!chosen.length || sending.value) return;
@@ -197,7 +230,7 @@ async function sendToBatch() {
     const count = await batch.addFromHistory(chosen);
     await router.push("/batch");
     store.status = count
-      ? `已加入 ${count} 条批量任务，展开后可以改关键词`
+      ? `已加入 ${count} 条批量任务，图片里的角色提示词也写进了对应任务`
       : "没有可导入的图片";
     if (count) picked.value = [];
   } catch (e) {
@@ -284,23 +317,33 @@ async function deleteItem(item: HistoryItem) {
         </div>
       </div>
 
-      <div v-if="items.length" class="pick-bar">
-        <div class="pick-head">
+      <div class="pick-bar">
+        <div v-if="items.length" class="pick-head">
           <span>已选 {{ picked.length }}</span>
           <button type="button" class="ghost" @click="selectVisible">全选</button>
           <button type="button" class="ghost" :disabled="!picked.length" @click="picked = []">取消</button>
         </div>
         <div class="pick-actions">
           <button
-            v-for="target in sendTargets"
-            :key="target.id"
             type="button"
-            :disabled="!picked.length || sending"
-            @click="sendPicked(target.id)"
+            :disabled="importing"
+            title="导入所选文件夹及其子文件夹里所有带元数据的图片"
+            @click="importFolder"
           >
-            {{ target.label }}
+            {{ importing ? "正在扫描…" : "导入文件夹" }}
           </button>
-          <button type="button" :disabled="!picked.length || sending" @click="sendToBatch">导入批量</button>
+          <template v-if="items.length">
+            <button
+              v-for="target in sendTargets"
+              :key="target.id"
+              type="button"
+              :disabled="!picked.length || sending"
+              @click="sendPicked(target.id)"
+            >
+              {{ target.label }}
+            </button>
+            <button type="button" :disabled="!picked.length || sending" @click="sendToBatch">导入批量</button>
+          </template>
         </div>
       </div>
 

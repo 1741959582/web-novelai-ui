@@ -465,9 +465,14 @@ pub fn apng_clean(image: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn apng_strip(image: String) -> Result<SavedImage, String> {
+pub fn apng_strip(image: String, name: Option<String>) -> Result<SavedImage, String> {
     let img = limit_side(decode_data_url(&image)?);
-    save_bytes(&encode_png(&img)?, ".png", Some("cleaned"))
+    let label = name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("cleaned");
+    save_bytes(&encode_png(&img)?, ".png", Some(label))
 }
 
 #[tauri::command]

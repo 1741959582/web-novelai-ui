@@ -341,10 +341,164 @@ pub fn list_history() -> Vec<HistoryItem> {
 pub fn delete_history(id: &str) -> Result<(), String> {
     let mut data = load_file();
     if let Some(item) = data.history.iter().find(|h| h.id == id) {
-        let _ = fs::remove_file(&item.path);
+        let path = PathBuf::from(&item.path);
+        if managed_image(&path) {
+            let _ = fs::remove_file(path);
+        }
     }
     data.history.retain(|h| h.id != id);
     save_file(&data)
+}
+
+fn managed_image(path: &Path) -> bool {
+    let Ok(path) = path.canonicalize() else {
+        return false;
+    };
+    let output = default_output_dir();
+    if output.canonicalize().ok().is_some_and(|dir| path.starts_with(dir)) {
+        return true;
+    }
+    data_dir()
+        .ok()
+        .and_then(|dir| dir.canonicalize().ok())
+        .is_some_and(|dir| path.starts_with(&dir))
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryFolderImport {
+    pub imported: u32,
+    pub skipped: u32,
+    pub already: u32,
+    pub scanned: u32,
+    pub cancelled: bool,
+}
+
+fn png_pixel_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 24 || &bytes[..8] != b"\x89PNG\r\n\x1a\n" || &bytes[12..16] != b"IHDR" {
+        return None;
+    }
+    let width = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
+    let height = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
+    if width == 0 || height == 0 {
+        None
+    } else {
+        Some((width, height))
+    }
+}
+
+fn collect_pngs(dir: &Path, out: &mut Vec<PathBuf>, depth: u32) {
+    if depth > 8 || out.len() >= 4000 {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_pngs(&path, out, depth + 1);
+            continue;
+        }
+        let png = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("png"));
+        if png {
+            out.push(path);
+        }
+    }
+}
+
+fn same_history_path(stored: &str, path: &Path) -> bool {
+    let stored_path = Path::new(stored);
+    stored_path == path
+        || stored_path
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&path.to_string_lossy())
+}
+
+fn import_folder_metadata(dir: &Path, group_id: &str) -> Result<HistoryFolderImport, String> {
+    let mut files = Vec::new();
+    collect_pngs(dir, &mut files, 0);
+    files.sort_by(|a, b| {
+        let am = fs::metadata(a).and_then(|meta| meta.modified()).ok();
+        let bm = fs::metadata(b).and_then(|meta| meta.modified()).ok();
+        bm.cmp(&am)
+    });
+    let mut data = load_file();
+    let group_id = if data.history_groups.iter().any(|group| group.id == group_id) {
+        group_id.to_string()
+    } else {
+        String::new()
+    };
+    let mut imported = 0u32;
+    let mut skipped = 0u32;
+    let mut already = 0u32;
+    let scanned = files.len() as u32;
+    let now = chrono::Local::now().to_rfc3339();
+    let mut fresh = Vec::new();
+    for path in files {
+        let len = fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+        if len < 32 || len > 80 * 1024 * 1024 {
+            skipped += 1;
+            continue;
+        }
+        if data.history.iter().any(|item| same_history_path(&item.path, &path))
+            || fresh.iter().any(|item: &HistoryItem| same_history_path(&item.path, &path))
+        {
+            already += 1;
+            continue;
+        }
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                skipped += 1;
+                continue;
+            }
+        };
+        let report = match crate::png_meta::inspect_bytes(&bytes) {
+            Ok(report) if report.has_metadata => report,
+            _ => {
+                skipped += 1;
+                continue;
+            }
+        };
+        let (width, height) = match (report.width, report.height) {
+            (Some(w), Some(h)) if w > 0 && h > 0 => (w, h),
+            _ => png_pixel_size(&bytes).unwrap_or((0, 0)),
+        };
+        fresh.push(HistoryItem {
+            id: Uuid::new_v4().to_string(),
+            path: path.to_string_lossy().into_owned(),
+            created_at: now.clone(),
+            model: report.model,
+            prompt: report.prompt,
+            negative_prompt: report.negative,
+            seed: report.seed.unwrap_or(0),
+            width,
+            height,
+            steps: report.steps.unwrap_or(0),
+            sampler: report.sampler,
+            kind: if report.kind.is_empty() { "import".into() } else { report.kind },
+            session_id: String::new(),
+            group_id: group_id.clone(),
+        });
+        imported += 1;
+    }
+    if !fresh.is_empty() {
+        fresh.append(&mut data.history);
+        fresh.truncate(500);
+        data.history = fresh;
+        save_file(&data)?;
+    }
+    Ok(HistoryFolderImport {
+        imported,
+        skipped,
+        already,
+        scanned,
+        cancelled: false,
+    })
 }
 
 fn unique_path(dir: &Path, name: &str, ext: &str) -> PathBuf {
@@ -502,6 +656,28 @@ pub fn settings_save(settings: AppSettings) -> Result<AppSettings, String> {
 #[tauri::command]
 pub fn history_list() -> Vec<HistoryItem> {
     list_history()
+}
+
+#[tauri::command]
+pub async fn history_import_folder(app: AppHandle, group_id: Option<String>) -> Result<HistoryFolderImport, String> {
+    let folder = app
+        .dialog()
+        .file()
+        .set_title("选择含有元数据图片的文件夹")
+        .blocking_pick_folder();
+    let Some(folder) = folder.and_then(|picked| picked.into_path().ok()) else {
+        return Ok(HistoryFolderImport {
+            imported: 0,
+            skipped: 0,
+            already: 0,
+            scanned: 0,
+            cancelled: true,
+        });
+    };
+    let group_id = group_id.unwrap_or_default();
+    tauri::async_runtime::spawn_blocking(move || import_folder_metadata(&folder, &group_id))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -719,6 +895,8 @@ pub fn history_arrange_groups() -> Result<ArrangeGroupsResult, String> {
 pub struct FiledImage {
     pub path: String,
     pub source_path: String,
+    #[serde(default)]
+    pub name: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -748,6 +926,20 @@ fn folder_for_source(data: &PersistFile, source_path: &str) -> PathBuf {
         }
     }
     default_output_dir()
+}
+
+fn ordered_stem(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c.is_control() || r#"<>:"/\|?*"#.contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    cleaned.trim().trim_matches('.').trim().to_string()
 }
 
 fn cleaned_stem(source_path: &str) -> String {
@@ -794,7 +986,13 @@ pub fn file_cleaned_images(items: Vec<FiledImage>, dest_dir: Option<String>) -> 
         };
         fs::create_dir_all(&dest_dir)
             .map_err(|e| format!("无法创建文件夹 {}：{e}", dest_dir.display()))?;
-        let dest = unique_path(&dest_dir, &cleaned_stem(&item.source_path), "png");
+        let stem = ordered_stem(&item.name);
+        let stem = if stem.is_empty() {
+            cleaned_stem(&item.source_path)
+        } else {
+            stem
+        };
+        let dest = unique_path(&dest_dir, &stem, "png");
         if paths_eq(&item.path, &dest.to_string_lossy()) {
             paths.push(dest.to_string_lossy().into_owned());
             continue;

@@ -37,6 +37,18 @@ export function historyList() {
   return invoke<HistoryItem[]>("history_list");
 }
 
+export interface HistoryFolderImport {
+  imported: number;
+  skipped: number;
+  already: number;
+  scanned: number;
+  cancelled: boolean;
+}
+
+export function historyImportFolder(groupId = "") {
+  return invoke<HistoryFolderImport>("history_import_folder", { groupId, group_id: groupId });
+}
+
 export function historyDelete(id: string) {
   return invoke<void>("history_delete", { id });
 }
@@ -543,11 +555,11 @@ export function apngGif(payload: { frames: string[]; delayMs?: number; padColor?
   });
 }
 
-export function apngStrip(image: string) {
-  return invoke<SavedImage>("apng_strip", { image });
+export function apngStrip(image: string, name = "") {
+  return invoke<SavedImage>("apng_strip", { image, name });
 }
 
-export function fileCleanedImages(items: { path: string; sourcePath: string }[], destDir: string) {
+export function fileCleanedImages(items: { path: string; sourcePath: string; name?: string }[], destDir: string) {
   return invoke<{ moved: number; skipped: number; paths: string[] }>("file_cleaned_images", {
     items,
     destDir,

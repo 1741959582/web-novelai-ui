@@ -18,8 +18,11 @@ import { useAppStore } from "@/stores/app";
 const store = useApngStore();
 const app = useAppStore();
 const busy = ref(false);
-type QueueImage = SavedImage & { sourcePath?: string };
+type QueueImage = SavedImage & { sourcePath?: string; id: string };
 const extra = ref<QueueImage[]>([]);
+const metaActive = ref(0);
+const dragFrom = ref(-1);
+const dragOver = ref(-1);
 const readyToFile = ref(false);
 const saveDir = ref(localStorage.getItem("nai-clean-save-dir") || "");
 const saveDirLabel = computed(() => saveDir.value.split(/[/\\]/).filter(Boolean).pop() || saveDir.value);
@@ -36,6 +39,19 @@ const tabs = [
 ] as const;
 
 const selected = computed(() => store.items.find((item) => item.id === store.selectedId) || store.items[0] || null);
+const previewFile = computed(() => {
+  if (!extra.value.length) return null;
+  if (store.tab !== "meta") return extra.value[0];
+  return extra.value[Math.min(metaActive.value, extra.value.length - 1)] || extra.value[0];
+});
+
+function numberedName(index: number, total: number) {
+  return String(index + 1).padStart(String(Math.max(total, 1)).length, "0");
+}
+
+function withId(file: SavedImage & { sourcePath?: string }): QueueImage {
+  return { ...file, id: crypto.randomUUID(), sourcePath: file.sourcePath || file.path };
+}
 const realPreview = computed(() => {
   const item = selected.value;
   if (!item) return "";
@@ -184,13 +200,14 @@ async function fromPicker(target: "cover" | "reals" | "gif" | "restore" | "meta"
   if (target === "gif") {
     for (const file of files) await store.addGif(file.dataUrl, file.path.split(/[/\\]/).pop() || "帧");
   }
-  if (target === "restore") extra.value = files;
+  if (target === "restore") extra.value = files.map((file) => withId(file));
   if (target === "meta" || target === "mosaic") {
     readyToFile.value = false;
-    const cleaned = await Promise.all(
-      files.map(async (file) => ({ ...file, sourcePath: file.path, dataUrl: await cleanPreview(file.dataUrl) })),
+    metaActive.value = 0;
+    extra.value = await Promise.all(
+      files.map(async (file) => withId({ ...file, sourcePath: file.path, dataUrl: target === "meta" ? await cleanPreview(file.dataUrl) : file.dataUrl })),
     );
-    extra.value = cleaned;
+    if (target === "meta") app.status = `已加入 ${files.length} 张，拖动缩略图可以调整顺序`;
   }
 }
 
@@ -207,7 +224,23 @@ async function fromFiles(files: FileList | null, target: "cover" | "reals" | "gi
   if (!files?.length) return;
   const list = Array.from(files);
   if (target === "restore") {
-    extra.value = await Promise.all(list.map(async (file) => ({ path: file.name, dataUrl: await readFile(file) })));
+    extra.value = await Promise.all(list.map(async (file) => withId({ path: file.name, dataUrl: await readFile(file) })));
+    return;
+  }
+  if (target === "meta" || target === "mosaic") {
+    readyToFile.value = false;
+    const incoming = await Promise.all(
+      list.map(async (file) => {
+        const dataUrl = await readFile(file);
+        return withId({
+          path: file.name,
+          sourcePath: file.name,
+          dataUrl: target === "meta" ? await cleanPreview(dataUrl) : dataUrl,
+        });
+      }),
+    );
+    extra.value = [...extra.value, ...incoming];
+    if (target === "meta") app.status = `已加入 ${incoming.length} 张，拖动缩略图可以调整顺序`;
     return;
   }
   for (const file of list) {
@@ -215,10 +248,6 @@ async function fromFiles(files: FileList | null, target: "cover" | "reals" | "gi
     if (target === "cover") await store.setCover(dataUrl);
     if (target === "reals") await store.addReal(dataUrl, file.name);
     if (target === "gif") await store.addGif(dataUrl, file.name);
-    if (target === "meta" || target === "mosaic") {
-      readyToFile.value = false;
-      extra.value = [{ path: file.name, sourcePath: file.name, dataUrl: await cleanPreview(dataUrl) }];
-    }
   }
   if (target === "reals") app.status = `已加入 ${list.length} 张，提示词和隐写已清掉`;
 }
@@ -335,7 +364,7 @@ async function makeGif() {
     padColor: store.padColor,
     fitFirst: store.fitFirst,
   }));
-  extra.value = [saved];
+  extra.value = [withId(saved)];
   app.status = `已合成 GIF：${saved.path}`;
 }
 
@@ -365,17 +394,50 @@ function focusExtra(index: number) {
   extra.value = [item, ...next];
 }
 
+function onMetaDragStart(index: number, ev: DragEvent) {
+  dragFrom.value = index;
+  dragOver.value = index;
+  ev.dataTransfer?.setData("text/plain", String(index));
+  if (ev.dataTransfer) ev.dataTransfer.effectAllowed = "move";
+}
+
+function onMetaDragOver(index: number) {
+  dragOver.value = index;
+}
+
+function onMetaDrop(index: number, ev?: DragEvent) {
+  const raw = Number(ev?.dataTransfer?.getData("text/plain"));
+  const from = dragFrom.value >= 0 ? dragFrom.value : raw;
+  dragFrom.value = -1;
+  dragOver.value = -1;
+  if (from < 0 || from === index || from >= extra.value.length) return;
+  const next = [...extra.value];
+  const [item] = next.splice(from, 1);
+  next.splice(index, 0, item);
+  const active = metaActive.value;
+  if (active === from) metaActive.value = index;
+  else if (from < active && index >= active) metaActive.value = active - 1;
+  else if (from > active && index <= active) metaActive.value = active + 1;
+  extra.value = next;
+}
+
+function onMetaDragEnd() {
+  dragFrom.value = -1;
+  dragOver.value = -1;
+}
+
 async function applyPending() {
   const batch = store.takePending();
   if (!batch.length) return;
   if (store.tab === "restore") {
-    extra.value = batch;
+    extra.value = batch.map((file) => withId(file));
     return;
   }
   if (store.tab === "meta" || store.tab === "mosaic") {
     readyToFile.value = false;
+    metaActive.value = 0;
     extra.value = await Promise.all(
-      batch.map(async (file) => ({ ...file, sourcePath: file.path, dataUrl: await cleanPreview(file.dataUrl) })),
+      batch.map(async (file) => withId({ ...file, sourcePath: file.path, dataUrl: await cleanPreview(file.dataUrl) })),
     );
   }
 }
@@ -393,7 +455,7 @@ async function restore() {
   await run(async () => {
     for (const src of extra.value) outs.push(...(await apngRestore(src.dataUrl)));
   });
-  extra.value = outs;
+  extra.value = outs.map((file) => withId(file));
   app.status = outs[0] ? `已还原 ${outs.length} 张，第一张在 ${outs[0].path}` : "没有拆出隐藏帧";
 }
 
@@ -401,14 +463,17 @@ async function strip() {
   if (!extra.value.length) return;
   const outs: QueueImage[] = [];
   await run(async () => {
-    for (const src of extra.value) {
-      const saved = await apngStrip(src.dataUrl);
-      outs.push({ ...saved, sourcePath: src.sourcePath || src.path });
+    for (const [index, src] of extra.value.entries()) {
+      const saved = await apngStrip(src.dataUrl, numberedName(index, extra.value.length));
+      outs.push(withId({ ...saved, sourcePath: src.sourcePath || src.path }));
     }
   });
   extra.value = outs;
   readyToFile.value = outs.length > 0;
-  app.status = outs.length > 1 ? `已清除 ${outs.length} 张元数据，选择位置后可以保存` : `已清除元数据：${outs[0]?.path || ""}`;
+  const last = numberedName(Math.max(outs.length - 1, 0), outs.length);
+  app.status = outs.length > 1
+    ? `已清除 ${outs.length} 张，按当前顺序命名为 ${numberedName(0, outs.length)}.png 到 ${last}.png`
+    : `已清除元数据：${outs[0]?.path || ""}`;
 }
 
 async function chooseSaveDir() {
@@ -433,7 +498,11 @@ async function saveToFolders() {
   }
   await run(async () => {
     const result = await fileCleanedImages(
-      queued.map((item) => ({ path: item.path, sourcePath: item.sourcePath || item.path })),
+      queued.map((item, index) => ({
+        path: item.path,
+        sourcePath: item.sourcePath || item.path,
+        name: numberedName(index, queued.length),
+      })),
       dest,
     );
     const next = [...extra.value];
@@ -444,8 +513,9 @@ async function saveToFolders() {
       cursor += 1;
     }
     extra.value = next;
+    const last = numberedName(Math.max(queued.length - 1, 0), queued.length);
     app.status = result.moved
-      ? `已把 ${result.moved} 张保存到 ${dest}`
+      ? `已把 ${result.moved} 张按顺序保存到 ${dest}，从 ${numberedName(0, queued.length)}.png 到 ${last}.png`
       : "这些图片已经在所选位置";
     if (result.skipped) app.status += `，${result.skipped} 张没保存`;
   });
@@ -457,7 +527,7 @@ async function mosaic() {
   await run(async () => {
     for (const src of extra.value) outs.push(await apngMosaic(src.dataUrl, store.mosaicBlock));
   });
-  extra.value = outs;
+  extra.value = outs.map((file) => withId(file));
   app.status = outs.length > 1 ? `已给 ${outs.length} 张打马赛克` : `已打马赛克：${outs[0]?.path || ""}`;
 }
 
@@ -586,7 +656,7 @@ onUnmounted(() => {
     <template v-else>
       <div class="toolbar">
         <button type="button" @click="fromPicker(store.tab)">选图片</button>
-        <label class="file">本地文件<input type="file" accept="image/*" @change="fromFiles(($event.target as HTMLInputElement).files, store.tab)" /></label>
+        <label class="file">本地文件<input type="file" accept="image/*" multiple @change="fromFiles(($event.target as HTMLInputElement).files, store.tab)" /></label>
         <label v-if="store.tab === 'mosaic'">块 <input v-model.number="store.mosaicBlock" type="number" min="4" max="64" /></label>
         <span class="spacer" />
         <button v-if="store.tab === 'restore'" type="button" class="primary" :disabled="busy" @click="restore">
@@ -608,7 +678,7 @@ onUnmounted(() => {
         <article class="pane">
           <b>{{ store.tab === "restore" ? "伪装图 · 要原文件" : store.tab === "meta" ? "已去元数据的预览" : "当前图片" }}</b>
           <div class="view">
-            <img v-if="extra[0]" :src="extra[0].dataUrl" alt="" />
+            <img v-if="previewFile" :src="previewFile.dataUrl" alt="" />
             <p v-else>{{ store.tab === "restore" ? "拖进来或 Ctrl+V 的必须是伪装 PNG 文件" : "Ctrl+V 可以贴图。生成图放进来会清掉提示词和透明通道隐写" }}</p>
           </div>
         </article>
@@ -619,20 +689,26 @@ onUnmounted(() => {
           </div>
         </article>
       </div>
-      <div v-if="extra.length > 1" class="queue">
+      <p v-if="store.tab === 'meta' && extra.length" class="path">拖动缩略图排序。清除和保存都会按这个顺序命名，例如 {{ numberedName(0, extra.length) }}.png。</p>
+      <div v-if="store.tab === 'meta' ? extra.length : extra.length > 1" class="queue">
         <button
           v-for="(file, i) in extra"
-          :key="`${file.path}-${i}`"
+          :key="file.id"
           type="button"
           class="shot"
-          :class="{ on: i === 0 }"
-          @click="focusExtra(i)"
+          :class="{ on: store.tab === 'meta' ? i === Math.min(metaActive, extra.length - 1) : i === 0, over: store.tab === 'meta' && dragOver === i }"
+          :draggable="store.tab === 'meta'"
+          @click="store.tab === 'meta' ? (metaActive = i) : focusExtra(i)"
+          @dragstart="onMetaDragStart(i, $event)"
+          @dragover.prevent="store.tab === 'meta' && onMetaDragOver(i)"
+          @drop.prevent="store.tab === 'meta' && onMetaDrop(i, $event)"
+          @dragend="onMetaDragEnd"
         >
-          <img :src="file.dataUrl" alt="" />
-          <i>{{ i + 1 }}</i>
+          <img :src="file.dataUrl" alt="" draggable="false" />
+          <i>{{ store.tab === "meta" ? numberedName(i, extra.length) : i + 1 }}</i>
         </button>
       </div>
-      <p v-if="extra[0]" class="path">{{ extra[0].path }}</p>
+      <p v-if="previewFile" class="path">{{ previewFile.path }}</p>
     </template>
   </div>
 </template>
@@ -755,6 +831,8 @@ input[type="text"], input:not([type]), .grow, .name {
   flex: none;
 }
 .shot.on { outline: 2px solid var(--heading); }
+.shot.over { outline: 2px dashed #f5f3c2; }
+.shot[draggable="true"] { cursor: grab; }
 .shot.done { outline-color: var(--ok); }
 .shot.error { outline-color: var(--danger); }
 .shot img { width: 100%; height: 100%; object-fit: cover; }

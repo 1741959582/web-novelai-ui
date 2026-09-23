@@ -1,6 +1,6 @@
 import { acceptHMRUpdate, defineStore } from "pinia";
 import { computed, ref, watch } from "vue";
-import { readImageDataUrl } from "@/api/tauri";
+import { inspectImage, readImageDataUrl } from "@/api/tauri";
 import {
   DEFAULT_PARAMS,
   maxCharacterPrompts,
@@ -102,6 +102,35 @@ function parseBlock(chunk: string): BatchDraft | null {
   }
   if (!prompt.length && !characters.length) return null;
   return { prompt: prompt.join("\n"), negativePrompt, characters, width, height };
+}
+
+export function replacePromptText(text: string, from: string, to: string): { text: string; hits: number } {
+  if (!from || !text.includes(from)) return { text, hits: 0 };
+  const hits = text.split(from).length - 1;
+  let next = text.split(from).join(to);
+  if (!to.trim()) {
+    next = next
+      .replace(/[ \t]*,[ \t]*(?:,[ \t]*)+/g, ", ")
+      .replace(/^[ \t]*,[ \t]*/g, "")
+      .replace(/[ \t]*,[ \t]*$/g, "")
+      .replace(/[ \t]{2,}/g, " ")
+      .trim();
+  }
+  return { text: next, hits };
+}
+
+export function charactersFromCaptions(captions: Array<Partial<CharCaption>> | undefined): CharCaption[] {
+  const filled = (captions ?? []).filter((item) => (item.prompt || "").trim() || (item.negativePrompt || "").trim());
+  if (!filled.length) return [newCharacter()];
+  return filled.map((item) => ({
+    ...newCharacter(Boolean(item.useCoords)),
+    prompt: item.prompt || "",
+    negativePrompt: item.negativePrompt || "",
+    useCoords: Boolean(item.useCoords),
+    x: typeof item.x === "number" ? item.x : 0.5,
+    y: typeof item.y === "number" ? item.y : 0.5,
+    enabled: item.enabled !== false,
+  }));
 }
 
 function newJob(partial: Partial<BatchJob> = {}): BatchJob {
@@ -251,15 +280,26 @@ export const useBatchStore = defineStore("batch", () => {
     await boot();
     if (!items.length) return 0;
     const app = useAppStore();
-    const extras = items.map((item) => {
-      const model = modelToNai(item.model) || app.params.model;
-      const prompt = item.prompt || "";
-      const negativePrompt = item.negativePrompt || "";
+    const reports = await Promise.all(
+      items.map(async (item) => {
+        if (!item.path) return null;
+        try {
+          return await inspectImage(item.path);
+        } catch {
+          return null;
+        }
+      }),
+    );
+    const extras = items.map((item, index) => {
+      const report = reports[index];
+      const model = modelToNai(report?.model || item.model) || app.params.model;
+      const prompt = item.prompt || report?.prompt || "";
+      const negativePrompt = item.negativePrompt || report?.negative || "";
       return newJob({
         prompt,
         negativePrompt,
         stylePrompt: "",
-        characters: [newCharacter()],
+        characters: charactersFromCaptions(report?.characterCaptions),
         params: cloneParams({
           ...app.params,
           model,
@@ -289,6 +329,30 @@ export const useBatchStore = defineStore("batch", () => {
       }
     }
     return extras.length;
+  }
+
+  function replacePrompts(ids: string[], from: string, to: string) {
+    const needle = from.trim();
+    const nextText = to.trim();
+    if (!needle || !ids.length) return { jobs: 0, hits: 0 };
+    const picked = new Set(ids);
+    let changed = 0;
+    let hits = 0;
+    jobs.value = jobs.value.map((job) => {
+      if (!picked.has(job.id) || job.status === "running") return job;
+      const prompt = replacePromptText(job.prompt, needle, nextText);
+      let jobHits = prompt.hits;
+      const characters = job.characters.map((item) => {
+        const next = replacePromptText(item.prompt, needle, nextText);
+        jobHits += next.hits;
+        return next.hits ? { ...item, prompt: next.text } : item;
+      });
+      if (!jobHits) return job;
+      changed += 1;
+      hits += jobHits;
+      return { ...job, prompt: prompt.text, characters };
+    });
+    return { jobs: changed, hits };
   }
 
   function applySharedToAll() {
@@ -430,14 +494,23 @@ export const useBatchStore = defineStore("batch", () => {
     app.status = "当前这张完成后停止排队";
   }
 
-  async function runQueue() {
+  function collectQueue(selectedIds: string[] = []) {
+    const selected = new Set(selectedIds);
+    const runnable = (job: BatchJob) => job.status === "pending" || job.status === "error" || job.status === "done";
+    if (selected.size) return jobs.value.filter((job) => selected.has(job.id) && runnable(job));
+    const fresh = jobs.value.filter((job) => job.status === "pending" || job.status === "error");
+    if (fresh.length) return fresh;
+    return jobs.value.filter((job) => job.status === "done");
+  }
+
+  async function runQueue(selectedIds: string[] = []) {
     if (running.value) return;
     const app = useAppStore();
     if (app.busy) {
       app.status = "当前已有生成任务，等它结束后再排队";
       return;
     }
-    const queue = jobs.value.filter((job) => job.status === "pending" || job.status === "error");
+    const queue = collectQueue(selectedIds);
     if (!queue.length) {
       app.status = "没有可生成的任务";
       return;
@@ -552,6 +625,7 @@ export const useBatchStore = defineStore("batch", () => {
     importCurrent,
     addFromBulk,
     addFromHistory,
+    replacePrompts,
     applySharedToAll,
     duplicate,
     remove,
