@@ -118,9 +118,7 @@ pub fn app_version() -> String {
     CURRENT.to_string()
 }
 
-#[tauri::command]
-pub async fn check_app_update() -> Result<AppUpdateInfo, String> {
-    let client = http_client()?;
+async fn fetch_latest(client: &reqwest::Client) -> Result<AppUpdateInfo, String> {
     let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
     let res = client
         .get(&url)
@@ -149,6 +147,30 @@ pub async fn check_app_update() -> Result<AppUpdateInfo, String> {
         available: version_newer(&latest, CURRENT),
         portable: is_portable_install(),
     })
+}
+
+#[tauri::command]
+pub async fn check_app_update() -> Result<AppUpdateInfo, String> {
+    let mut modes = Vec::new();
+    if crate::nai::proxy_is_configured() {
+        modes.push(true);
+    }
+    modes.push(false);
+    let mut last = String::from("无法连接 GitHub");
+    for use_proxy in modes {
+        let client = match crate::nai::update_check_client(use_proxy) {
+            Ok(client) => client,
+            Err(err) => {
+                last = err;
+                continue;
+            }
+        };
+        match fetch_latest(&client).await {
+            Ok(info) => return Ok(info),
+            Err(err) => last = err,
+        }
+    }
+    Err(last)
 }
 
 #[tauri::command]

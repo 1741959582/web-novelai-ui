@@ -2,6 +2,11 @@
 
 从新到旧。安装包在 [最新发行版](https://github.com/caiweida/web-novelai-ui/releases/latest)。已安装的程序启动后会读到新版本，顶栏可以点「立即更新」。
 
+## [0.1.12](https://github.com/caiweida/web-novelai-ui/releases/tag/v0.1.12)
+
+- 检查更新会显示「检查中」，失败时写出原因，不再点了没反应。
+- 当前版本不用等 GitHub 返回就能看到。连官方失败时会再走本机代理试一次。
+
 ## [0.1.11](https://github.com/caiweida/web-novelai-ui/releases/tag/v0.1.11)
 
 - 主关键词和每个角色关键词旁可以打开 Danbooru 标签模糊搜索，把选中的标签写进对应的框。

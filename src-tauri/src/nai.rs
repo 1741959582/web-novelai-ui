@@ -309,6 +309,23 @@ pub fn http_client() -> Result<reqwest::Client, String> {
     build_client(&load_settings())
 }
 
+pub fn update_check_client(use_proxy: bool) -> Result<reqwest::Client, String> {
+    let settings = load_settings();
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(8))
+        .timeout(std::time::Duration::from_secs(20))
+        .user_agent("Langbai-NovelAI-Studio/1");
+    if use_proxy {
+        if let Some(proxy) = detect_proxy(&settings.proxy_url) {
+            let proxy = reqwest::Proxy::all(&proxy).map_err(|e| e.to_string())?;
+            builder = builder.proxy(proxy);
+        }
+    } else {
+        builder = builder.no_proxy();
+    }
+    builder.build().map_err(|e| e.to_string())
+}
+
 pub fn http_client_no_redirect() -> Result<reqwest::Client, String> {
     download_client(true)
 }
@@ -380,6 +397,9 @@ fn detect_proxy(explicit: &str) -> Option<String> {
     }
     if port_open(7890) {
         return Some("http://127.0.0.1:7890".into());
+    }
+    if port_open(7892) {
+        return Some("http://127.0.0.1:7892".into());
     }
     if port_open(7897) {
         return Some("http://127.0.0.1:7897".into());

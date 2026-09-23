@@ -29,6 +29,7 @@ import {
   settingsGet,
   settingsSave,
   tokenVerify,
+  appVersion as fetchAppVersion,
   checkAppUpdate,
   installAppUpdate,
   openLatestRelease,
@@ -145,6 +146,7 @@ export const useAppStore = defineStore("app", () => {
   const appVersion = ref("");
   const updateInfo = ref<AppUpdateInfo | null>(null);
   const updateBusy = ref(false);
+  const updateChecking = ref(false);
   const updatePct = ref(0);
   const updateMsg = ref("");
   const updateDismissed = ref("");
@@ -167,6 +169,7 @@ export const useAppStore = defineStore("app", () => {
       ready.value = true;
       showSessionDialog.value = settings.value.hasOnboarded && sessions.value.length > 0;
       status.value = hasToken.value ? "API 已配置" : "请先在设置中填写 Token";
+      void loadAppVersion();
       void checkForAppUpdate();
       unlistenProgress = await listen<{
         progress: number;
@@ -1075,20 +1078,33 @@ export const useAppStore = defineStore("app", () => {
     status.value = "已开始下载";
   }
 
+  async function loadAppVersion() {
+    try {
+      appVersion.value = await fetchAppVersion();
+    } catch {
+      /* version stays blank until a successful update check */
+    }
+  }
+
+  let updateCheckGen = 0;
   async function checkForAppUpdate() {
+    const gen = ++updateCheckGen;
+    updateChecking.value = true;
+    updateMsg.value = "正在检查更新…";
     try {
       const info = await checkAppUpdate();
-      appVersion.value = info.current;
+      if (gen !== updateCheckGen) return;
+      appVersion.value = info.current || appVersion.value;
       updateInfo.value = info;
-      if (info.available) {
-        status.value = `发现新版本 ${info.latest}`;
-      }
+      updateMsg.value = info.available ? `发现新版本 ${info.latest}` : "已是最新版本";
+      if (info.available) status.value = updateMsg.value;
     } catch (e) {
-      appVersion.value = appVersion.value || "";
-      if (!updateInfo.value) {
-        /* keep quiet on boot; settings page will show the error */
-        updateMsg.value = e instanceof Error ? e.message : String(e);
-      }
+      if (gen !== updateCheckGen) return;
+      const msg = e instanceof Error ? e.message : String(e);
+      updateMsg.value = msg;
+      status.value = msg;
+    } finally {
+      if (gen === updateCheckGen) updateChecking.value = false;
     }
   }
 
@@ -1134,6 +1150,7 @@ export const useAppStore = defineStore("app", () => {
     appVersion,
     updateInfo,
     updateBusy,
+    updateChecking,
     updatePct,
     updateMsg,
     updateDismissed,

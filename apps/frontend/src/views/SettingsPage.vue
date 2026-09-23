@@ -223,15 +223,17 @@ async function save() {
 
       <div v-else class="card">
         <h2>关于与更新</h2>
-        <p class="hint">当前版本 {{ store.updateInfo?.current || store.appVersion || "—" }}</p>
+        <p class="hint">当前版本 {{ store.appVersion || store.updateInfo?.current || "—" }}</p>
         <p class="hint">
           GitHub 最新版
-          {{ store.updateInfo ? (store.updateInfo.available ? store.updateInfo.latest : "已是最新") : "尚未检查" }}
+          {{ store.updateChecking ? "正在检查…" : store.updateInfo ? (store.updateInfo.available ? store.updateInfo.latest : "已是最新") : "尚未检查" }}
         </p>
         <p class="hint">启动时会读取 GitHub Release。有新包时顶栏会出现更新条，下载安装包后自动打开安装程序。</p>
-        <p v-if="store.updateBusy" class="hint">{{ store.updateMsg || `下载中 ${store.updatePct}%` }}</p>
+        <p v-if="store.updateMsg" class="hint">{{ store.updateBusy ? store.updateMsg || `下载中 ${store.updatePct}%` : store.updateMsg }}</p>
         <div class="actions">
-          <button class="btn" type="button" :disabled="store.updateBusy" @click="store.checkForAppUpdate()">检查更新</button>
+          <button class="btn" type="button" :disabled="store.updateBusy || store.updateChecking" @click="store.checkForAppUpdate()">
+            {{ store.updateChecking ? "检查中…" : "检查更新" }}
+          </button>
           <button
             class="btn primary"
             type="button"
