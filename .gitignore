@@ -2,6 +2,7 @@ node_modules/
 dist/
 **/dist/
 src-tauri/target/
+src-tauri/target-rel/
 target/
 src-tauri/gen/
 src-tauri/WixTools/
