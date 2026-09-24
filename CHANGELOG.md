@@ -2,6 +2,12 @@
 
 从新到旧。安装包在 [最新发行版](https://github.com/caiweida/web-novelai-ui/releases/latest)。已安装的程序启动后会读到新版本，顶栏可以点「立即更新」。
 
+## [0.1.14](https://github.com/caiweida/web-novelai-ui/releases/tag/v0.1.14)
+
+- 预览图上方可以做变体、超分和增强，费用按所选参数显示。
+- Opus 在 1024×1024 以内、不超过 28 步时，重绘和普通生成一样不扣积分。
+- 检查更新如果被 GitHub 接口限流，会改读发行页面，仍然能找到安装包。
+
 ## [0.1.13](https://github.com/caiweida/web-novelai-ui/releases/tag/v0.1.13)
 
 - 打码模型批量下载时，某一个失败会自动继续下一个。
