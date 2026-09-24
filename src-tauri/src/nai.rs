@@ -310,11 +310,22 @@ pub fn http_client() -> Result<reqwest::Client, String> {
 }
 
 pub fn update_check_client(use_proxy: bool) -> Result<reqwest::Client, String> {
+    update_check_client_with(use_proxy, true)
+}
+
+pub fn update_check_client_no_redirect(use_proxy: bool) -> Result<reqwest::Client, String> {
+    update_check_client_with(use_proxy, false)
+}
+
+fn update_check_client_with(use_proxy: bool, follow_redirects: bool) -> Result<reqwest::Client, String> {
     let settings = load_settings();
     let mut builder = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(8))
         .timeout(std::time::Duration::from_secs(20))
         .user_agent("Langbai-NovelAI-Studio/1");
+    if !follow_redirects {
+        builder = builder.redirect(reqwest::redirect::Policy::none());
+    }
     if use_proxy {
         if let Some(proxy) = detect_proxy(&settings.proxy_url) {
             let proxy = reqwest::Proxy::all(&proxy).map_err(|e| e.to_string())?;

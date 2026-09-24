@@ -95,6 +95,10 @@ defineProps<{ name: string; size?: number }>();
     <template v-else-if="name === 'play'">
       <path d="M8 5.5v13L19 12 8 5.5Z" fill="currentColor" stroke="none" />
     </template>
+    <template v-else-if="name === 'upscale'">
+      <path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5" />
+      <path d="M4 4l6 6M20 4l-6 6M4 20l6-6M20 20l-6-6" />
+    </template>
     <template v-else-if="name === 'sparkle'">
       <path d="M12 3l1.4 6.1L20 10.5l-6.1 1.4L12 18l-1.4-6.1L4 10.5l6.6-1.4L12 3Z" fill="currentColor" stroke="none" />
     </template>

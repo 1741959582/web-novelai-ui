@@ -973,21 +973,28 @@ export const useAppStore = defineStore("app", () => {
     await persistSession(saved);
   }
 
-  async function enhanceCurrent() {
+  async function enhanceCurrent(opts?: { strength?: number; noise?: number; scale?: number }) {
     const src = currentPreview();
     if (!src) {
       status.value = "没有可增强的图片";
       return;
     }
+    const strength = Math.min(0.85, Math.max(0.05, opts?.strength ?? 0.25));
+    const noise = Math.min(0.4, Math.max(0, opts?.noise ?? 0));
+    const scale = opts?.scale === 2 ? 2 : 1;
+    const width = Math.min(params.value.width * scale, 4096);
+    const height = Math.min(params.value.height * scale, 4096);
     busy.value = true;
     genPhase.value = "waiting";
     try {
       const res = await generateImg2img({
         ...params.value,
+        width,
+        height,
         charCaptions: characters.value,
         imageBase64: stripDataUrl(src),
-        strength: 0.25,
-        noise: 0,
+        strength,
+        noise,
       });
       await applyToolResult(res);
     } catch (e) {
@@ -997,16 +1004,43 @@ export const useAppStore = defineStore("app", () => {
     }
   }
 
-  async function upscaleCurrent() {
+  async function varyCurrent(count = 1, strength = 0.6) {
+    const src = currentPreview();
+    if (!src || busy.value) return;
+    const n = Math.min(4, Math.max(1, Math.round(count)));
+    const hold = Math.min(0.85, Math.max(0.2, strength));
+    busy.value = true;
+    genPhase.value = "waiting";
+    try {
+      for (let i = 0; i < n; i++) {
+        status.value = n > 1 ? `正在生成变体 ${i + 1}/${n}…` : "正在生成变体…";
+        const res = await generateImg2img({
+          ...params.value,
+          charCaptions: characters.value,
+          imageBase64: stripDataUrl(src),
+          strength: hold,
+          noise: 0.1,
+        });
+        await applyToolResult(res);
+      }
+    } catch (e) {
+      status.value = formatErr(e);
+    } finally {
+      busy.value = false;
+    }
+  }
+
+  async function upscaleCurrent(scale = 4) {
     const src = currentPreview();
     if (!src) {
       status.value = "没有可超分的图片";
       return;
     }
+    const chosen = scale === 2 ? 2 : 4;
     busy.value = true;
     genPhase.value = "waiting";
     try {
-      const res = await upscaleImage({ imageBase64: stripDataUrl(src), scale: 4 });
+      const res = await upscaleImage({ imageBase64: stripDataUrl(src), scale: chosen });
       await applyToolResult(res);
     } catch (e) {
       status.value = formatErr(e);
@@ -1238,6 +1272,7 @@ export const useAppStore = defineStore("app", () => {
     startNewSession,
     generate,
     enhanceCurrent,
+    varyCurrent,
     upscaleCurrent,
     runDirector,
     copyCurrentImage,

@@ -27,9 +27,12 @@ export function quoteAnlas(opts: {
   const steps = Math.max(1, opts.params.steps || 28);
   const action = opts.action ?? "generate";
   const strength = action === "generate" || action === "infill" ? 1 : clamp01(opts.strength ?? 1, 1);
+  const opusTier = Boolean(opts.account?.hasActiveSubscription && (opts.account.tierLevel ?? 0) >= 3);
+  // Official Opus: normal generation and inpaint are free up to 1024×1024 and 28 steps.
+  // Image-to-image still costs Anlas, scaled by strength.
   const opus =
-    action === "generate" &&
-    Boolean(opts.account?.hasActiveSubscription && (opts.account.tierLevel ?? 0) >= 3) &&
+    (action === "generate" || action === "infill") &&
+    opusTier &&
     pixels <= OPUS_FREE_MAX_PIXELS &&
     steps <= 28;
 

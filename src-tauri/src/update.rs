@@ -118,6 +118,48 @@ pub fn app_version() -> String {
     CURRENT.to_string()
 }
 
+fn tag_from_location(location: &str) -> Option<String> {
+    let path = location.split(['?', '#']).next().unwrap_or(location);
+    if !path.contains("/releases/tag/") {
+        return None;
+    }
+    let tag = path.rsplit('/').next().unwrap_or("").trim();
+    if tag.is_empty() { None } else { Some(tag.to_string()) }
+}
+
+fn info_from_tag(tag: &str) -> AppUpdateInfo {
+    let version = tag.trim().trim_start_matches(['v', 'V']);
+    let download = format!("https://github.com/{REPO}/releases/download/v{version}");
+    AppUpdateInfo {
+        current: CURRENT.into(),
+        latest: version.into(),
+        notes: String::new(),
+        html_url: format!("https://github.com/{REPO}/releases/tag/v{version}"),
+        setup_url: Some(format!("{download}/NAI-Studio-Web-UI-Setup-{version}.exe")),
+        portable_url: Some(format!("{download}/NAI-Studio-Web-UI-{version}-portable.zip")),
+        available: version_newer(version, CURRENT),
+        portable: is_portable_install(),
+    }
+}
+
+async fn fetch_latest_from_page(use_proxy: bool) -> Result<AppUpdateInfo, String> {
+    let client = crate::nai::update_check_client_no_redirect(use_proxy)?;
+    let url = format!("https://github.com/{REPO}/releases/latest");
+    let res = client
+        .get(&url)
+        .header("User-Agent", format!("Langbai-NovelAI-Studio/{CURRENT}"))
+        .send()
+        .await
+        .map_err(format_reqwest)?;
+    let location = res
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let tag = tag_from_location(location).ok_or_else(|| "发行页没有给出版本号".to_string())?;
+    Ok(info_from_tag(&tag))
+}
+
 async fn fetch_latest(client: &reqwest::Client) -> Result<AppUpdateInfo, String> {
     let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
     let res = client
@@ -151,11 +193,10 @@ async fn fetch_latest(client: &reqwest::Client) -> Result<AppUpdateInfo, String>
 
 #[tauri::command]
 pub async fn check_app_update() -> Result<AppUpdateInfo, String> {
-    let mut modes = Vec::new();
+    let mut modes = vec![false];
     if crate::nai::proxy_is_configured() {
         modes.push(true);
     }
-    modes.push(false);
     let mut last = String::from("无法连接 GitHub");
     for use_proxy in modes {
         let client = match crate::nai::update_check_client(use_proxy) {
@@ -167,7 +208,15 @@ pub async fn check_app_update() -> Result<AppUpdateInfo, String> {
         };
         match fetch_latest(&client).await {
             Ok(info) => return Ok(info),
-            Err(err) => last = err,
+            Err(err) => {
+                let limited = err.contains("rate limit") || err.contains("HTTP 403") || err.contains("HTTP 429");
+                last = err;
+                if limited {
+                    if let Ok(info) = fetch_latest_from_page(use_proxy).await {
+                        return Ok(info);
+                    }
+                }
+            }
         }
     }
     Err(last)
@@ -319,7 +368,7 @@ fn emit(app: &AppHandle, received: u64, total: u64, message: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_version, pick_portable, pick_setup, version_newer, GhAsset};
+    use super::{info_from_tag, parse_version, pick_portable, pick_setup, tag_from_location, version_newer, GhAsset};
 
     #[test]
     fn compares_semver_tags() {
@@ -343,5 +392,18 @@ mod tests {
         ];
         assert_eq!(pick_setup(&assets).as_deref(), Some("https://example/setup.exe"));
         assert_eq!(pick_portable(&assets).as_deref(), Some("https://example/portable.zip"));
+    }
+
+    #[test]
+    fn reads_version_from_release_redirect() {
+        let tag = tag_from_location("https://github.com/caiweida/web-novelai-ui/releases/tag/v0.1.13").unwrap();
+        assert_eq!(tag, "v0.1.13");
+        let info = info_from_tag(&tag);
+        assert_eq!(info.latest, "0.1.13");
+        assert_eq!(
+            info.setup_url.as_deref(),
+            Some("https://github.com/caiweida/web-novelai-ui/releases/download/v0.1.13/NAI-Studio-Web-UI-Setup-0.1.13.exe")
+        );
+        assert!(tag_from_location("https://github.com/caiweida/web-novelai-ui").is_none());
     }
 }
