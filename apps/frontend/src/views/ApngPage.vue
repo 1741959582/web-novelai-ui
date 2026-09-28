@@ -158,6 +158,42 @@ function clearExtra() {
   window.clearTimeout(queueTimer);
   writeQueueNow(null);
 }
+
+function reverseExtra() {
+  if (extra.value.length < 2) return;
+  const activeId = extra.value[Math.min(metaActive.value, extra.value.length - 1)]?.id;
+  reviewDirty = false;
+  reviewIndex = -1;
+  extra.value = [...extra.value].reverse();
+  const next = activeId ? extra.value.findIndex((item) => item.id === activeId) : 0;
+  metaActive.value = next >= 0 ? next : 0;
+  const current = extra.value[metaActive.value];
+  if (current) metaPicked.value = [current.id];
+  if (reviewOn.value) void loadReview();
+  app.status = "已倒序";
+}
+
+function deleteCurrent() {
+  if (!extra.value.length) return;
+  const index = Math.min(metaActive.value, extra.value.length - 1);
+  const item = extra.value[index];
+  if (!item) return;
+  reviewDirty = false;
+  reviewIndex = -1;
+  extra.value = extra.value.filter((file) => file.id !== item.id);
+  if (!extra.value.length) {
+    metaActive.value = 0;
+    metaPicked.value = [];
+    if (reviewOn.value) void closeReview();
+    app.status = "已删除当前图片";
+    return;
+  }
+  metaActive.value = Math.min(index, extra.value.length - 1);
+  const current = extra.value[metaActive.value];
+  metaPicked.value = current ? [current.id] : [];
+  if (reviewOn.value) void loadReview();
+  app.status = `已删除当前图片，还剩 ${extra.value.length} 张`;
+}
 const metaSorting = ref(false);
 const dragFrom = ref(-1);
 const dragOver = ref(-1);
@@ -1637,6 +1673,8 @@ onUnmounted(() => {
         <button type="button" @click="fromPicker(store.tab)">选图片</button>
         <label class="file">本地文件<input type="file" accept="image/*" multiple @change="fromFiles(($event.target as HTMLInputElement).files, store.tab)" /></label>
         <button v-if="store.tab === 'mosaic'" type="button" :disabled="busy" @click="fromMosaicFolder">选文件夹</button>
+        <button v-if="store.tab === 'meta' || store.tab === 'mosaic'" type="button" :disabled="extra.length < 2" @click="reverseExtra">倒序</button>
+        <button v-if="store.tab === 'meta' || store.tab === 'mosaic'" type="button" :disabled="!extra.length" @click="deleteCurrent">删除当前</button>
         <button v-if="store.tab === 'mosaic'" type="button" :disabled="!extra.length" @click="clearExtra">清空</button>
         <span class="spacer" />
         <button v-if="store.tab === 'restore'" type="button" class="primary" :disabled="busy" @click="restore">

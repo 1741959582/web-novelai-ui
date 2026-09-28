@@ -2,6 +2,10 @@
 
 从新到旧。安装包在 [最新发行版](https://github.com/caiweida/web-novelai-ui/releases/latest)。已安装的程序启动后会读到新版本，顶栏可以点「立即更新」。
 
+## [0.1.16](https://github.com/caiweida/web-novelai-ui/releases/tag/v0.1.16)
+
+- 清除元数据和打马赛克可以倒序排列队列，也可以删除当前这张。
+
 ## [0.1.15](https://github.com/caiweida/web-novelai-ui/releases/tag/v0.1.15)
 
 - V4.5 画风参考和角色参考按官网格式提交，不再出现 director references 的 400。
