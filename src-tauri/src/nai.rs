@@ -58,6 +58,9 @@ pub struct VibeImageIn {
     pub base64: String,
     pub info_extracted: f64,
     pub strength: f64,
+    /// True after `/ai/encode-vibe`. The extracted amount is already inside the token.
+    #[serde(default)]
+    pub encoded: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -538,6 +541,83 @@ fn encode_rgba_png(img: &image::RgbaImage) -> Result<Vec<u8>, String> {
         .write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png)
         .map_err(|e| format!("无法编码重绘结果: {e}"))?;
     Ok(out)
+}
+
+const DIRECTOR_CANVASES: [(u32, u32); 3] = [(1024, 1536), (1536, 1024), (1472, 1472)];
+
+fn fit_within(sw: u32, sh: u32, tw: u32, th: u32) -> (u32, u32) {
+    if sw == 0 || sh == 0 {
+        return (1, 1);
+    }
+    if u64::from(tw) * u64::from(sh) <= u64::from(th) * u64::from(sw) {
+        let height = (u64::from(sh) * u64::from(tw) / u64::from(sw)).clamp(1, u64::from(th));
+        (tw, height as u32)
+    } else {
+        let width = (u64::from(sw) * u64::from(th) / u64::from(sh)).clamp(1, u64::from(tw));
+        (width as u32, th)
+    }
+}
+
+fn director_canvas(width: u32, height: u32) -> (u32, u32) {
+    DIRECTOR_CANVASES
+        .into_iter()
+        .min_by_key(|&(tw, th)| {
+            let (sw, sh) = fit_within(width, height, tw, th);
+            u64::from(tw) * u64::from(th) - u64::from(sw) * u64::from(sh)
+        })
+        .unwrap_or((1024, 1536))
+}
+
+fn fit_on_canvas(src: &image::RgbaImage, tw: u32, th: u32) -> image::RgbaImage {
+    let (rw, rh) = fit_within(src.width(), src.height(), tw, th);
+    let resized = if (rw, rh) == src.dimensions() {
+        src.clone()
+    } else {
+        image::imageops::resize(src, rw, rh, image::imageops::FilterType::CatmullRom)
+    };
+    let mut canvas = image::RgbaImage::from_pixel(tw, th, image::Rgba([0, 0, 0, 255]));
+    image::imageops::overlay(
+        &mut canvas,
+        &resized,
+        i64::from((tw - rw) / 2),
+        i64::from((th - rh) / 2),
+    );
+    canvas
+}
+
+fn prepare_director_png(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let src = image::load_from_memory(bytes)
+        .map(|img| img.to_rgba8())
+        .map_err(|e| format!("角色参考图片无法读取：{e}"))?;
+    let (tw, th) = director_canvas(src.width(), src.height());
+    if src.dimensions() == (tw, th) && bytes.starts_with(&[0x89, 0x50, 0x4e, 0x47]) {
+        return Ok(bytes.to_vec());
+    }
+    encode_rgba_png(&fit_on_canvas(&src, tw, th))
+}
+
+fn prepare_vibe_png(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let src = image::load_from_memory(bytes)
+        .map(|img| img.to_rgba8())
+        .map_err(|e| format!("氛围参考图片无法读取：{e}"))?;
+    const MAX_SIDE: u32 = 1536;
+    let (width, height) = src.dimensions();
+    let long = width.max(height).max(1);
+    let fitted = if long > MAX_SIDE {
+        let rw = (u64::from(width) * u64::from(MAX_SIDE) / u64::from(long)).max(1) as u32;
+        let rh = (u64::from(height) * u64::from(MAX_SIDE) / u64::from(long)).max(1) as u32;
+        image::imageops::resize(&src, rw, rh, image::imageops::FilterType::CatmullRom)
+    } else {
+        src
+    };
+    encode_rgba_png(&fitted)
+}
+
+fn is_raster_image(bytes: &[u8]) -> bool {
+    bytes.starts_with(&[0x89, 0x50, 0x4e, 0x47])
+        || bytes.starts_with(&[0xff, 0xd8, 0xff])
+        || bytes.starts_with(b"GIF8")
+        || (bytes.starts_with(b"RIFF") && bytes.len() >= 12 && &bytes[8..12] == b"WEBP")
 }
 
 fn composite_inpaint_result(generated: &[u8], source_b64: &str, mask_b64: &str) -> Result<Vec<u8>, String> {
@@ -1022,8 +1102,12 @@ fn build_payload(req: &GenerateRequest, seed: u32, action: &str) -> Value {
         parameters["noise"] = json!(0.0);
         parameters["extra_noise_seed"] = json!(seed.saturating_sub(1));
     }
+    let mut precise = req.precise_references.clone().unwrap_or_default();
+    if !normalize_model(&model).starts_with("nai-diffusion-4-5-") {
+        precise.clear();
+    }
     let mut vibes = req.vibe_images.clone().unwrap_or_default();
-    if is_v5(&model) {
+    if is_v5(&model) || !precise.is_empty() {
         vibes.clear();
     }
     if !vibes.is_empty() {
@@ -1031,35 +1115,22 @@ fn build_payload(req: &GenerateRequest, seed: u32, action: &str) -> Value {
             .iter()
             .map(|v| strip_b64(&v.base64))
             .collect::<Vec<_>>());
-        parameters["reference_information_extracted_multiple"] = json!(vibes
-            .iter()
-            .map(|v| v.info_extracted.clamp(0.0, 1.0))
-            .collect::<Vec<_>>());
+        if vibes.iter().any(|v| !v.encoded) {
+            parameters["reference_information_extracted_multiple"] = json!(vibes
+                .iter()
+                .map(|v| v.info_extracted.clamp(0.0, 1.0))
+                .collect::<Vec<_>>());
+        }
         parameters["reference_strength_multiple"] = json!(vibes
             .iter()
             .map(|v| v.strength.clamp(0.0, 1.0))
             .collect::<Vec<_>>());
         parameters["normalize_reference_strength_multiple"] = json!(req.normalize_vibe.unwrap_or(true));
     }
-    let mut precise = req.precise_references.clone().unwrap_or_default();
-    if !normalize_model(&model).starts_with("nai-diffusion-4-5-") {
-        precise.clear();
-    }
     if !precise.is_empty() {
-        let bins: Vec<Vec<u8>> = precise
+        parameters["director_reference_images"] = json!(precise
             .iter()
-            .filter_map(|r| decode_b64(&r.base64).ok())
-            .collect();
-        parameters["director_reference_images"] = json!(bins.iter().map(|b| encode_b64(b)).collect::<Vec<_>>());
-        parameters["director_reference_images_cached"] = json!(bins
-            .iter()
-            .enumerate()
-            .map(|(index, bytes)| {
-                json!({
-                    "cache_secret_key": sha256_hex(bytes),
-                    "data": format!("director_ref_{index}")
-                })
-            })
+            .map(|r| strip_b64(&r.base64))
             .collect::<Vec<_>>());
         parameters["normalize_reference_strength_multiple"] = json!(true);
         parameters["director_reference_descriptions"] = json!(precise
@@ -1184,34 +1255,61 @@ async fn prepare_request(req: &GenerateRequest, base: &str, token: &str) -> Resu
     if is_v5(&req.model) {
         return Ok(req.clone());
     }
-    let settings = load_settings();
-    let client = build_client(&settings)?;
-    let Some(vibes) = req.vibe_images.clone() else {
-        return Ok(req.clone());
+    let mut next = req.clone();
+    let precise_on = next
+        .precise_references
+        .as_ref()
+        .is_some_and(|refs| !refs.is_empty())
+        && normalize_model(&req.model).starts_with("nai-diffusion-4-5-");
+    if precise_on {
+        let refs = next.precise_references.clone().unwrap_or_default();
+        let mut prepared = Vec::with_capacity(refs.len());
+        for reference in refs {
+            let raw = decode_b64(&reference.base64).map_err(|e| format!("角色参考图片无效：{e}"))?;
+            let png = prepare_director_png(&raw)?;
+            prepared.push(PreciseRefIn {
+                base64: encode_b64(&png),
+                ..reference
+            });
+        }
+        next.precise_references = Some(prepared);
+        next.vibe_images = None;
+        return Ok(next);
+    }
+    let Some(vibes) = next.vibe_images.clone() else {
+        return Ok(next);
     };
     if vibes.is_empty() {
-        return Ok(req.clone());
+        return Ok(next);
     }
-    let mut next = req.clone();
+    let settings = load_settings();
+    let client = build_client(&settings)?;
     let mut encoded = Vec::with_capacity(vibes.len());
     for vibe in vibes {
-        match encode_vibe_image(
+        let raw = decode_b64(&vibe.base64).map_err(|e| format!("氛围参考图片无效：{e}"))?;
+        if !is_raster_image(&raw) {
+            encoded.push(VibeImageIn {
+                encoded: true,
+                ..vibe
+            });
+            continue;
+        }
+        let png = prepare_vibe_png(&raw)?;
+        let vibe_token = encode_vibe_image(
             &client,
             token,
             base,
             &req.model,
-            &vibe.base64,
+            &encode_b64(&png),
             vibe.info_extracted,
         )
-        .await
-        {
-            Ok(b64) => encoded.push(VibeImageIn {
-                base64: b64,
-                info_extracted: vibe.info_extracted,
-                strength: vibe.strength,
-            }),
-            Err(_) => encoded.push(vibe),
-        }
+        .await?;
+        encoded.push(VibeImageIn {
+            base64: vibe_token,
+            info_extracted: vibe.info_extracted,
+            strength: vibe.strength,
+            encoded: true,
+        });
     }
     next.vibe_images = Some(encoded);
     Ok(next)
@@ -1353,11 +1451,9 @@ async fn post_generate(
     let prepared = prepare_request(req, &base, &token).await?;
     let payload = build_payload(&prepared, seed.max(1), action);
     let client = build_client(&settings)?;
-    let use_multipart = prepared
-        .precise_references
-        .as_ref()
-        .map(|v| !v.is_empty())
-        .unwrap_or(false);
+    // Keep reference images in the JSON body. A multipart cache entry makes
+    // NovelAI encode them again and answer 400.
+    let use_multipart = false;
     let total_steps = req.steps.clamp(1, 50);
     crate::nai_stream::emit_waiting(app, total_steps);
 
@@ -1866,7 +1962,94 @@ pub async fn translate_text(text: String, langpair: Option<String>) -> Result<St
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_proxy_server, parse_windows_internet_proxy};
+    use super::{
+        build_payload, encode_b64, encode_rgba_png, normalize_proxy_server, parse_windows_internet_proxy,
+        prepare_director_png, GenerateRequest, PreciseRefIn, VibeImageIn,
+    };
+
+    fn request(model: &str) -> GenerateRequest {
+        GenerateRequest {
+            model: model.into(),
+            style_prompt: String::new(),
+            positive_prompt: "1girl".into(),
+            negative_prompt: String::new(),
+            width: 832,
+            height: 1216,
+            steps: 23,
+            cfg_scale: 5.0,
+            cfg_rescale: 0.0,
+            sampler: "k_euler_ancestral".into(),
+            noise_schedule: "karras".into(),
+            seed: 1,
+            seed_mode: "fixed".into(),
+            uc_preset: 1,
+            quality_preset: "none".into(),
+            transparent_background: false,
+            smea: false,
+            smea_dyn: false,
+            variety: false,
+            file_name_prefix: String::new(),
+            model_mode: None,
+            image_base64: None,
+            strength: None,
+            noise: None,
+            mask_base64: None,
+            char_captions: None,
+            vibe_images: None,
+            precise_references: None,
+            normalize_vibe: Some(true),
+        }
+    }
+
+    #[test]
+    fn director_reference_pads_to_official_canvas() {
+        let square = encode_rgba_png(&image::RgbaImage::from_pixel(64, 64, image::Rgba([255, 0, 0, 255]))).unwrap();
+        let fitted = image::load_from_memory(&prepare_director_png(&square).unwrap()).unwrap();
+        assert_eq!((fitted.width(), fitted.height()), (1472, 1472));
+
+        let portrait = encode_rgba_png(&image::RgbaImage::from_pixel(32, 96, image::Rgba([0, 255, 0, 255]))).unwrap();
+        let fitted = image::load_from_memory(&prepare_director_png(&portrait).unwrap()).unwrap();
+        assert_eq!((fitted.width(), fitted.height()), (1024, 1536));
+    }
+
+    #[test]
+    fn precise_reference_payload_omits_fake_cache_and_vibe() {
+        let png = encode_rgba_png(&image::RgbaImage::from_pixel(8, 8, image::Rgba([1, 2, 3, 255]))).unwrap();
+        let mut req = request("nai-diffusion-4-5-full");
+        req.precise_references = Some(vec![PreciseRefIn {
+            base64: encode_b64(&png),
+            kind: "character".into(),
+            strength: 0.6,
+            fidelity: 0.4,
+        }]);
+        req.vibe_images = Some(vec![VibeImageIn {
+            base64: encode_b64(&png),
+            info_extracted: 1.0,
+            strength: 0.5,
+            encoded: true,
+        }]);
+        let payload = build_payload(&req, 1, "generate");
+        let params = &payload["parameters"];
+        assert!(params.get("director_reference_images_cached").is_none());
+        assert!(params.get("reference_image_multiple").is_none());
+        assert_eq!(params["director_reference_descriptions"][0]["caption"]["base_caption"], "character");
+        assert_eq!(params["director_reference_secondary_strength_values"][0], 0.6);
+    }
+
+    #[test]
+    fn encoded_vibe_omits_information_extracted() {
+        let mut req = request("nai-diffusion-4-5-full");
+        req.vibe_images = Some(vec![VibeImageIn {
+            base64: "dG9rZW4".into(),
+            info_extracted: 0.7,
+            strength: 0.6,
+            encoded: true,
+        }]);
+        let params = build_payload(&req, 1, "generate")["parameters"].clone();
+        assert!(params.get("reference_information_extracted_multiple").is_none());
+        assert_eq!(params["reference_image_multiple"][0], "dG9rZW4");
+        assert_eq!(params["reference_strength_multiple"][0], 0.6);
+    }
 
     #[test]
     fn parses_reg_query_proxy() {

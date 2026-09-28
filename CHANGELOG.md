@@ -2,6 +2,11 @@
 
 从新到旧。安装包在 [最新发行版](https://github.com/caiweida/web-novelai-ui/releases/latest)。已安装的程序启动后会读到新版本，顶栏可以点「立即更新」。
 
+## [0.1.15](https://github.com/caiweida/web-novelai-ui/releases/tag/v0.1.15)
+
+- V4.5 画风参考和角色参考按官网格式提交，不再出现 director references 的 400。
+- 角色参考会缩放到官网的三种画布并补黑边；画风参考先编码再生成。
+
 ## [0.1.14](https://github.com/caiweida/web-novelai-ui/releases/tag/v0.1.14)
 
 - 预览图上方可以做变体、超分和增强，费用按所选参数显示。

@@ -1,6 +1,6 @@
 [package]
 name = "web-novelai-ui"
-version = "0.1.14"
+version = "0.1.15"
 description = "Langbai NovelAI Studio Tauri host"
 authors = ["langbai"]
 edition = "2021"
@@ -17,7 +17,7 @@ base64 = "0.22"
 chrono = { version = "0.4", features = ["clock"] }
 crc32fast = "1"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 dirs = "5"
 encoding_rs = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["native-tls", "socks", "json", "multipart", "stream", "system-proxy"] }
