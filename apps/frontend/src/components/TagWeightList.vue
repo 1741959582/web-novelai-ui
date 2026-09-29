@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { lookupTags } from "@/api/tauri";
 import {
   bumpTagWeight,
   extractPartAndMerge,
@@ -34,6 +35,35 @@ const dropOn = ref<number | null>(null);
 const ghost = ref({ show: false, x: 0, y: 0, text: "" });
 const listEl = ref<HTMLElement | null>(null);
 const editing = ref<{ index: number; part: number | null; draft: string } | null>(null);
+const zh = ref<Record<string, string>>({});
+let lookupGen = 0;
+
+function tagKey(name: string) {
+  return name.trim().toLowerCase().replace(/\s+/g, "_");
+}
+
+function zhOf(name: string) {
+  return zh.value[tagKey(name)] || "";
+}
+
+watch(
+  chips,
+  () => {
+    const names = [...new Set(chips.value.flatMap((tag) => [tag.core, ...tag.parts]).map((name) => name.trim()).filter(Boolean))];
+    const missing = names.filter((name) => zh.value[tagKey(name)] == null);
+    if (!missing.length) return;
+    const gen = ++lookupGen;
+    void lookupTags(missing)
+      .then((hits) => {
+        if (gen !== lookupGen) return;
+        const next = { ...zh.value };
+        for (const hit of hits) next[tagKey(hit.tag)] = hit.found ? hit.description : "";
+        zh.value = next;
+      })
+      .catch(() => {});
+  },
+  { immediate: true },
+);
 
 let startX = 0;
 let startY = 0;
@@ -291,7 +321,7 @@ onBeforeUnmount(unbindMove);
           @blur="commitEdit"
           @pointerdown.stop
         />
-        <p v-else class="text">{{ tag.core }}</p>
+        <p v-else class="text">{{ tag.core }}<em v-if="tag.parts.length <= 1 && zhOf(tag.core)">{{ zhOf(tag.core) }}</em></p>
         <div v-if="tag.parts.length > 1" class="parts">
           <span
             v-for="(part, pi) in tag.parts"
@@ -309,7 +339,7 @@ onBeforeUnmount(unbindMove);
               @blur="commitEdit"
               @pointerdown.stop
             />
-            <b v-else>{{ part }}</b>
+            <b v-else>{{ part }}<em v-if="zhOf(part)">{{ zhOf(part) }}</em></b>
             <button type="button" title="只拆出这个词" @click.stop="extractPart(i, pi)">拆</button>
           </span>
         </div>
@@ -398,6 +428,12 @@ onBeforeUnmount(unbindMove);
   border-radius: 6px;
 }
 .text:hover { background: rgba(255,255,255,0.04); }
+.text em, .part em {
+  margin-left: 6px;
+  color: rgba(245, 243, 194, 0.72);
+  font-style: normal;
+  font-size: 11px;
+}
 .edit {
   width: 100%;
   min-height: 28px;
