@@ -690,3 +690,28 @@ export function openLatestRelease(url?: string) {
 export function installAppUpdate(info: AppUpdateInfo) {
   return invoke<void>("install_app_update", { info });
 }
+
+export interface VideoTask {
+  id?: string;
+  task_id?: string;
+  status?: string;
+  output?: { video_urls?: string[]; last_frame_url?: string | null } | null;
+  error?: { code?: string; message?: string } | null;
+  data?: VideoTask;
+}
+
+export function reapiVideoSubmit(body: Record<string, unknown>) {
+  return invoke<VideoTask>("reapi_video_submit", { body });
+}
+
+export function reapiVideoTask(id: string) {
+  return invoke<VideoTask>("reapi_video_task", { id });
+}
+
+export function reapiPublishImage(source: string) {
+  return invoke<string>("reapi_publish_image", { source });
+}
+
+export function reapiSaveVideo(url: string) {
+  return invoke<string>("reapi_save_video", { url });
+}

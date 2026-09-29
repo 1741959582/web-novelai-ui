@@ -12,6 +12,7 @@ mod reverse_tasks;
 mod store;
 mod tavern;
 mod update;
+mod video;
 mod wd_tagger;
 
 pub fn run() {
@@ -103,6 +104,10 @@ pub fn run() {
             tavern::tavern_llm_chat,
             tavern::tavern_llm_cancel,
             tavern::tavern_llm_models,
+            video::reapi_video_submit,
+            video::reapi_video_task,
+            video::reapi_publish_image,
+            video::reapi_save_video,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

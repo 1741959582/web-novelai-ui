@@ -25,6 +25,8 @@ pub struct AppSettings {
     #[serde(default)]
     pub huggingface_token: String,
     #[serde(default)]
+    pub reapi_token: String,
+    #[serde(default)]
     pub local_cl_tagger_enabled: bool,
     #[serde(default = "default_cl_threshold")]
     pub local_cl_tagger_threshold: f64,
@@ -70,6 +72,7 @@ impl Default for AppSettings {
             token: String::new(),
             stream_preview_enabled: true,
             huggingface_token: String::new(),
+            reapi_token: String::new(),
             local_cl_tagger_enabled: false,
             local_cl_tagger_threshold: 0.55,
         }
@@ -245,6 +248,7 @@ pub fn save_settings(mut next: AppSettings) -> Result<AppSettings, String> {
     let mut data = load_file();
     next.token = keep_secret(&next.token, &data.settings.token);
     next.huggingface_token = keep_secret(&next.huggingface_token, &data.settings.huggingface_token);
+    next.reapi_token = keep_secret(&next.reapi_token, &data.settings.reapi_token);
     next.local_cl_tagger_threshold = if next.local_cl_tagger_threshold <= 0.0 {
         0.55
     } else {
@@ -264,7 +268,17 @@ pub fn save_settings(mut next: AppSettings) -> Result<AppSettings, String> {
 pub fn public_settings(mut settings: AppSettings) -> AppSettings {
     settings.token = mask_secret(&settings.token);
     settings.huggingface_token = mask_secret(&settings.huggingface_token);
+    settings.reapi_token = mask_secret(&settings.reapi_token);
     settings
+}
+
+pub fn get_reapi_token() -> String {
+    let token = load_file().settings.reapi_token.trim().to_string();
+    if token.eq_ignore_ascii_case("configured") {
+        String::new()
+    } else {
+        token
+    }
 }
 
 pub fn get_huggingface_token() -> String {

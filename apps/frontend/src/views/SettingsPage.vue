@@ -11,6 +11,7 @@ type Tab = "api" | "storage" | "tags" | "tagger" | "censor" | "perf" | "about";
 const store = useAppStore();
 const tab = ref<Tab>("api");
 const tokenDraft = ref("");
+const reapiDraft = ref("");
 const message = ref("");
 const tagBusy = ref(false);
 const tagLib = ref({ downloaded: false, count: 0 });
@@ -98,6 +99,18 @@ async function downloadTags() {
   }
 }
 
+async function saveReapi() {
+  const next = reapiDraft.value.trim();
+  if (!next && store.settings.reapiToken !== "configured") {
+    message.value = "先填写 reAPI Key";
+    return;
+  }
+  if (next) store.settings.reapiToken = next;
+  await store.saveSettings();
+  reapiDraft.value = "";
+  message.value = "reAPI Key 已保存";
+}
+
 async function verify() {
   const res = await store.verifyToken(tokenDraft.value);
   message.value = res.message;
@@ -159,6 +172,12 @@ async function save() {
           <label>Token</label>
           <input v-model="tokenDraft" type="password" :placeholder="store.hasToken ? '已配置，输入新 Token 可覆盖' : 'pst-...'" />
         </div>
+        <div class="field">
+          <label>reAPI Key</label>
+          <input v-model="reapiDraft" type="password" :placeholder="store.settings.reapiToken === 'configured' ? '已配置，输入新 Key 可覆盖' : 'rk_live_...'" />
+        </div>
+        <button class="btn" type="button" @click="saveReapi">保存 reAPI Key</button>
+        <p class="hint">视频生成用这个 Key 调 reapi.ai。内容过滤默认关闭，可以生成 NSFW。</p>
         <button class="btn primary" type="button" @click="verify">验证 Token / 刷新积分</button>
         <p class="hint">当前：{{ store.account.tierName }} · Anlas {{ store.account.anlasBalance ?? "—" }} · 到期 {{ store.account.expiresAt || "—" }}</p>
         <p class="hint">会话记录保存在本机数据目录，不依赖浏览器缓存。窗口以 WebView 无痕模式运行，站点 Cookie 不会跨启动残留。</p>

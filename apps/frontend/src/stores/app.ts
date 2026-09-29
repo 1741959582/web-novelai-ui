@@ -88,6 +88,7 @@ export const useAppStore = defineStore("app", () => {
     token: "",
     streamPreviewEnabled: true,
     huggingfaceToken: "",
+    reapiToken: "",
     localClTaggerEnabled: false,
     localClTaggerThreshold: 0.55,
   });

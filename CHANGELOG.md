@@ -2,6 +2,12 @@
 
 从新到旧。安装包在 [最新发行版](https://github.com/caiweida/web-novelai-ui/releases/latest)。已安装的程序启动后会读到新版本，顶栏可以点「立即更新」。
 
+## [0.1.17](https://github.com/caiweida/web-novelai-ui/releases/tag/v0.1.17)
+
+- 菜单新增视频生成：文生视频、参考图、首尾帧，使用 reAPI 的 Seedance。内容过滤默认关闭。
+- 本机参考图先上传到图床，再用返回的图片地址生成。设置里可以保存 reAPI Key。
+- 打马赛克可以分别设置马赛克颗粒和模糊程度，并一键恢复默认。
+
 ## [0.1.16](https://github.com/caiweida/web-novelai-ui/releases/tag/v0.1.16)
 
 - 清除元数据和打马赛克可以倒序排列队列，也可以删除当前这张。

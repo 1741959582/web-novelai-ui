@@ -104,6 +104,7 @@ export interface AppSettings {
   token: string;
   streamPreviewEnabled: boolean;
   huggingfaceToken: string;
+  reapiToken: string;
   localClTaggerEnabled: boolean;
   localClTaggerThreshold: number;
 }
@@ -335,6 +336,7 @@ export const TABS = [
   { id: "reverse", path: "/reverse", label: "反推" },
   { id: "reference", path: "/reference", label: "参考预设" },
   { id: "gallery", path: "/gallery", label: "法典" },
+  { id: "video", path: "/video", label: "视频" },
   { id: "tavern", path: "/tavern", label: "酒馆" },
   { id: "records", path: "/records", label: "记录" },
   { id: "settings", path: "/settings", label: "设置" },

@@ -371,10 +371,18 @@ fn download_client(use_detected_proxy: bool) -> Result<reqwest::Client, String> 
     builder.build().map_err(|e| e.to_string())
 }
 
+pub(crate) fn http_client_timeout(secs: u64) -> Result<reqwest::Client, String> {
+    build_client_timeout(&load_settings(), secs)
+}
+
 fn build_client(settings: &AppSettings) -> Result<reqwest::Client, String> {
+    build_client_timeout(settings, 180)
+}
+
+fn build_client_timeout(settings: &AppSettings, secs: u64) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(20))
-        .timeout(std::time::Duration::from_secs(180))
+        .timeout(std::time::Duration::from_secs(secs))
         .user_agent("Langbai-NovelAI-Studio/1");
     if let Some(proxy) = detect_proxy(&settings.proxy_url) {
         let p = reqwest::Proxy::all(&proxy).map_err(|e| e.to_string())?;
