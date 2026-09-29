@@ -235,15 +235,16 @@ const partOptions = [
 ];
 const censorKey = "nai-censor-settings";
 const censorEngines = ref<CensorEngineInfo[]>([]);
-const censorParts = ref<string[]>(["female_genital", "male_genital", "anus", "xray"]);
+const defaultParts = ["female_genital", "male_genital", "anus", "xray"];
+const censorParts = ref<string[]>([...defaultParts]);
 const censorPrecise = ref(true);
 const censorFace = ref(true);
 const censorFaceMale = ref(false);
 const censorShape = ref("fit");
 const censorMode = ref("mosaic");
 const censorDilate = ref(15);
-const censorStrength = ref(200);
-const censorMinBlock = ref(6);
+const censorMosaicBlock = ref(16);
+const censorBlurRadius = ref(16);
 const faceReady = ref(false);
 const censorDir = ref("");
 const enginePref = ref<Record<string, { on: boolean; conf: number }>>({});
@@ -263,8 +264,8 @@ function loadCensorPrefs() {
     if (saved.shape) censorShape.value = saved.shape;
     if (saved.mode) censorMode.value = saved.mode;
     if (saved.dilate) censorDilate.value = saved.dilate;
-    if (saved.strength) censorStrength.value = saved.strength;
-    if (saved.minBlock) censorMinBlock.value = saved.minBlock;
+    if (saved.mosaicBlock) censorMosaicBlock.value = saved.mosaicBlock;
+    if (saved.blurRadius) censorBlurRadius.value = saved.blurRadius;
     if (saved.engines && typeof saved.engines === "object") enginePref.value = saved.engines;
   } catch {
     /* 第一次打开用和自动打码工具相同的默认值 */
@@ -285,8 +286,8 @@ function persistCensor() {
       shape: censorShape.value,
       mode: censorMode.value,
       dilate: censorDilate.value,
-      strength: censorStrength.value,
-      minBlock: censorMinBlock.value,
+      mosaicBlock: censorMosaicBlock.value,
+      blurRadius: censorBlurRadius.value,
     }),
   );
 }
@@ -331,9 +332,42 @@ async function downloadCensor(id: string) {
   });
 }
 
+function clampEffect(value: number, min: number, max: number, fallback: number) {
+  const n = Math.round(Number(value));
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
+function effectPixels() {
+  return censorMode.value === "blur"
+    ? clampEffect(censorBlurRadius.value, 1, 80, 16)
+    : clampEffect(censorMosaicBlock.value, 2, 80, 16);
+}
+
+function resetCensorDefaults() {
+  censorParts.value = [...defaultParts];
+  censorPrecise.value = true;
+  censorFace.value = true;
+  censorFaceMale.value = false;
+  censorShape.value = "fit";
+  censorMode.value = "mosaic";
+  censorDilate.value = 15;
+  censorMosaicBlock.value = 16;
+  censorBlurRadius.value = 16;
+  const next = { ...enginePref.value };
+  for (const engine of censorEngines.value) {
+    next[engine.id] = {
+      on: defaultEngineOn(engine.id),
+      conf: defaultEngineOn(engine.id) ? 0.4 : engine.defaultConf,
+    };
+  }
+  enginePref.value = next;
+  app.status = "打码设置已恢复默认：马赛克颗粒 16 像素，模糊程度 16";
+}
+
 loadCensorPrefs();
 watch(
-  [censorParts, censorPrecise, censorFace, censorFaceMale, censorShape, censorMode, censorDilate, censorStrength, censorMinBlock, enginePref],
+  [censorParts, censorPrecise, censorFace, censorFaceMale, censorShape, censorMode, censorDilate, censorMosaicBlock, censorBlurRadius, enginePref],
   persistCensor,
   { deep: true },
 );
@@ -1043,8 +1077,8 @@ async function mosaic() {
         shape: censorShape.value,
         mode: censorMode.value,
         dilate: censorDilate.value,
-        strength: censorStrength.value,
-        minBlock: censorMinBlock.value,
+        strength: 1_000_000,
+        minBlock: effectPixels(),
       });
       hits += out.hits;
       block = out.block;
@@ -1066,7 +1100,7 @@ async function mosaic() {
     await loadReview();
   }
   const censoredCount = outs.length - untouched;
-  const grain = block ? `，马赛克块 ${block}` : "";
+  const grain = block ? (censorMode.value === "blur" ? `，模糊 ${block}` : `，马赛克颗粒 ${block} 像素`) : "";
   const missed = untouched && censoredCount ? `，${untouched} 张没有需要打码` : "";
   const base = censoredCount
     ? `已打码 ${censoredCount} 张，检出 ${hits} 处${grain}${missed}`
@@ -1111,12 +1145,14 @@ let originCanvas: HTMLCanvasElement | null = null;
 let blurCanvas: HTMLCanvasElement | null = null;
 let blurKey = "";
 const blockColors = new Map<string, [number, number, number]>();
+watch([censorMode, censorMosaicBlock, censorBlurRadius], syncReviewEffect);
 const reviewUndo: ImageData[] = [];
 
-function mosaicBlock(width: number, height: number, saved?: number) {
-  if (saved && saved > 0) return saved;
-  const grain = Math.max(1, Math.round(Math.max(width, height) / Math.max(1, censorStrength.value)));
-  return Math.max(grain, Math.max(1, censorMinBlock.value));
+function syncReviewEffect() {
+  reviewBlock.value = effectPixels();
+  blurCanvas = null;
+  blurKey = "";
+  blockColors.clear();
 }
 
 function loadHtmlImage(src: string) {
@@ -1165,7 +1201,7 @@ async function loadReview() {
   originCanvas.getContext("2d")?.drawImage(source, 0, 0);
   canvas.width = current.naturalWidth;
   canvas.height = current.naturalHeight;
-  reviewBlock.value = mosaicBlock(canvas.width, canvas.height, item.block);
+  reviewBlock.value = effectPixels();
   canvas.getContext("2d", { willReadFrequently: true })?.drawImage(current, 0, 0);
   fitReviewCanvas();
 }
@@ -1734,11 +1770,12 @@ onUnmounted(() => {
           </select>
         </label>
         <label>膨胀 <input v-model.number="censorDilate" type="number" min="0" max="80" /></label>
-        <label>强度 <input v-model.number="censorStrength" type="number" min="10" max="400" /></label>
-        <label>最小块 <input v-model.number="censorMinBlock" type="number" min="1" max="64" /></label>
+        <label>马赛克颗粒 <input v-model.number="censorMosaicBlock" type="number" min="2" max="80" /> 像素</label>
+        <label>模糊程度 <input v-model.number="censorBlurRadius" type="number" min="1" max="80" /></label>
+        <button type="button" @click="resetCensorDefaults">恢复默认</button>
         <button type="button" @click="openCensorDir">模型目录</button>
         <button type="button" @click="refreshCensor">刷新</button>
-        <span class="hint">贴合时分割模型按轮廓，框模型按颜色贴着物体，再按膨胀像素向外扩。模型在设置 → 打码模型里下载。</span>
+        <span class="hint">颗粒越大马赛克越粗，模糊程度越大越糊。改完后新涂的笔刷马上按这个数值，已经打过的图要点打码全部才会重打。贴合时分割模型按轮廓，框模型按颜色贴着物体，再按膨胀像素向外扩。</span>
       </div>
       <div v-if="store.tab === 'mosaic' && reviewOn" class="review-bar">
         <button type="button" :disabled="metaActive <= 0" @click="stepReview(-1)">上一张</button>
@@ -1758,7 +1795,7 @@ onUnmounted(() => {
         </button>
         <span>笔刷 {{ brushRadius }}</span>
         <input v-model.number="brushRadius" type="range" min="4" max="180" />
-        <span>块 {{ reviewBlock }}</span>
+        <span>{{ censorMode === "blur" ? `模糊 ${reviewBlock}` : `颗粒 ${reviewBlock} 像素` }}</span>
         <span>{{ Math.round(reviewZoom * 100) }}%</span>
         <button type="button" @click="undoReview">撤销</button>
         <button type="button" class="primary" @click="saveReviewed">保存到目录</button>
