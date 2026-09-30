@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { suggestTags as suggestTagsRemote, translateText } from "@/api/tauri";
+import NaiIcon from "@/components/NaiIcon.vue";
 import { categoryColor, danbooruCategory, lookupZhTag, suggestTags as suggestLocal, type TagHit } from "@/utils/tagSuggest";
+import TagExplorer from "@/components/TagExplorer.vue";
 import TagWeightList from "@/components/TagWeightList.vue";
-import { parseWeightedTag, splitPromptTags } from "@/utils/promptWeight";
-import { fmtCount, hasCjkText, wordAtCursor } from "@/utils/textUtils";
+import { highlightWeightedPrompt, parseWeightedTag, splitPromptTags } from "@/utils/promptWeight";
+import { translateWeightedPrompt } from "@/utils/promptTools";
+import { appendPromptChunk, fmtCount, hasCjkText, wordAtCursor } from "@/utils/textUtils";
 
 const props = withDefaults(defineProps<{
   modelValue: string;
@@ -17,17 +20,24 @@ const emit = defineEmits<{ "update:modelValue": [string] }>();
 
 type AcTab = "tran" | "lib";
 const ta = ref<HTMLTextAreaElement | null>(null);
+const hl = ref<HTMLElement | null>(null);
 const libHits = ref<TagHit[]>([]);
 const tranHits = ref<TagHit[]>([]);
 const acTab = ref<AcTab>("lib");
 const active = ref(0);
 const composing = ref(false);
 const showTags = ref(false);
+const showExplorer = ref(false);
+const menuOpen = ref(false);
+const moreEl = ref<HTMLElement | null>(null);
+const translating = ref(false);
+const note = ref("");
 const acStyle = ref<Record<string, string>>({});
 let timer: ReturnType<typeof setTimeout> | null = null;
 let suggestSeq = 0;
 
 const chips = computed(() => splitPromptTags(props.modelValue).map((raw) => parseWeightedTag(raw)));
+const highlighted = computed(() => highlightWeightedPrompt(props.modelValue));
 const currentHits = computed(() => (acTab.value === "tran" ? tranHits.value : libHits.value));
 const hasTran = computed(() => tranHits.value.length > 0);
 const hasLib = computed(() => libHits.value.length > 0);
@@ -127,10 +137,56 @@ function scheduleSuggest(text: string, cursor: number) {
   }, 140);
 }
 
+function syncScroll() {
+  const el = ta.value;
+  const back = hl.value;
+  if (!el || !back) return;
+  back.scrollTop = el.scrollTop;
+  back.scrollLeft = el.scrollLeft;
+}
+
 function onInput(e: Event) {
   const el = e.target as HTMLTextAreaElement;
+  note.value = "";
   emit("update:modelValue", el.value);
   scheduleSuggest(el.value, el.selectionStart ?? el.value.length);
+}
+
+function onDocPointer(e: Event) {
+  const node = e.target as Node | null;
+  if (node && moreEl.value?.contains(node)) return;
+  menuOpen.value = false;
+}
+
+watch(menuOpen, (open) => {
+  if (open) document.addEventListener("pointerdown", onDocPointer, true);
+  else document.removeEventListener("pointerdown", onDocPointer, true);
+});
+
+function insertExplored(tag: string) {
+  emit("update:modelValue", appendPromptChunk(props.modelValue, tag));
+}
+
+function openBricks() {
+  menuOpen.value = false;
+  if (!chips.value.length) {
+    note.value = "先输入提示词，再拆成积木";
+    return;
+  }
+  showTags.value = true;
+}
+
+async function translateNow() {
+  if (translating.value) return;
+  menuOpen.value = false;
+  translating.value = true;
+  try {
+    const result = await translateWeightedPrompt(props.modelValue);
+    emit("update:modelValue", result.text);
+    note.value = result.note;
+  } finally {
+    translating.value = false;
+  }
 }
 
 function applyTag(tag: string) {
@@ -181,27 +237,48 @@ function setTab(next: AcTab) {
 onBeforeUnmount(() => {
   if (timer) clearTimeout(timer);
   suggestSeq += 1;
+  document.removeEventListener("pointerdown", onDocPointer, true);
 });
 </script>
 
 <template>
   <div class="pf">
-    <textarea
-      ref="ta"
-      :value="modelValue"
-      :placeholder="placeholder"
-      @input="onInput"
-      @keydown="onKeydown"
-      @compositionstart="composing = true; clearHits()"
-      @compositionend="(e) => { composing = false; onInput(e) }"
-      @blur="onBlur"
-    />
+    <div class="editor">
+      <div ref="hl" class="hl" aria-hidden="true" v-html="highlighted" />
+      <textarea
+        ref="ta"
+        :value="modelValue"
+        :placeholder="placeholder"
+        @input="onInput"
+        @scroll="syncScroll"
+        @keydown="onKeydown"
+        @compositionstart="composing = true; clearHits()"
+        @compositionend="(e) => { composing = false; onInput(e) }"
+        @blur="onBlur"
+      />
+    </div>
     <div class="bar">
       <slot name="tools" />
+      <div ref="moreEl" class="more">
+        <button type="button" class="tag-btn" :class="{ on: menuOpen }" title="积木和翻译" @click="menuOpen = !menuOpen">
+          <NaiIcon name="globe" :size="13" />
+        </button>
+        <div v-if="menuOpen" class="pop">
+          <button type="button" @click="openBricks">
+            <NaiIcon name="layers" :size="14" />积木
+          </button>
+          <button type="button" :disabled="translating" @click="translateNow">
+            <NaiIcon name="globe" :size="14" />{{ translating ? "翻译中…" : "翻译" }}
+          </button>
+        </div>
+      </div>
+      <button type="button" class="tag-btn" :class="{ on: showExplorer }" @click="showExplorer = !showExplorer">扩展</button>
       <button type="button" class="tag-btn" :class="{ on: showTags }" :disabled="!chips.length" @click="showTags = !showTags">
         标签{{ chips.length ? ` ${chips.length}` : "" }}
       </button>
     </div>
+    <p v-if="note" class="note">{{ note }}</p>
+    <TagExplorer v-if="showExplorer" @insert="insertExplored" @close="showExplorer = false" />
     <TagWeightList
       v-if="showTags && chips.length"
       class="wgts"
@@ -241,15 +318,55 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .pf { position: relative; }
-textarea {
+.editor { position: relative; background: var(--bg0); border-radius: 6px; }
+.hl, .editor textarea {
+  display: block;
   width: 100%;
   min-height: 88px;
-  resize: vertical;
-  background: var(--bg0);
+  margin: 0;
+  padding: 10px;
   border: 0;
   border-radius: 6px;
-  padding: 10px;
+  font: inherit;
+  font-size: 0.875rem;
   line-height: 1.45;
+  letter-spacing: normal;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: break-word;
+  box-sizing: border-box;
+}
+.hl {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  color: var(--text);
+  background: transparent;
+  padding-right: 24px;
+}
+.editor textarea {
+  position: relative;
+  z-index: 1;
+  resize: vertical;
+  background: transparent;
+  color: transparent;
+  caret-color: #fff;
+  scrollbar-gutter: stable;
+}
+.editor textarea::selection {
+  background: rgba(124, 131, 214, 0.35);
+  color: transparent;
+}
+.hl :deep(.w-up) {
+  color: #ff6a3d;
+  background: rgba(255, 90, 48, 0.18);
+  border-radius: 3px;
+}
+.hl :deep(.w-lo) {
+  color: #6aa7ff;
+  background: rgba(80, 150, 255, 0.18);
+  border-radius: 3px;
 }
 .bar {
   display: flex;
@@ -269,6 +386,37 @@ textarea {
 }
 .tag-btn.on, .tag-btn:hover { background: #2e3152; color: var(--heading); }
 .tag-btn:disabled { opacity: 0.45; }
+.more { position: relative; }
+.more > .tag-btn { display: inline-flex; align-items: center; justify-content: center; width: 28px; padding: 0; }
+.pop {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 30;
+  min-width: 132px;
+  padding: 4px;
+  border-radius: 10px;
+  background: #1a1c34;
+  border: 1px solid #2b2e4a;
+  box-shadow: 0 12px 28px rgba(0,0,0,0.35);
+}
+.pop button {
+  width: 100%;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #fff;
+  font-size: 13px;
+  text-align: left;
+}
+.pop button:hover { background: #262948; }
+.pop button:disabled { opacity: 0.5; }
+.note { margin: 4px 0 0; color: rgba(255,255,255,0.5); font-size: 11px; }
 .wgts { margin-top: 8px; }
 .ac {
   position: fixed;

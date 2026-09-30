@@ -144,6 +144,91 @@ export function weightMultiplier(level: number): number {
   return Math.pow(PER_BRACE, level);
 }
 
+export interface WeightSpan {
+  raw: string;
+  /** null = ordinary text. Otherwise the emphasis multiplier (`1.5`, `0.3`, `-1`, or brace ×1.05^n). */
+  weight: number | null;
+}
+
+function braceEnd(s: string, i: number): number {
+  const open = s[i];
+  if (open !== "{" && open !== "[") return -1;
+  const close = open === "{" ? "}" : "]";
+  let depth = 0;
+  for (let j = i; j < s.length; j += 1) {
+    if (s[j] === open) depth += 1;
+    else if (s[j] === close) {
+      depth -= 1;
+      if (depth === 0) return j + 1;
+    }
+  }
+  return -1;
+}
+
+/** Walk a prompt without dropping commas or prose. Weight syntax becomes its own span. */
+export function weightSpans(text: string): WeightSpan[] {
+  const out: WeightSpan[] = [];
+  let i = 0;
+  let buf = "";
+  const flush = () => {
+    if (!buf) return;
+    out.push({ raw: buf, weight: null });
+    buf = "";
+  };
+  while (i < text.length) {
+    const open = text.slice(i).match(NUMERIC_OPEN_RE);
+    if (open) {
+      const after = i + open[0].length;
+      const close = text.indexOf("::", after);
+      if (close !== -1) {
+        flush();
+        out.push({ raw: text.slice(i, close + 2), weight: Number(open[1]) });
+        i = close + 2;
+        continue;
+      }
+    }
+    if (text[i] === "{" || text[i] === "[") {
+      const end = braceEnd(text, i);
+      if (end > i + 1) {
+        const raw = text.slice(i, end);
+        const tag = parseWeightedTag(raw);
+        if (tag.level !== 0) {
+          flush();
+          out.push({ raw, weight: weightMultiplier(tag.level) });
+          i = end;
+          continue;
+        }
+      }
+    }
+    buf += text[i];
+    i += 1;
+  }
+  flush();
+  return out;
+}
+
+function escHtml(s: string) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/** HTML mirror of a prompt. Weight above 1 is `w-up`; 1 and below is `w-lo`. */
+export function highlightWeightedPrompt(text: string): string {
+  let html = weightSpans(text)
+    .map((span) => {
+      if (span.weight == null) return escHtml(span.raw);
+      const cls = span.weight > 1 ? "w-up" : "w-lo";
+      return `<span class="${cls}">${escHtml(span.raw)}</span>`;
+    })
+    .join("");
+  if (text.endsWith("\n")) html += "<br>";
+  return html;
+}
+
+export function tagWeightValue(tag: WeightedTag): number {
+  if (tag.numeric != null) return tag.numeric;
+  return weightMultiplier(tag.level);
+}
+
 /** Human-readable brace multiplier like "×1.16" / "×0.91" / "" for neutral. */
 export function formatMultiplier(level: number): string {
   if (level === 0) return "";

@@ -14,6 +14,7 @@ const mode = ref("concept_explore");
 const category = ref("all");
 const showNsfw = ref(false);
 const busy = ref(false);
+const searched = ref(false);
 const error = ref("");
 const hits = ref<SemanticTag[]>([]);
 const picked = ref<string[]>([]);
@@ -42,14 +43,25 @@ function place() {
 }
 
 function toggleOpen() {
-  open.value = !open.value;
-  if (open.value) place();
+  if (open.value) {
+    closePanel();
+    return;
+  }
+  open.value = true;
+  place();
+}
+
+function closePanel() {
+  open.value = false;
+  searched.value = false;
 }
 
 function onDocDown(ev: PointerEvent) {
   if (!open.value) return;
-  const node = ev.target as Node | null;
-  if (node && (root.value?.contains(node) || panel.value?.contains(node))) return;
+  const path = ev.composedPath();
+  if (root.value && path.includes(root.value)) return;
+  if (panel.value && path.includes(panel.value)) return;
+  if (searched.value && !hits.value.length) return;
   open.value = false;
 }
 
@@ -74,7 +86,13 @@ function mergeTags(current: string, tags: string[]) {
 
 async function search() {
   const text = query.value.trim();
-  if (!text || busy.value) return;
+  if (busy.value) return;
+  searched.value = true;
+  if (!text) {
+    hits.value = [];
+    error.value = "先写要找的描述";
+    return;
+  }
   busy.value = true;
   error.value = "";
   try {
@@ -84,7 +102,7 @@ async function search() {
       category: category.value,
       showNsfw: showNsfw.value,
     });
-    if (!hits.value.length) error.value = "没有匹配到标签";
+    if (!hits.value.length) error.value = "";
   } catch (err) {
     hits.value = [];
     error.value = err instanceof Error ? err.message : String(err);
@@ -111,7 +129,7 @@ function apply() {
       class="bubble"
       :style="{ top: `${box.top}px`, left: `${box.left}px`, width: `${box.width}px` }"
       @pointerdown.stop
-      @keydown.esc="open = false"
+      @keydown.esc="closePanel"
     >
       <div class="row">
         <input
@@ -120,7 +138,7 @@ function apply() {
           placeholder="用中文描述，例如微笑、水手服"
           @keydown.enter.prevent="search"
         />
-        <button type="button" :disabled="busy || !query.trim()" @click="search">{{ busy ? "搜索中" : "搜索" }}</button>
+        <button type="button" class="go" :class="{ off: busy || !query.trim() }" @click="search">{{ busy ? "搜索中" : "搜索" }}</button>
       </div>
       <div class="row filters">
         <select v-model="mode">
@@ -131,8 +149,14 @@ function apply() {
         </select>
         <label><input v-model="showNsfw" type="checkbox" />NSFW</label>
       </div>
-      <p v-if="error" class="note">{{ error }}</p>
-      <p v-else-if="busy" class="note">第一次搜索可能要等十几秒。</p>
+      <p v-if="busy" class="note">第一次搜索可能要等十几秒。</p>
+      <div v-else-if="error" class="empty">
+        <b>{{ error }}</b>
+      </div>
+      <div v-else-if="searched && !hits.length" class="empty">
+        <b>没有匹配到标签</b>
+        <span>换个描述再试。服务刚启动时要等十几秒。</span>
+      </div>
       <div v-if="hits.length" class="hits">
         <button
           v-for="hit in hits"
@@ -230,7 +254,21 @@ function apply() {
   font-weight: 700;
   font-size: 12px;
 }
-.add:disabled, .row button:disabled { opacity: 0.45; }
+.add:disabled, .go.off { opacity: 0.45; }
+.empty {
+  min-height: 132px;
+  margin-top: 10px;
+  padding: 16px 12px;
+  border-radius: 10px;
+  background: #0e0f21;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 6px;
+  text-align: center;
+}
+.empty b { color: #fff; font-size: 14px; font-weight: 650; }
+.empty span { color: rgba(255,255,255,0.55); font-size: 12px; }
 .row button {
   height: 32px;
   padding: 0 12px;

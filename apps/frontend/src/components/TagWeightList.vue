@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { lookupTags } from "@/api/tauri";
+import { lookupTags, translateTagIntoLibrary } from "@/api/tauri";
 import {
   bumpTagWeight,
   extractPartAndMerge,
   extractPartFromGroup,
   formatTagWeight,
+  tagWeightValue,
   mergeTagWithNext,
   mergeTags,
   parseWeightedTag,
@@ -17,6 +18,7 @@ import {
   splitPromptTags,
   toggleNumericEmphasis,
   type MergeStyle,
+  type WeightedTag,
 } from "@/utils/promptWeight";
 
 const props = defineProps<{ modelValue: string }>();
@@ -36,7 +38,13 @@ const ghost = ref({ show: false, x: 0, y: 0, text: "" });
 const listEl = ref<HTMLElement | null>(null);
 const editing = ref<{ index: number; part: number | null; draft: string } | null>(null);
 const zh = ref<Record<string, string>>({});
+const translating = ref<Set<string>>(new Set());
+const translateError = ref<Record<string, string>>({});
 let lookupGen = 0;
+
+function tone(tag: WeightedTag) {
+  return tagWeightValue(tag) > 1 ? "up" : "lo";
+}
 
 function tagKey(name: string) {
   return name.trim().toLowerCase().replace(/\s+/g, "_");
@@ -46,6 +54,43 @@ function zhOf(name: string) {
   return zh.value[tagKey(name)] || "";
 }
 
+function queryOf(name: string) {
+  return name.trim().replace(/:+\s*$/g, "").trim();
+}
+
+function remember(next: Record<string, string>, name: string, value: string) {
+  const text = value.trim();
+  next[tagKey(name)] = text;
+  const query = queryOf(name);
+  if (query && query !== name.trim()) next[tagKey(query)] = text;
+}
+
+async function translateOne(name: string) {
+  const source = queryOf(name);
+  const key = tagKey(source);
+  if (!source || translating.value.has(key)) return;
+  translating.value = new Set([...translating.value, key]);
+  const errors = { ...translateError.value };
+  delete errors[key];
+  translateError.value = errors;
+  try {
+    const hit = await translateTagIntoLibrary(source);
+    if (!hit.description.trim()) throw new Error("没有译出中文");
+    const filled = { ...zh.value };
+    remember(filled, name, hit.description);
+    zh.value = filled;
+  } catch (err) {
+    translateError.value = {
+      ...translateError.value,
+      [key]: err instanceof Error ? err.message : String(err),
+    };
+  } finally {
+    const done = new Set(translating.value);
+    done.delete(key);
+    translating.value = done;
+  }
+}
+
 watch(
   chips,
   () => {
@@ -53,11 +98,16 @@ watch(
     const missing = names.filter((name) => zh.value[tagKey(name)] == null);
     if (!missing.length) return;
     const gen = ++lookupGen;
-    void lookupTags(missing)
+    const queries = [...new Set(missing.map(queryOf).filter(Boolean))];
+    void lookupTags(queries)
       .then((hits) => {
         if (gen !== lookupGen) return;
+        const byKey = new Map(hits.map((hit) => [tagKey(hit.tag), hit]));
         const next = { ...zh.value };
-        for (const hit of hits) next[tagKey(hit.tag)] = hit.found ? hit.description : "";
+        for (const name of missing) {
+          const hit = byKey.get(tagKey(queryOf(name))) ?? byKey.get(tagKey(name));
+          if (hit?.found && hit.description.trim()) remember(next, name, hit.description);
+        }
         zh.value = next;
       })
       .catch(() => {});
@@ -298,7 +348,7 @@ onBeforeUnmount(unbindMove);
         合成所选{{ selectedCount >= 2 ? ` ${selectedCount}` : "" }}
       </button>
     </div>
-    <p class="tip">点文字可改词。按住拖到另一条上合并。合成组里每个词都能单独改或拆出。</p>
+    <p class="tip">点文字可改词。没有中文的词点「译」，译完记进词库，下次直接显示。按住拖到另一条上合并。</p>
     <p v-if="!chips.length" class="empty">先输入逗号分隔的提示词</p>
     <div
       v-for="(tag, i) in chips"
@@ -321,12 +371,24 @@ onBeforeUnmount(unbindMove);
           @blur="commitEdit"
           @pointerdown.stop
         />
-        <p v-else class="text">{{ tag.core }}<em v-if="tag.parts.length <= 1 && zhOf(tag.core)">{{ zhOf(tag.core) }}</em></p>
+        <p v-else class="text" :class="tone(tag)">
+          {{ tag.core }}
+          <em v-if="tag.parts.length <= 1 && zhOf(tag.core)">{{ zhOf(tag.core) }}</em>
+          <button
+            v-else-if="tag.parts.length <= 1"
+            type="button"
+            class="tr"
+            :title="translateError[tagKey(queryOf(tag.core))] || '翻译并记入词库'"
+            @pointerdown.stop
+            @click.stop="translateOne(tag.core)"
+          >{{ translating.has(tagKey(queryOf(tag.core))) ? "…" : (translateError[tagKey(queryOf(tag.core))] ? "失败" : "译") }}</button>
+        </p>
         <div v-if="tag.parts.length > 1" class="parts">
           <span
             v-for="(part, pi) in tag.parts"
             :key="`${part}-${pi}`"
             class="part"
+            :class="tone(tag)"
             @pointerdown.stop="onPartPointerDown($event, i, pi)"
           >
             <textarea
@@ -340,11 +402,19 @@ onBeforeUnmount(unbindMove);
               @pointerdown.stop
             />
             <b v-else>{{ part }}<em v-if="zhOf(part)">{{ zhOf(part) }}</em></b>
+            <button
+              v-if="!isEditing(i, pi) && !zhOf(part)"
+              type="button"
+              class="tr"
+              :title="translateError[tagKey(queryOf(part))] || '翻译并记入词库'"
+              @pointerdown.stop
+              @click.stop="translateOne(part)"
+            >{{ translating.has(tagKey(queryOf(part))) ? "…" : (translateError[tagKey(queryOf(part))] ? "失败" : "译") }}</button>
             <button type="button" title="只拆出这个词" @click.stop="extractPart(i, pi)">拆</button>
           </span>
         </div>
         <div class="acts">
-          <span>{{ formatTagWeight(tag) }}</span>
+          <span :class="tone(tag)">{{ formatTagWeight(tag) }}</span>
           <button type="button" title="减弱" @click="bumpWeight(i, -1)">−</button>
           <button type="button" title="重置权重" @click="resetWeight(i)">0</button>
           <button type="button" title="加强" @click="bumpWeight(i, 1)">+</button>
@@ -428,6 +498,8 @@ onBeforeUnmount(unbindMove);
   border-radius: 6px;
 }
 .text:hover { background: rgba(255,255,255,0.04); }
+.text.up, .part.up, .acts > span.up { color: #ff6a3d; }
+.text.lo, .part.lo, .acts > span.lo { color: #6aa7ff; }
 .text em, .part em {
   margin-left: 6px;
   color: rgba(245, 243, 194, 0.72);
@@ -464,6 +536,17 @@ onBeforeUnmount(unbindMove);
   border-radius: 6px;
   background: #2a2d4a;
   color: #fff;
+}
+.wgt button.tr {
+  width: auto;
+  min-width: 22px;
+  height: 18px;
+  margin-left: 6px;
+  padding: 0 5px;
+  font-size: 11px;
+  vertical-align: 1px;
+  background: #2e3152;
+  color: #f5f3c2;
 }
 .wide { width: auto; min-width: 24px; padding: 0 5px; font-size: 11px; }
 .wgt button.on, .merge-bar .wide.on { background: #3d4270; color: var(--heading); }

@@ -453,6 +453,97 @@ pub fn add_custom_tag(name: String, cn: String, category: Option<u32>) -> Result
     Ok(to_lookup(&name.replace('_', " "), Some(&tag)))
 }
 
+fn has_han(text: &str) -> bool {
+    text.chars().any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch))
+}
+
+fn usable_zh(source: &str, translated: &str) -> bool {
+    let text = translated.trim();
+    !text.is_empty()
+        && has_han(text)
+        && !text.eq_ignore_ascii_case(source.trim())
+        && !text.to_ascii_uppercase().contains("MYMEMORY WARNING")
+}
+
+async fn google_to_zh(text: &str) -> Result<String, String> {
+    let client = http_client()?;
+    let res = client
+        .get("https://translate.googleapis.com/translate_a/single")
+        .header("Accept", "application/json")
+        .query(&[
+            ("client", "gtx"),
+            ("sl", "auto"),
+            ("tl", "zh-CN"),
+            ("dt", "t"),
+            ("q", text),
+        ])
+        .send()
+        .await
+        .map_err(format_reqwest)?;
+    if !res.status().is_success() {
+        return Err(format!("谷歌翻译失败 HTTP {}", res.status()));
+    }
+    let body: serde_json::Value = res
+        .json()
+        .await
+        .map_err(|_| "谷歌翻译没有返回结果".to_string())?;
+    let mut out = String::new();
+    if let Some(rows) = body.get(0).and_then(|value| value.as_array()) {
+        for row in rows {
+            if let Some(piece) = row.get(0).and_then(|value| value.as_str()) {
+                out.push_str(piece);
+            }
+        }
+    }
+    let out = out.trim().to_string();
+    if out.is_empty() {
+        return Err("谷歌翻译没有返回结果".into());
+    }
+    Ok(out)
+}
+
+fn saved_gloss(source: &str) -> Option<TagLookup> {
+    let guard = index_lock().lock().ok()?;
+    let idx = guard.as_ref()?;
+    let found = idx.iter().find(|item| norm_tag(&item.name) == norm_tag(source) && !item.cn.is_empty())?;
+    Some(to_lookup(source, Some(found)))
+}
+
+#[tauri::command]
+pub async fn translate_tag_into_library(name: String) -> Result<TagLookup, String> {
+    let source = name.trim().trim_end_matches(':').trim().to_string();
+    if source.is_empty() {
+        return Err("标签名为空".into());
+    }
+    if let Some(existing) = saved_gloss(&source) {
+        return Ok(existing);
+    }
+    if has_han(&source) && !source.chars().any(|ch| ch.is_ascii_alphabetic()) {
+        return Err("已经是中文".into());
+    }
+    let translated = match google_to_zh(&source).await {
+        Ok(text) if usable_zh(&source, &text) => text,
+        _ => {
+            let pair = if source.chars().any(|ch| ('\u{ac00}'..='\u{d7af}').contains(&ch)) {
+                "ko|zh-CN"
+            } else if source.chars().any(|ch| {
+                ('\u{3040}'..='\u{30ff}').contains(&ch) || ('\u{ff66}'..='\u{ff9d}').contains(&ch)
+            }) {
+                "ja|zh-CN"
+            } else {
+                "en|zh-CN"
+            };
+            crate::nai::translate_text(source.clone(), Some(pair.into()))
+                .await
+                .map_err(|_| "没有译出中文".to_string())?
+        }
+    };
+    if !usable_zh(&source, &translated) {
+        return Err("没有译出中文".into());
+    }
+    add_custom_tag(source, translated, Some(0))
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SemanticQuery {
@@ -532,4 +623,255 @@ pub async fn danbooru_semantic_search(query: SemanticQuery) -> Result<Vec<Semant
         });
     }
     Ok(out)
+}
+
+fn tag_slug(name: &str) -> String {
+    name.trim().to_ascii_lowercase().replace(' ', "_")
+}
+
+fn path_escape(value: &str) -> String {
+    let mut out = String::new();
+    for b in value.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'(' | b')' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+fn push_tag(out: &mut Vec<TagSuggestion>, name: &str, count: u32, category: u32) {
+    let tag = name.trim().replace('_', " ");
+    if tag.is_empty() || out.iter().any(|item| item.tag.eq_ignore_ascii_case(&tag)) {
+        return;
+    }
+    out.push(TagSuggestion {
+        tag,
+        count,
+        category,
+        description: String::new(),
+    });
+}
+
+fn strip_dtext(input: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if i + 1 < chars.len() && chars[i] == '[' && chars[i + 1] == '[' {
+            if let Some(rel) = chars[i + 2..].windows(2).position(|pair| pair == [']', ']']) {
+                let inner: String = chars[i + 2..i + 2 + rel].iter().collect();
+                let label = inner.rsplit('|').next().unwrap_or("").replace('_', " ");
+                out.push_str(label.trim());
+                i += rel + 4;
+                continue;
+            }
+        }
+        if chars[i] == '[' {
+            if let Some(rel) = chars[i + 1..].iter().position(|ch| *ch == ']') {
+                let inner: String = chars[i + 1..i + 1 + rel].iter().collect();
+                let lower = inner.to_ascii_lowercase();
+                let skip = lower.starts_with('/')
+                    || lower.starts_with("section")
+                    || lower.starts_with("expand")
+                    || lower.starts_with("quote")
+                    || matches!(
+                        lower.as_str(),
+                        "b" | "i" | "u" | "s" | "code" | "tn" | "toc" | "spoiler" | "nodisplay"
+                    );
+                if skip {
+                    i += rel + 2;
+                    continue;
+                }
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    let mut text = String::new();
+    for line in out.lines() {
+        let trimmed = line.trim();
+        let plain = trimmed
+            .strip_prefix("h1.")
+            .or_else(|| trimmed.strip_prefix("h2."))
+            .or_else(|| trimmed.strip_prefix("h3."))
+            .or_else(|| trimmed.strip_prefix("h4."))
+            .or_else(|| trimmed.strip_prefix("h5."))
+            .or_else(|| trimmed.strip_prefix("h6."))
+            .unwrap_or(trimmed)
+            .trim();
+        if plain.is_empty() {
+            if !text.ends_with("\n\n") && !text.is_empty() {
+                text.push('\n');
+            }
+            continue;
+        }
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(plain);
+        text.push('\n');
+    }
+    let count = text.chars().count();
+    if count <= 1600 {
+        return text.trim().to_string();
+    }
+    let cut: String = text.chars().take(1600).collect();
+    format!("{}…", cut.trim_end())
+}
+
+#[tauri::command]
+pub fn danbooru_browse(query: String, limit: Option<u32>) -> Result<Vec<TagSuggestion>, String> {
+    let limit = limit.unwrap_or(80).clamp(1, 80) as usize;
+    let q = query.trim();
+    if q.is_empty() {
+        return Ok(Vec::new());
+    }
+    ensure_index()?;
+    let guard = index_lock().lock().map_err(|e| e.to_string())?;
+    let idx = guard.as_ref().map(|items| items.as_slice()).unwrap_or(&[]);
+    if idx.len() < MIN_RECORDS {
+        return Err("先在设置里下载中文标签库".into());
+    }
+    Ok(search_index(idx, q, limit))
+}
+
+#[tauri::command]
+pub async fn danbooru_online_tags(query: String, limit: Option<u32>) -> Result<Vec<TagSuggestion>, String> {
+    let limit = limit.unwrap_or(40).clamp(1, 40);
+    let q = query.trim();
+    if q.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pattern = format!("{}*", tag_slug(q));
+    let client = http_client()?;
+    let res = client
+        .get("https://danbooru.donmai.us/tags.json")
+        .query(&[
+            ("search[name_matches]", pattern.as_str()),
+            ("search[order]", "count"),
+            ("limit", &limit.to_string()),
+        ])
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(format_reqwest)?;
+    if !res.status().is_success() {
+        return Err(format!("在线标签搜索失败 HTTP {}", res.status()));
+    }
+    let rows: Vec<serde_json::Value> = res.json().await.map_err(format_reqwest)?;
+    let mut out = Vec::new();
+    for row in rows {
+        let name = row.get("name").and_then(|value| value.as_str()).unwrap_or("");
+        let count = row.get("post_count").and_then(|value| value.as_u64()).unwrap_or(0) as u32;
+        let category = row.get("category").and_then(|value| value.as_u64()).unwrap_or(0) as u32;
+        push_tag(&mut out, name, count, category);
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+pub async fn danbooru_related_tags(name: String) -> Result<Vec<TagSuggestion>, String> {
+    let slug = tag_slug(&name);
+    if slug.is_empty() {
+        return Ok(Vec::new());
+    }
+    let client = http_client()?;
+    let res = client
+        .get("https://danbooru.donmai.us/related_tag.json")
+        .query(&[("search[query]", slug.as_str())])
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(format_reqwest)?;
+    if !res.status().is_success() {
+        return Err(format!("关联标签失败 HTTP {}", res.status()));
+    }
+    let body: serde_json::Value = res.json().await.map_err(format_reqwest)?;
+    let mut out = Vec::new();
+    let rows = body
+        .get("related_tags")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    for row in rows.iter().take(24) {
+        if let Some(name) = row.as_str() {
+            push_tag(&mut out, name, 0, 0);
+            continue;
+        }
+        let tag = row.get("tag").unwrap_or(row);
+        let name = tag.get("name").and_then(|value| value.as_str()).unwrap_or("");
+        let count = tag.get("post_count").and_then(|value| value.as_u64()).unwrap_or(0) as u32;
+        let category = tag.get("category").and_then(|value| value.as_u64()).unwrap_or(0) as u32;
+        push_tag(&mut out, name, count, category);
+    }
+    Ok(out)
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagWiki {
+    pub tag: String,
+    pub found: bool,
+    pub title: String,
+    pub body: String,
+    pub other_names: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn danbooru_wiki(name: String) -> Result<TagWiki, String> {
+    let slug = tag_slug(&name);
+    if slug.is_empty() {
+        return Err("标签名为空".into());
+    }
+    let client = http_client()?;
+    let res = client
+        .get(format!(
+            "https://danbooru.donmai.us/wiki_pages/{}.json",
+            path_escape(&slug)
+        ))
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(format_reqwest)?;
+    if res.status().as_u16() == 404 {
+        return Ok(TagWiki {
+            tag: slug.replace('_', " "),
+            found: false,
+            title: String::new(),
+            body: String::new(),
+            other_names: Vec::new(),
+        });
+    }
+    if !res.status().is_success() {
+        return Err(format!("标签百科失败 HTTP {}", res.status()));
+    }
+    let body: serde_json::Value = res.json().await.map_err(format_reqwest)?;
+    let raw = body.get("body").and_then(|value| value.as_str()).unwrap_or("");
+    let title = body
+        .get("title")
+        .and_then(|value| value.as_str())
+        .unwrap_or(&slug)
+        .replace('_', " ");
+    let other_names = body
+        .get("other_names")
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(|text| text.to_string()))
+                .filter(|text| !text.is_empty())
+                .take(8)
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(TagWiki {
+        tag: slug.replace('_', " "),
+        found: !raw.trim().is_empty(),
+        title,
+        body: strip_dtext(raw),
+        other_names,
+    })
 }

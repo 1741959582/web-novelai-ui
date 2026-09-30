@@ -2,6 +2,13 @@
 
 从新到旧。安装包在 [最新发行版](https://github.com/caiweida/web-novelai-ui/releases/latest)。已安装的程序启动后会读到新版本，顶栏可以点「立即更新」。
 
+## [0.1.18](https://github.com/caiweida/web-novelai-ui/releases/tag/v0.1.18)
+
+- 提示词权重大于 1 显示橙红色，等于或小于 1 显示蓝色。积木列表用同样的颜色。
+- 提示词旁可以打开积木和翻译。翻译会处理中文、日文和韩文，并保留权重写法。
+- 积木里没有中文的词可以点「译」。译文记进本地词库，下次直接显示。
+- 标签扩展可以搜索词库、查看关联标签和百科。窗口单独弹出，搜不到时会留在面板里说明。
+
 ## [0.1.17](https://github.com/caiweida/web-novelai-ui/releases/tag/v0.1.17)
 
 - 菜单新增视频生成：文生视频、参考图、首尾帧，使用 reAPI 的 Seedance。内容过滤默认关闭。

@@ -1,6 +1,7 @@
 import { translateText } from "@/api/tauri";
-import { hasCjkText } from "./textUtils";
-import { lookupZhTag, translateTagsByDict } from "./tagSuggest";
+import { parseWeightedTag, serializeWeightedTag, weightSpans } from "./promptWeight";
+import { chunkForTranslate, hasCjkText, splitTranslatable, type TranslateLang } from "./textUtils";
+import { lookupZhTag } from "./tagSuggest";
 
 const LS_PRESETS = "nai-positive-presets";
 const LS_CHUNKS = "nai-prompt-chunks";
@@ -66,38 +67,89 @@ export function makeChunk(name: string, content: string): PromptChunk {
 }
 
 export async function translatePromptToEnglish(text: string): Promise<{ text: string; note: string }> {
-  const trimmed = text.trim();
-  if (!trimmed) return { text, note: "提示词为空" };
-  if (!hasCjkText(trimmed)) return { text, note: "已经是英文，无需翻译" };
+  return translateWeightedPrompt(text);
+}
 
-  const dict = translateTagsByDict(text);
-  let next = dict.text;
-  const segs = next.split(",");
+const LANGPAIR: Record<TranslateLang, string> = {
+  zh: "zh-CN|en",
+  ja: "ja|en",
+  ko: "ko|en",
+};
+
+function usableTranslation(source: string, translated: string) {
+  const next = translated.trim();
+  if (!next || next === source || /MYMEMORY WARNING/i.test(next)) return "";
+  return next;
+}
+
+async function translateChunk(source: string, lang: TranslateLang): Promise<string> {
+  const pair = LANGPAIR[lang];
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const translated = usableTranslation(source, await translateText(source, pair));
+      if (translated) return translated;
+    } catch {
+      /* retry once, then keep the original chunk */
+    }
+    if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 350));
+  }
+  return "";
+}
+
+/** Translate Chinese, Japanese, and Korean into English, keeping weight syntax in place. */
+export async function translateWeightedPrompt(text: string): Promise<{ text: string; note: string }> {
+  if (!text.trim()) return { text, note: "提示词为空" };
+  if (!hasCjkText(text)) return { text, note: "已经是英文，无需翻译" };
+
   let apiHit = 0;
+  let dictHit = 0;
   let failed = 0;
-  const out = await Promise.all(
-    segs.map(async (seg) => {
-      const piece = seg.trim();
-      if (!piece || !hasCjkText(piece)) return seg;
-      const mapped = lookupZhTag(piece);
-      if (mapped) return seg.replace(piece, mapped);
-      try {
-        const translated = (await translateText(piece)).trim();
-        if (translated && translated !== piece) {
-          apiHit += 1;
-          return seg.replace(piece, translated);
-        }
-      } catch {
-        failed += 1;
+
+  async function translateRun(source: string, lang: TranslateLang): Promise<string> {
+    if (lang === "zh") {
+      const mapped = lookupZhTag(source);
+      if (mapped) {
+        dictHit += 1;
+        return mapped;
       }
-      return seg;
+    }
+    const chunks = chunkForTranslate(source);
+    const done: string[] = [];
+    for (const chunk of chunks) {
+      const translated = await translateChunk(chunk, lang);
+      if (translated) {
+        apiHit += 1;
+        done.push(translated);
+      } else {
+        failed += 1;
+        done.push(chunk);
+      }
+    }
+    return done.join("");
+  }
+
+  async function tr(piece: string): Promise<string> {
+    if (!hasCjkText(piece)) return piece;
+    const parts = splitTranslatable(piece);
+    const done = await Promise.all(
+      parts.map((part) => (part.lang ? translateRun(part.text, part.lang) : Promise.resolve(part.text))),
+    );
+    return done.join("");
+  }
+
+  const out = await Promise.all(
+    weightSpans(text).map(async (span) => {
+      if (span.weight == null) return tr(span.raw);
+      const tag = parseWeightedTag(span.raw);
+      if (!hasCjkText(tag.core)) return span.raw;
+      const parts = tag.parts.length ? tag.parts : [tag.core];
+      const next = await Promise.all(parts.map((part) => tr(part)));
+      return serializeWeightedTag(next.join(", "), tag.level, tag.numeric);
     }),
   );
-  next = out.join(",");
-  if (!hasCjkText(next) || apiHit || dict.hit) {
-    if (!next.endsWith(",") && !next.endsWith(", ")) next = `${next}, `;
-    if (failed) return { text: next, note: "部分词条已译成英文" };
-    return { text: next, note: "已自动检测并译成英文" };
-  }
-  return { text: next, note: failed ? "翻译失败，可先用提词选英文标签" : "没有可翻译的中文词条" };
+  const next = out.join("");
+  if (failed && !apiHit && !dictHit) return { text, note: "翻译失败，可先用提词选英文标签" };
+  if (!apiHit && !dictHit) return { text: next, note: "没有可翻译的中文、日文或韩文" };
+  if (failed) return { text: next, note: "部分内容已译成英文" };
+  return { text: next, note: "已译成英文" };
 }

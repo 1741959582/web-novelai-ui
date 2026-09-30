@@ -1929,6 +1929,10 @@ pub async fn augment_image(request: AugmentRequest) -> Result<GenerateResult, St
 struct MyMemoryResponse {
     #[serde(rename = "responseData")]
     response_data: Option<MyMemoryData>,
+    #[serde(rename = "responseStatus")]
+    response_status: Option<i32>,
+    #[serde(rename = "responseDetails")]
+    response_details: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1956,13 +1960,20 @@ pub async fn translate_text(text: String, langpair: Option<String>) -> Result<St
         return Err(format!("翻译失败 HTTP {}", res.status()));
     }
     let body: MyMemoryResponse = res.json().await.map_err(format_reqwest)?;
+    if body.response_status.is_some_and(|status| status != 200) {
+        return Err(
+            body.response_details
+                .filter(|detail| !detail.is_empty())
+                .unwrap_or_else(|| "翻译失败。".into()),
+        );
+    }
     let translated = body
         .response_data
         .and_then(|d| d.translated_text)
         .unwrap_or_default()
         .trim()
         .to_string();
-    if translated.is_empty() {
+    if translated.is_empty() || translated.to_ascii_uppercase().contains("MYMEMORY WARNING") {
         return Err("翻译结果为空。".into());
     }
     Ok(translated)

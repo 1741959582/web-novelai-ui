@@ -214,8 +214,36 @@ export function lookupTags(names: string[]) {
   return invoke<TagLookup[]>("lookup_tags", { names });
 }
 
+export function danbooruBrowse(query: string, limit = 80) {
+  return invoke<TagSuggestion[]>("danbooru_browse", { query, limit });
+}
+
+export function danbooruOnlineTags(query: string, limit = 40) {
+  return invoke<TagSuggestion[]>("danbooru_online_tags", { query, limit });
+}
+
+export function danbooruRelatedTags(name: string) {
+  return invoke<TagSuggestion[]>("danbooru_related_tags", { name });
+}
+
+export interface TagWiki {
+  tag: string;
+  found: boolean;
+  title: string;
+  body: string;
+  otherNames: string[];
+}
+
+export function danbooruWiki(name: string) {
+  return invoke<TagWiki>("danbooru_wiki", { name });
+}
+
 export function addCustomTag(name: string, cn: string, category = 0) {
   return invoke<TagLookup>("add_custom_tag", { name, cn, category });
+}
+
+export function translateTagIntoLibrary(name: string) {
+  return invoke<TagLookup>("translate_tag_into_library", { name });
 }
 
 export interface WdLabel {
