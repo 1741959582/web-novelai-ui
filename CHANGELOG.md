@@ -2,6 +2,12 @@
 
 从新到旧。安装包在 [最新发行版](https://github.com/caiweida/web-novelai-ui/releases/latest)。已安装的程序启动后会读到新版本，顶栏可以点「立即更新」。
 
+## [0.1.19](https://github.com/caiweida/web-novelai-ui/releases/tag/v0.1.19)
+
+- 菜单新增标签超市，在窗口里打开 Danbooru 标签分类、预设和模型索引。
+- 标签超市按浅色显示，正文不再铺在白底上看不见。
+- 图片反推可以用 Ctrl+V 粘贴截图或复制的图片，一次一张加入队列。正在输入文字时仍只粘贴文字。
+
 ## [0.1.18](https://github.com/caiweida/web-novelai-ui/releases/tag/v0.1.18)
 
 - 提示词权重大于 1 显示橙红色，等于或小于 1 显示蓝色。积木列表用同样的颜色。
