@@ -179,22 +179,139 @@ async function readBlob(file: File) {
   });
 }
 
-async function onPick(e: Event) {
-  const files = [...((e.target as HTMLInputElement).files ?? [])].filter((file) => file.type.startsWith("image/"));
-  (e.target as HTMLInputElement).value = "";
-  if (!files.length) return;
-  loadingMsg.value = `正在载入 0/${files.length}`;
+function isImageFile(file: File) {
+  if (file.type.startsWith("image/")) return true;
+  return /\.(png|jpe?g|webp|gif|bmp|avif)$/i.test(file.name);
+}
+
+function editingText(target: EventTarget | null) {
+  const el = target instanceof Element ? target.closest("input, textarea") : null;
+  if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) {
+    return target instanceof HTMLElement && target.isContentEditable;
+  }
+  if (el.readOnly || el.disabled) return false;
+  const type = (el.getAttribute("type") || "text").toLowerCase();
+  return !["button", "checkbox", "color", "file", "hidden", "image", "radio", "range", "reset", "submit"].includes(type);
+}
+
+function imagesFromClipboard(dt: DataTransfer | null) {
+  if (!dt) return [];
+  const listed = [...dt.files].filter(isImageFile);
+  if (listed.length) return listed;
+  const found: File[] = [];
+  for (const item of dt.items) {
+    if (item.kind !== "file" && !item.type.startsWith("image/")) continue;
+    const file = item.getAsFile();
+    if (!file) continue;
+    if (!file.type && item.type.startsWith("image/")) {
+      const ext = item.type.split("/")[1]?.replace("jpeg", "jpg") || "png";
+      const named = new File([file], file.name || `粘贴图.${ext}`, { type: item.type });
+      if (isImageFile(named)) found.push(named);
+      continue;
+    }
+    if (isImageFile(file)) found.push(file);
+  }
+  return found;
+}
+
+async function addFromFiles(files: File[]) {
+  const list = files.filter(isImageFile);
+  if (!list.length) {
+    store.status = "剪贴板里没有图片";
+    return;
+  }
+  loadingMsg.value = `正在载入 0/${list.length}`;
   let added = 0;
-  for (let i = 0; i < files.length; i += 1) {
-    loadingMsg.value = `正在载入 ${i + 1}/${files.length}`;
+  for (let i = 0; i < list.length; i += 1) {
+    loadingMsg.value = `正在载入 ${i + 1}/${list.length}`;
     try {
-      if (addJob(await readBlob(files[i]), files[i].name || `图片 ${jobs.value.length + 1}`)) added += 1;
+      const name = list[i].name && list[i].name !== "image.png" ? list[i].name : `粘贴图 ${jobs.value.length + 1}.png`;
+      if (addJob(await readBlob(list[i]), name)) added += 1;
     } catch {
       /* skip unreadable */
     }
   }
   loadingMsg.value = "";
   store.status = added ? `已加入 ${added} 张，队列共 ${jobs.value.length} 张` : "没有新的图片加入";
+}
+
+async function onPick(e: Event) {
+  const files = [...((e.target as HTMLInputElement).files ?? [])].filter(isImageFile);
+  (e.target as HTMLInputElement).value = "";
+  if (!files.length) return;
+  await addFromFiles(files);
+}
+
+let pasteSeen = false;
+
+async function addFromClipboardApi() {
+  if (!navigator.clipboard?.read) {
+    store.status = "这里读不到剪贴板图片，请改用拖入";
+    return;
+  }
+  try {
+    const items = await navigator.clipboard.read();
+    const files: File[] = [];
+    for (const item of items) {
+      const type = item.types.find((entry) => entry.startsWith("image/"));
+      if (!type) continue;
+      const blob = await item.getType(type);
+      const ext = type.split("/")[1]?.replace("jpeg", "jpg") || "png";
+      files.push(new File([blob], `粘贴图.${ext}`, { type }));
+    }
+    if (!files.length) {
+      store.status = "剪贴板里没有图片";
+      return;
+    }
+    await addFromFiles(files);
+  } catch {
+    store.status = "没有读到剪贴板图片。可以拖入文件，或先截图再 Ctrl+V。";
+  }
+}
+
+function onPaste(ev: ClipboardEvent) {
+  pasteSeen = true;
+  const files = imagesFromClipboard(ev.clipboardData);
+  if (files.length) {
+    ev.preventDefault();
+    void addFromFiles(files);
+    return;
+  }
+  if (editingText(ev.target)) return;
+  const text = ev.clipboardData?.getData("text/plain") ?? "";
+  const urls: string[] = [];
+  const paths: string[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    const item = line.trim();
+    if (!item) continue;
+    if (item.startsWith("data:image/")) urls.push(item);
+    else if (isHttpUrl(item)) urls.push(item);
+    else {
+      const path = pathFromTransferText(item);
+      if (path) paths.push(path);
+    }
+  }
+  if (urls.length || paths.length) {
+    ev.preventDefault();
+    void addFromSources(urls, paths);
+    return;
+  }
+  const types = [...(ev.clipboardData?.types ?? [])];
+  if (!types.length || types.some((entry) => entry === "Files" || entry.startsWith("image/"))) {
+    ev.preventDefault();
+    void addFromClipboardApi();
+  }
+}
+
+function onPasteKey(ev: KeyboardEvent) {
+  if (ev.repeat || ev.altKey || ev.shiftKey) return;
+  if (!(ev.ctrlKey || ev.metaKey) || ev.key.toLowerCase() !== "v") return;
+  if (editingText(ev.target)) return;
+  pasteSeen = false;
+  window.setTimeout(() => {
+    if (pasteSeen) return;
+    void addFromClipboardApi();
+  }, 60);
 }
 
 function isHttpUrl(value: string) {
@@ -512,6 +629,8 @@ async function retryFailed() {
 let unlistenTauri: (() => void) | undefined;
 onMounted(() => {
   void reverse.boot();
+  window.addEventListener("paste", onPaste);
+  window.addEventListener("keydown", onPasteKey);
   window.addEventListener("dragenter", onWinDragEnter, true);
   window.addEventListener("dragover", onWinDragOver, true);
   window.addEventListener("dragleave", onWinDragLeave, true);
@@ -556,6 +675,8 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  window.removeEventListener("paste", onPaste);
+  window.removeEventListener("keydown", onPasteKey);
   window.removeEventListener("dragenter", onWinDragEnter, true);
   window.removeEventListener("dragover", onWinDragOver, true);
   window.removeEventListener("dragleave", onWinDragLeave, true);
@@ -757,7 +878,7 @@ async function removeTask(id: string) {
     <div class="grid">
       <section class="panel">
         <label class="drop" :class="{ on: dropping, has: jobs.length }">
-          <span>{{ jobs.length ? `已加入 ${jobs.length} 张，再拖可继续添加` : "拖入或点击选择多张图片" }}</span>
+          <span>{{ jobs.length ? `已加入 ${jobs.length} 张，可再拖或 Ctrl+V` : "拖入、Ctrl+V 或点击选择多张图片" }}</span>
           <input class="pick" type="file" accept="image/*" multiple @change="onPick" />
         </label>
         <div v-if="jobs.length" class="queue">

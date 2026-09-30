@@ -13,6 +13,7 @@ export default createRouter({
     { path: "/reverse", name: "reverse", component: () => import("@/views/ReversePage.vue") },
     { path: "/reference", name: "reference", component: () => import("@/views/ReferencePage.vue"), meta: { title: "参考预设" } },
     { path: "/gallery", name: "gallery", component: () => import("@/views/GalleryPage.vue"), meta: { title: "法典" } },
+    { path: "/tagmarket", name: "tagmarket", component: () => import("@/views/TagMarketPage.vue"), meta: { title: "标签超市" } },
     { path: "/video", name: "video", component: () => import("@/views/VideoPage.vue"), meta: { title: "视频" } },
     { path: "/tavern", name: "tavern", component: () => import("@/views/TavernPage.vue"), meta: { title: "酒馆 AI 生图" } },
     { path: "/records", name: "records", component: () => import("@/views/RecordsPage.vue") },

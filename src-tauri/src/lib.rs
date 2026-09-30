@@ -18,6 +18,9 @@ mod wd_tagger;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .append_invoke_initialization_script(
+            r#"if(location.hostname==="tags.novelai.dev"){try{localStorage.setItem("vueuse-color-scheme","\"light\"")}catch(e){}}"#,
+        )
         .invoke_handler(tauri::generate_handler![
             store::settings_get,
             store::settings_save,
