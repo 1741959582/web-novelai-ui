@@ -11,6 +11,7 @@ import {
   mergeTags,
   parseWeightedTag,
   removeTagFromPrompt,
+  toggleTagEnabled,
   renamePartInGroup,
   renameTagInPrompt,
   resetTagWeight,
@@ -186,6 +187,10 @@ function removeChip(index: number) {
   setValue(removeTagFromPrompt(props.modelValue, index));
 }
 
+function toggleEnabled(index: number) {
+  setValue(toggleTagEnabled(props.modelValue, index));
+}
+
 function isEditing(index: number, part: number | null) {
   return editing.value?.index === index && editing.value.part === part;
 }
@@ -348,13 +353,13 @@ onBeforeUnmount(unbindMove);
         合成所选{{ selectedCount >= 2 ? ` ${selectedCount}` : "" }}
       </button>
     </div>
-    <p class="tip">点文字可改词。没有中文的词点「译」，译完记进词库，下次直接显示。按住拖到另一条上合并。</p>
+    <p class="tip">点文字可改词。没有中文的词点「译」，译完记进词库。点「停用」后这个词还在，生成时不使用，再点「启用」恢复。按住拖到另一条上合并。</p>
     <p v-if="!chips.length" class="empty">先输入逗号分隔的提示词</p>
     <div
       v-for="(tag, i) in chips"
       :key="`${tag.raw}-${i}`"
       class="wgt"
-      :class="{ sel: selected.has(i), drop: dropOn === i, dragging: dragFrom === i }"
+      :class="{ sel: selected.has(i), drop: dropOn === i, dragging: dragFrom === i, off: tag.disabled }"
       :data-tag-index="i"
       @pointerdown="onTagPointerDown($event, i)"
       @click.capture="onRowClick"
@@ -421,6 +426,13 @@ onBeforeUnmount(unbindMove);
           <button type="button" class="wide" :class="{ on: tag.numeric != null }" title="切换 2::标签::" @click="toggleNumeric(i)">::</button>
           <button v-if="tag.parts.length > 1" type="button" class="wide" title="全部拆开" @click="splitChip(i)">全拆</button>
           <button v-else type="button" class="wide" title="与下一个合成" :disabled="i >= chips.length - 1" @click="mergeNext(i)">合</button>
+          <button
+            type="button"
+            class="wide"
+            :class="{ on: tag.disabled }"
+            :title="tag.disabled ? '重新启用，生成时会使用' : '停用这个词，生成时不使用'"
+            @click="toggleEnabled(i)"
+          >{{ tag.disabled ? "启用" : "停用" }}</button>
           <button type="button" class="del" title="删除这个提示词" @click="removeChip(i)">×</button>
         </div>
       </div>
@@ -475,6 +487,8 @@ onBeforeUnmount(unbindMove);
 .wgt.sel { background: #262948; }
 .wgt.drop { border-color: #7c83d6; background: #2e3152; }
 .wgt.dragging { opacity: 0.55; cursor: grabbing; }
+.wgt.off { opacity: 0.55; }
+.wgt.off .text, .wgt.off .part { text-decoration: line-through; }
 .chk {
   margin-top: 2px;
   flex-shrink: 0;

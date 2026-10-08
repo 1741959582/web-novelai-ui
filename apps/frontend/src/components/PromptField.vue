@@ -368,6 +368,10 @@ onBeforeUnmount(() => {
   background: rgba(80, 150, 255, 0.18);
   border-radius: 3px;
 }
+.hl :deep(.w-off) {
+  color: rgba(255, 255, 255, 0.38);
+  text-decoration: line-through;
+}
 .bar {
   display: flex;
   justify-content: flex-end;

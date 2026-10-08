@@ -28,9 +28,16 @@ const aiOpen = ref(false);
 const advanced = ref(false);
 const dropping = ref(false);
 const guideOpen = ref(false);
+const previewCollapsed = ref(false);
 const promptTab = ref<"prompt" | "uc">("prompt");
 const charTab = ref<Record<string, "prompt" | "uc">>({});
 const autoComplete = ref(loadAutoComplete());
+watch(
+  () => store.previewUrl,
+  (next, prev) => {
+    if (next && next !== prev) previewCollapsed.value = false;
+  },
+);
 const promptValue = computed({
   get: () => (promptTab.value === "prompt" ? store.params.positivePrompt : store.params.negativePrompt),
   set: (next: string) => {
@@ -762,6 +769,9 @@ function resetAi() {
           <div class="bar"><i :style="{ width: `${Math.max(3, Math.round(displayProgress * 100))}%` }" /></div>
         </div>
       </div>
+      <div v-else-if="previewCollapsed && (store.previewUrl || store.i2iImage)" class="preview-stage collapsed">
+        <button class="preview-open" type="button" @click="previewCollapsed = false">显示图片</button>
+      </div>
       <div v-else-if="store.previewUrl || store.i2iImage || store.positionEditorOpen" class="preview-stage">
         <PreviewToolbar v-if="!store.positionEditorOpen && (store.previewUrl || store.i2iImage)" />
         <div class="preview-frame">
@@ -781,6 +791,15 @@ function resetAi() {
             title="点击查看固定图"
             @click="store.previewUrl = store.pinnedUrl"
           />
+          <button
+            v-if="!store.positionEditorOpen && (store.previewUrl || store.i2iImage)"
+            class="preview-x"
+            type="button"
+            title="隐藏图片"
+            @click.stop="previewCollapsed = true"
+          >
+            ×
+          </button>
         </div>
         <button
           v-if="store.positionEditorOpen"
@@ -888,6 +907,31 @@ function resetAi() {
   max-height: calc(100vh - 120px);
   margin: 0;
 }
+.preview-stage.collapsed { padding-top: 88px; }
+.preview-open {
+  border: 1px solid var(--bg3);
+  background: var(--bg2);
+  color: #fff;
+  border-radius: 8px;
+  padding: 10px 16px;
+  font-size: 14px;
+}
+.preview-open:hover { border-color: var(--heading); color: var(--heading); }
+.preview-x {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 6;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(14, 15, 33, 0.78);
+  color: #fff;
+  font-size: 18px;
+  line-height: 1;
+}
+.preview-x:hover { background: #ff7878; color: #1a1020; }
 .preview-frame .pinned {
   position: absolute;
   left: 10px;

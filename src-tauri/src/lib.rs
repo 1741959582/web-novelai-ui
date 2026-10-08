@@ -72,6 +72,7 @@ pub fn run() {
             reverse_tasks::reverse_task_load,
             reverse_tasks::reverse_task_delete,
             reverse_tasks::reverse_task_new,
+            reverse_tasks::reverse_job_image,
             quicktag::quicktag_catalog,
             quicktag::quicktag_search,
             quicktag::quicktag_entry,

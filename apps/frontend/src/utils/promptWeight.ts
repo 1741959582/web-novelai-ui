@@ -16,6 +16,8 @@ export interface WeightedTag {
   level: number;
   /** Number before `::`, e.g. 2 in `2::tag::`. null = brace / plain mode. */
   numeric: number | null;
+  /** Wrapped as `~~tag~~`: kept in the editor, omitted from the request. */
+  disabled: boolean;
   /** Raw original segment. */
   raw: string;
 }
@@ -37,6 +39,15 @@ export function splitPromptTags(prompt: string): string[] {
   while (i < s.length) {
     while (i < s.length && (s[i] === "," || /\s/.test(s[i]))) i += 1;
     if (i >= s.length) break;
+
+    if (s.startsWith("~~", i)) {
+      const close = s.indexOf("~~", i + 2);
+      if (close !== -1) {
+        segs.push(s.slice(i, close + 2).trim());
+        i = close + 2;
+        continue;
+      }
+    }
 
     const open = s.slice(i).match(NUMERIC_OPEN_RE);
     if (open) {
@@ -78,7 +89,13 @@ function tidyCore(core: string): string {
 
 /** Parse one segment into braces and/or numeric emphasis. */
 export function parseWeightedTag(raw: string): WeightedTag {
-  const trimmed = raw.trim();
+  const source = raw.trim();
+  let trimmed = source;
+  let disabled = false;
+  if (trimmed.startsWith("~~") && trimmed.endsWith("~~") && trimmed.length > 4) {
+    disabled = true;
+    trimmed = trimmed.slice(2, -2).trim();
+  }
   const numeric = trimmed.match(NUMERIC_FULL_RE);
   if (numeric) {
     const core = tidyCore(numeric[2]);
@@ -87,7 +104,8 @@ export function parseWeightedTag(raw: string): WeightedTag {
       parts: splitInnerParts(core),
       level: 0,
       numeric: Number(numeric[1]),
-      raw: trimmed,
+      disabled,
+      raw: source,
     };
   }
 
@@ -104,7 +122,7 @@ export function parseWeightedTag(raw: string): WeightedTag {
       break;
     }
   }
-  return { core: s, parts: splitInnerParts(s), level, numeric: null, raw: trimmed };
+  return { core: s, parts: splitInnerParts(s), level, numeric: null, disabled, raw: source };
 }
 
 export function formatNumeric(n: number): string {
@@ -131,8 +149,24 @@ export function serializeWeightedTag(core: string, level: number, numeric: numbe
   return c;
 }
 
-function writeTag(tag: Pick<WeightedTag, "core" | "level" | "numeric">): string {
-  return serializeWeightedTag(tag.core, tag.level, tag.numeric);
+function writeTag(tag: Pick<WeightedTag, "core" | "level" | "numeric"> & { disabled?: boolean }): string {
+  const body = serializeWeightedTag(tag.core, tag.level, tag.numeric);
+  if (!body) return "";
+  return tag.disabled ? `~~${body}~~` : body;
+}
+
+/** Drop `~~tag~~` segments. The editor keeps them; generation must not send them. */
+export function stripDisabledTags(prompt: string): string {
+  return joinSegs(splitPromptTags(prompt).filter((seg) => !parseWeightedTag(seg).disabled));
+}
+
+/** Keep the tag in the list, but stop sending it. A second toggle turns it back on. */
+export function toggleTagEnabled(prompt: string, index: number): string {
+  const segs = splitPromptTags(prompt);
+  if (index < 0 || index >= segs.length) return prompt;
+  const tag = parseWeightedTag(segs[index]);
+  segs[index] = writeTag({ ...tag, disabled: !tag.disabled });
+  return joinSegs(segs);
 }
 
 function joinSegs(segs: string[]): string {
@@ -148,6 +182,8 @@ export interface WeightSpan {
   raw: string;
   /** null = ordinary text. Otherwise the emphasis multiplier (`1.5`, `0.3`, `-1`, or brace ×1.05^n). */
   weight: number | null;
+  /** `~~tag~~` kept in the editor and left out of generation. */
+  disabled?: boolean;
 }
 
 function braceEnd(s: string, i: number): number {
@@ -176,6 +212,15 @@ export function weightSpans(text: string): WeightSpan[] {
     buf = "";
   };
   while (i < text.length) {
+    if (text.startsWith("~~", i)) {
+      const close = text.indexOf("~~", i + 2);
+      if (close !== -1) {
+        flush();
+        out.push({ raw: text.slice(i, close + 2), weight: null, disabled: true });
+        i = close + 2;
+        continue;
+      }
+    }
     const open = text.slice(i).match(NUMERIC_OPEN_RE);
     if (open) {
       const after = i + open[0].length;
@@ -215,6 +260,7 @@ function escHtml(s: string) {
 export function highlightWeightedPrompt(text: string): string {
   let html = weightSpans(text)
     .map((span) => {
+      if (span.disabled) return `<span class="w-off">${escHtml(span.raw)}</span>`;
       if (span.weight == null) return escHtml(span.raw);
       const cls = span.weight > 1 ? "w-up" : "w-lo";
       return `<span class="${cls}">${escHtml(span.raw)}</span>`;
@@ -350,10 +396,17 @@ export function toggleNumericEmphasis(prompt: string, index: number): string {
   if (index < 0 || index >= segs.length) return prompt;
   const tag = parseWeightedTag(segs[index]);
   if (tag.numeric != null) {
-    const plain = tag.parts.length ? tag.parts : [tag.core];
+    const plain = (tag.parts.length ? tag.parts : [tag.core]).map((part) =>
+      writeTag({ core: part, level: 0, numeric: null, disabled: tag.disabled }),
+    );
     segs.splice(index, 1, ...plain);
   } else {
-    segs[index] = writeTag({ core: tag.core, level: 0, numeric: braceToNumeric(tag.level) });
+    segs[index] = writeTag({
+      core: tag.core,
+      level: 0,
+      numeric: braceToNumeric(tag.level),
+      disabled: tag.disabled,
+    });
   }
   return joinSegs(segs);
 }
@@ -380,7 +433,8 @@ export function mergeTags(
   if (unique.length < 2) return prompt;
   const anchor = anchorIndex != null && unique.includes(anchorIndex) ? anchorIndex : unique[0];
   const tags = unique.map((i) => parseWeightedTag(segs[i]));
-  const written = writeTag(mergeWeight(tags, parseWeightedTag(segs[anchor]), style));
+  const anchorTag = parseWeightedTag(segs[anchor]);
+  const written = writeTag({ ...mergeWeight(tags, anchorTag, style), disabled: anchorTag.disabled });
   const next = [...segs];
   let insertAt = anchor;
   for (const i of unique.filter((i) => i !== anchor).sort((a, b) => b - a)) {
@@ -401,10 +455,11 @@ export function extractPartFromGroup(prompt: string, index: number, partIndex: n
   const [taken] = parts.splice(partIndex, 1);
   const rest = writeTag(
     tag.numeric != null
-      ? { core: parts.join(", "), level: 0, numeric: tag.numeric }
-      : { core: parts.join(", "), level: tag.level, numeric: null },
+      ? { core: parts.join(", "), level: 0, numeric: tag.numeric, disabled: tag.disabled }
+      : { core: parts.join(", "), level: tag.level, numeric: null, disabled: tag.disabled },
   );
-  segs.splice(index, 1, rest, taken);
+  const takenRaw = writeTag({ core: taken, level: 0, numeric: null, disabled: tag.disabled });
+  segs.splice(index, 1, rest, takenRaw);
   return joinSegs(segs);
 }
 
@@ -436,8 +491,8 @@ export function splitNumericGroup(prompt: string, index: number): string {
     ...tag.parts.map((part) =>
       writeTag(
         tag.numeric != null
-          ? { core: part, level: 0, numeric: tag.numeric }
-          : { core: part, level: tag.level, numeric: null },
+          ? { core: part, level: 0, numeric: tag.numeric, disabled: tag.disabled }
+          : { core: part, level: tag.level, numeric: null, disabled: tag.disabled },
       ),
     ),
   );

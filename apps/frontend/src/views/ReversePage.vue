@@ -8,6 +8,7 @@ import {
   fetchRemoteImage,
   lookupTags,
   readImageDataUrl,
+  reverseJobImage,
   translateText,
   wdTagCancel,
   wdTagImage,
@@ -101,6 +102,34 @@ function uid() {
 
 const isCl = computed(() => model.value.includes("cl_tagger"));
 const localCl = computed(() => isCl.value && store.settings.localClTaggerEnabled);
+const fullPreview = ref("");
+let previewToken = 0;
+
+watch(
+  () => active.value?.id ?? "",
+  async (id) => {
+    const token = ++previewToken;
+    const job = jobs.value.find((item) => item.id === id);
+    if (!job) {
+      fullPreview.value = "";
+      return;
+    }
+    const local = reverse.peekImage(job.id);
+    if (local) {
+      fullPreview.value = local;
+      return;
+    }
+    fullPreview.value = job.thumb || "";
+    if (!currentTaskId.value) return;
+    try {
+      const url = await reverseJobImage(currentTaskId.value, job.id);
+      if (token === previewToken) fullPreview.value = url;
+    } catch {
+      /* keep the thumbnail */
+    }
+  },
+  { immediate: true },
+);
 
 function modelLabel(id: string) {
   return id.includes("cl_tagger") ? "CL Tagger v2" : shortName(id);
@@ -150,12 +179,39 @@ function toEdits(items: WdLabel[], kind: "character" | "general"): ReverseTag[] 
   }));
 }
 
-function addJob(image: string, name: string, path?: string) {
+function makeThumb(dataUrl: string) {
+  return new Promise<string>((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const max = 160;
+      const edge = Math.max(img.naturalWidth || 1, img.naturalHeight || 1);
+      const scale = Math.min(1, max / edge);
+      const width = Math.max(1, Math.round((img.naturalWidth || max) * scale));
+      const height = Math.max(1, Math.round((img.naturalHeight || max) * scale));
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        resolve("");
+        return;
+      }
+      ctx.drawImage(img, 0, 0, width, height);
+      resolve(canvas.toDataURL("image/jpeg", 0.72));
+    };
+    img.onerror = () => resolve("");
+    img.src = dataUrl;
+  });
+}
+
+async function addJob(image: string, name: string, path?: string) {
   if (path && jobs.value.some((item) => item.path === path)) return false;
+  const thumb = image.startsWith("data:image/") ? await makeThumb(image) : "";
   const job: ReverseJob = {
     id: uid(),
     name,
-    image,
+    image: "",
+    thumb,
     path,
     status: "idle",
     progress: 0,
@@ -164,6 +220,7 @@ function addJob(image: string, name: string, path?: string) {
     tags: [],
     rating: [],
   };
+  reverse.rememberImage(job.id, image);
   jobs.value = [...jobs.value, job];
   if (!activeId.value) activeId.value = job.id;
   reverse.schedulePersist();
@@ -226,7 +283,7 @@ async function addFromFiles(files: File[]) {
     loadingMsg.value = `正在载入 ${i + 1}/${list.length}`;
     try {
       const name = list[i].name && list[i].name !== "image.png" ? list[i].name : `粘贴图 ${jobs.value.length + 1}.png`;
-      if (addJob(await readBlob(list[i]), name)) added += 1;
+      if (await addJob(await readBlob(list[i]), name)) added += 1;
     } catch {
       /* skip unreadable */
     }
@@ -422,7 +479,7 @@ async function addFromSources(urls: string[], paths: string[]) {
     index += 1;
     loadingMsg.value = `正在载入 ${index}/${total}`;
     try {
-      if (addJob(await readImageDataUrl(path), baseName(path), path)) added += 1;
+      if (await addJob(await readImageDataUrl(path), baseName(path), path)) added += 1;
     } catch (e) {
       store.status = e instanceof Error ? e.message : String(e);
     }
@@ -432,7 +489,7 @@ async function addFromSources(urls: string[], paths: string[]) {
     loadingMsg.value = `正在载入 ${index}/${total}`;
     try {
       const image = url.startsWith("data:image/") ? url : await fetchRemoteImage(url);
-      if (addJob(image, baseName(url.split("?")[0]) || `图片 ${jobs.value.length + 1}`)) added += 1;
+      if (await addJob(image, baseName(url.split("?")[0]) || `图片 ${jobs.value.length + 1}`)) added += 1;
     } catch (e) {
       store.status = e instanceof Error ? e.message : String(e);
     }
@@ -515,13 +572,14 @@ async function removeJob(id: string) {
   const job = jobs.value.find((item) => item.id === id);
   if (job?.status === "running") await cancelJob(id);
   jobs.value = jobs.value.filter((item) => item.id !== id);
+  reverse.forgetImage(id);
   if (activeId.value === id) activeId.value = jobs.value[0]?.id || "";
   if (jobs.value.length) reverse.schedulePersist();
 }
 
 async function useCurrent() {
   if (!current.value) return;
-  addJob(current.value, "当前生成图");
+  await addJob(current.value, "当前生成图");
   store.status = `已加入当前生成图，队列共 ${jobs.value.length} 张`;
 }
 
@@ -558,8 +616,12 @@ async function runJob(jobId: string, gen: number) {
   if (!job || gen !== batchGen) return;
   reverse.patchJob(jobId, { status: "running", progress: 0.04, progressMsg: "正在准备图片…", error: "", tags: [], rating: [] });
   try {
+    const imageBase64 = job.image.startsWith("data:image/")
+      ? job.image
+      : reverse.peekImage(jobId) || (currentTaskId.value ? await reverseJobImage(currentTaskId.value, jobId) : "");
+    if (!imageBase64.startsWith("data:image/")) throw new Error("读不到这张图片");
     const next = await wdTagImage({
-      imageBase64: job.image,
+      imageBase64,
       model: model.value,
       generalThresh: generalThresh.value,
       generalMcut: generalMcut.value,
@@ -891,7 +953,7 @@ async function removeTask(id: string) {
             :title="job.name"
             @click="activeId = job.id"
           >
-            <img :src="job.image" alt="" />
+            <img v-if="job.thumb" :src="job.thumb" alt="" decoding="async" />
             <i>{{ jobLabel(job) }}</i>
             <b v-if="job.status === 'running'" :style="{ width: `${Math.max(6, Math.round(job.progress * 100))}%` }" />
             <em @click.stop="removeJob(job.id)">×</em>
@@ -956,7 +1018,7 @@ async function removeTask(id: string) {
 
       <section class="panel">
         <div v-if="active" class="picked">
-          <img :src="active.image" alt="" />
+          <img v-if="fullPreview" :src="fullPreview" alt="" />
           <div>
             <strong>{{ active.name }}</strong>
             <p>{{ active.progressMsg || jobLabel(active) }}</p>

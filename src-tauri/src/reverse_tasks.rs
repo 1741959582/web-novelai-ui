@@ -45,6 +45,9 @@ pub struct ReverseJob {
     pub tags: Vec<ReverseTag>,
     #[serde(default)]
     pub rating: Vec<ReverseRating>,
+    /// Small JPEG data URL for the queue. The full picture stays on disk.
+    #[serde(default)]
+    pub thumb: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +87,9 @@ pub struct ReverseTaskSave {
     pub character_thresh: f64,
     pub character_mcut: bool,
     pub jobs: Vec<ReverseJob>,
+    /// When saving into a new task, copy pictures already stored under this id.
+    #[serde(default)]
+    pub source_task_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -192,6 +198,38 @@ fn ext_for(image: &str, bytes: &[u8]) -> &'static str {
     }
 }
 
+fn stored_image_name(dir: &std::path::Path, id: &str) -> Option<String> {
+    for ext in ["png", "jpg", "jpeg", "webp", "gif"] {
+        let name = format!("{id}.{ext}");
+        if dir.join(&name).is_file() {
+            return Some(name);
+        }
+    }
+    None
+}
+
+fn write_thumb(dir: &std::path::Path, id: &str, bytes: &[u8]) {
+    let Ok(img) = image::load_from_memory(bytes) else {
+        return;
+    };
+    let thumb = img.thumbnail(192, 192);
+    let path = dir.join(format!("{id}.thumb.jpg"));
+    let Ok(mut file) = fs::File::create(&path) else {
+        return;
+    };
+    let _ = thumb.write_to(&mut file, image::ImageFormat::Jpeg);
+}
+
+fn thumb_data_url(dir: &std::path::Path, id: &str, full_file: &str) -> String {
+    let path = dir.join(format!("{id}.thumb.jpg"));
+    if !path.is_file() {
+        if let Ok(bytes) = fs::read(dir.join(full_file)) {
+            write_thumb(dir, id, &bytes);
+        }
+    }
+    fs::read(&path).map(|bytes| encode_data_url(&bytes)).unwrap_or_default()
+}
+
 fn persist_status(status: &str) -> String {
     match status {
         "running" => "idle".into(),
@@ -218,19 +256,44 @@ fn write_task(id: &str, payload: &ReverseTaskSave, now: &str) -> Result<(StoredT
         let file_name = if job.image.starts_with("data:image/") {
             let bytes = decode_data_url(&job.image)?;
             let file = format!("{}.{}", job.id, ext_for(&job.image, &bytes));
-            fs::write(dir.join(&file), bytes).map_err(|e| format!("写入反推图片失败：{e}"))?;
+            fs::write(dir.join(&file), &bytes).map_err(|e| format!("写入反推图片失败：{e}"))?;
+            write_thumb(&dir, &job.id, &bytes);
             file
+        } else if let Some(existing) = stored_image_name(&dir, &job.id) {
+            existing
+        } else if let Some(source) = payload.source_task_id.as_deref().filter(|s| !s.is_empty()) {
+            let src_dir = root_dir()?.join(source);
+            let Some(name) = stored_image_name(&src_dir, &job.id) else {
+                continue;
+            };
+            fs::copy(src_dir.join(&name), dir.join(&name)).map_err(|e| format!("复制反推图片失败：{e}"))?;
+            let thumb_name = format!("{}.thumb.jpg", job.id);
+            let _ = fs::copy(src_dir.join(&thumb_name), dir.join(&thumb_name));
+            name
         } else if !job.image.is_empty() && PathBuf::from(&job.image).exists() {
-            PathBuf::from(&job.image)
+            let src = PathBuf::from(&job.image);
+            let name = src
                 .file_name()
                 .and_then(|s| s.to_str())
                 .unwrap_or("image.png")
-                .to_string()
+                .to_string();
+            if src != dir.join(&name) {
+                fs::copy(&src, dir.join(&name)).map_err(|e| format!("复制反推图片失败：{e}"))?;
+            }
+            if let Ok(bytes) = fs::read(dir.join(&name)) {
+                write_thumb(&dir, &job.id, &bytes);
+            }
+            name
         } else {
             continue;
         };
+        let thumb_file = dir.join(format!("{}.thumb.jpg", job.id));
         if thumb.is_empty() {
-            thumb = dir.join(&file_name).to_string_lossy().to_string();
+            thumb = if thumb_file.is_file() {
+                thumb_file.to_string_lossy().to_string()
+            } else {
+                dir.join(&file_name).to_string_lossy().to_string()
+            };
         }
         stored_jobs.push(StoredJob {
             id: job.id.clone(),
@@ -278,11 +341,12 @@ fn hydrate(stored: StoredTask) -> Result<ReverseTask, String> {
     let dir = root_dir()?.join(&stored.id);
     let mut jobs = Vec::new();
     for job in stored.jobs {
-        let bytes = fs::read(dir.join(&job.file)).map_err(|e| format!("读取反推图片失败：{e}"))?;
+        let thumb = thumb_data_url(&dir, &job.id, &job.file);
         jobs.push(ReverseJob {
             id: job.id,
             name: job.name,
-            image: encode_data_url(&bytes),
+            image: String::new(),
+            thumb,
             path: job.path,
             status: job.status,
             progress: if job.tags.is_empty() { 0.0 } else { 1.0 },
@@ -337,6 +401,18 @@ pub fn reverse_task_save(payload: ReverseTaskSave) -> Result<ReverseTaskSummary,
     data.current_id = Some(id);
     save_index(&data)?;
     Ok(summary)
+}
+
+#[tauri::command]
+pub fn reverse_job_image(task_id: String, job_id: String) -> Result<String, String> {
+    let stored = read_stored(&task_id)?;
+    let job = stored
+        .jobs
+        .into_iter()
+        .find(|item| item.id == job_id)
+        .ok_or_else(|| "找不到这张图片".to_string())?;
+    let bytes = fs::read(root_dir()?.join(&task_id).join(&job.file)).map_err(|e| format!("读取反推图片失败：{e}"))?;
+    Ok(encode_data_url(&bytes))
 }
 
 #[tauri::command]

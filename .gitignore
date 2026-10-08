@@ -3,6 +3,8 @@ dist/
 **/dist/
 src-tauri/target/
 src-tauri/target-rel/
+src-tauri/target-check/
+src-tauri/target-*/
 target/
 src-tauri/gen/
 src-tauri/WixTools/

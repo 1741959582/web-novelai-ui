@@ -142,6 +142,29 @@ fn merge_prompt(parts: &[&str]) -> String {
         .join(", ")
 }
 
+/// `~~tag~~` stays in the editor so it can be turned back on. Generation omits it.
+fn strip_disabled_tags(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(start) = rest.find("~~") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        match after.find("~~") {
+            Some(end) => rest = &after[end + 2..],
+            None => {
+                out.push_str(&rest[start..]);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn nai_source_name(model: &str) -> String {
     let m = normalize_model(model);
     match m.as_str() {
@@ -161,11 +184,11 @@ fn embed_png(png: Vec<u8>, req: &GenerateRequest, seed: u32, payload: &Value) ->
     if !png.starts_with(b"\x89PNG") {
         return png;
     }
-    let prompt = merge_prompt(&[&req.style_prompt, &req.positive_prompt]);
+    let prompt = strip_disabled_tags(&merge_prompt(&[&req.style_prompt, &req.positive_prompt]));
     let parameters = payload.get("parameters").cloned().unwrap_or(json!({}));
     let mut comment = json!({
         "prompt": prompt,
-        "uc": req.negative_prompt,
+        "uc": strip_disabled_tags(&req.negative_prompt),
         "steps": req.steps,
         "sampler": req.sampler,
         "seed": seed,
@@ -988,7 +1011,7 @@ fn build_payload(req: &GenerateRequest, seed: u32, action: &str) -> Value {
     } else {
         req.model.clone()
     };
-    let mut base = merge_prompt(&[&req.style_prompt, &req.positive_prompt]);
+    let mut base = strip_disabled_tags(&merge_prompt(&[&req.style_prompt, &req.positive_prompt]));
     if req.model_mode.as_deref() == Some("furry")
         && is_v4_plus(&model)
         && !base.to_ascii_lowercase().contains("fur dataset")
@@ -1000,7 +1023,10 @@ fn build_payload(req: &GenerateRequest, seed: u32, action: &str) -> Value {
     if is_v5(&model) && req.transparent_background {
         prompt = merge_prompt(&[&prompt, "transparent background"]);
     }
-    let negative = merge_prompt(&[&req.negative_prompt, &uc_preset_text(&model, req.uc_preset)]);
+    let negative = strip_disabled_tags(&merge_prompt(&[
+        &req.negative_prompt,
+        &uc_preset_text(&model, req.uc_preset),
+    ]));
     let v5 = is_v5(&model);
     let noise = if v5 {
         "karras"
@@ -1048,22 +1074,30 @@ fn build_payload(req: &GenerateRequest, seed: u32, action: &str) -> Value {
         let captions = req.char_captions.clone().unwrap_or_default();
         let char_payload: Vec<Value> = captions
             .iter()
-            .filter(|c| c.enabled.unwrap_or(true) && !c.prompt.trim().is_empty())
-            .map(|c| {
-                json!({
-                    "char_caption": c.prompt,
+            .filter(|c| c.enabled.unwrap_or(true))
+            .filter_map(|c| {
+                let caption = strip_disabled_tags(&c.prompt);
+                if caption.is_empty() {
+                    return None;
+                }
+                Some(json!({
+                    "char_caption": caption,
                     "centers": [{ "x": if c.use_coords { c.x } else { 0.5 }, "y": if c.use_coords { c.y } else { 0.5 } }]
-                })
+                }))
             })
             .collect();
         let negative_char_payload: Vec<Value> = captions
             .iter()
-            .filter(|c| c.enabled.unwrap_or(true) && !c.prompt.trim().is_empty())
-            .map(|c| {
-                json!({
-                    "char_caption": c.negative_prompt.clone().unwrap_or_default(),
+            .filter(|c| c.enabled.unwrap_or(true))
+            .filter_map(|c| {
+                let caption = strip_disabled_tags(&c.prompt);
+                if caption.is_empty() {
+                    return None;
+                }
+                Some(json!({
+                    "char_caption": strip_disabled_tags(&c.negative_prompt.clone().unwrap_or_default()),
                     "centers": [{ "x": if c.use_coords { c.x } else { 0.5 }, "y": if c.use_coords { c.y } else { 0.5 } }]
-                })
+                }))
             })
             .collect();
         let use_coords = captions.iter().any(|c| c.use_coords);

@@ -7,6 +7,7 @@ import {
   reverseTaskDelete,
   reverseTaskLoad,
   reverseTaskNew,
+  reverseJobImage,
   reverseTaskSave,
   reverseTasksList,
   type ReverseJob,
@@ -34,7 +35,10 @@ export const useReverseStore = defineStore("reverse", () => {
   const batching = ref(false);
   const booted = ref(false);
   let persistTimer: number | undefined;
+  let persistTail: Promise<void> = Promise.resolve();
   let unlistenProgress: UnlistenFn | undefined;
+  const onDisk = new Set<string>();
+  const fullImages = new Map<string, string>();
 
   const active = computed(() => jobs.value.find((item) => item.id === activeId.value) ?? jobs.value[0]);
   const pendingJobs = computed(() => jobs.value.filter((item) => item.status === "idle" || item.status === "error" || item.status === "cancelled"));
@@ -62,56 +66,101 @@ export const useReverseStore = defineStore("reverse", () => {
     await refreshThumbs();
   }
 
-  function snapshotPayload(id?: string) {
+  function snapshotPayload(id?: string, sourceTaskId?: string) {
     return {
       id,
+      sourceTaskId,
       model: model.value,
       generalThresh: generalThresh.value,
       generalMcut: generalMcut.value,
       characterThresh: characterThresh.value,
       characterMcut: characterMcut.value,
       jobs: jobs.value.map((item) => ({
-        ...item,
+        id: item.id,
+        name: item.name,
+        image: onDisk.has(item.id) ? "" : fullImages.get(item.id) || (item.image.startsWith("data:image/") ? item.image : ""),
+        path: item.path,
         status: item.status === "running" ? "idle" : item.status,
         progress: item.status === "done" ? 1 : 0,
+        progressMsg: item.progressMsg,
+        error: item.error,
+        tags: item.tags,
+        rating: item.rating,
       })),
     };
   }
 
+  function rememberImage(id: string, image: string) {
+    if (image.startsWith("data:image/")) fullImages.set(id, image);
+  }
+
+  function forgetImage(id: string) {
+    fullImages.delete(id);
+    onDisk.delete(id);
+  }
+
+  function peekImage(id: string) {
+    return fullImages.get(id) || "";
+  }
+
   async function persist(createNew = false) {
     if (!jobs.value.length) return;
-    const rec = await reverseTaskSave(snapshotPayload(createNew ? undefined : currentTaskId.value || undefined));
+    const sourceTaskId = createNew ? currentTaskId.value || undefined : undefined;
+    const payload = snapshotPayload(createNew ? undefined : currentTaskId.value || undefined, sourceTaskId);
+    const rec = await reverseTaskSave(payload);
     currentTaskId.value = rec.id;
+    for (const item of payload.jobs) {
+      if (!item.image.startsWith("data:image/")) {
+        if (!fullImages.has(item.id)) onDisk.add(item.id);
+        continue;
+      }
+      const current = fullImages.get(item.id);
+      if (current && current !== item.image) continue;
+      onDisk.add(item.id);
+      fullImages.delete(item.id);
+    }
+    jobs.value = jobs.value.map((item) => (item.image.startsWith("data:image/") && onDisk.has(item.id) ? { ...item, image: "" } : item));
     await refreshList();
     return rec;
+  }
+
+  function enqueuePersist(createNew = false) {
+    if (persistTimer) {
+      window.clearTimeout(persistTimer);
+      persistTimer = undefined;
+    }
+    const run = persistTail.then(() => persist(createNew)).then(() => undefined);
+    persistTail = run.catch(() => undefined);
+    return run;
   }
 
   function schedulePersist() {
     if (persistTimer) window.clearTimeout(persistTimer);
     persistTimer = window.setTimeout(() => {
-      void persist(false);
+      persistTimer = undefined;
+      void enqueuePersist(false);
     }, 700);
   }
 
   async function ensureTask() {
-    await persist(false);
+    await enqueuePersist(false);
   }
 
   async function beginRun() {
     const createNew = sealed.value && doneJobs.value.length > 0 && pendingJobs.value.length > 0;
     sealed.value = false;
-    await persist(createNew);
+    await enqueuePersist(createNew);
   }
 
   async function finishRun() {
     sealed.value = true;
-    await persist(false);
+    await enqueuePersist(false);
   }
 
   async function newTask() {
     if (jobs.value.length) {
       try {
-        await persist(false);
+        await enqueuePersist(false);
       } catch {
         /* keep going */
       }
@@ -120,6 +169,8 @@ export const useReverseStore = defineStore("reverse", () => {
     activeId.value = "";
     currentTaskId.value = "";
     sealed.value = false;
+    onDisk.clear();
+    fullImages.clear();
     try {
       await reverseTaskNew();
     } catch {
@@ -130,16 +181,22 @@ export const useReverseStore = defineStore("reverse", () => {
   async function loadTask(id: string) {
     if (jobs.value.length && currentTaskId.value && currentTaskId.value !== id) {
       try {
-        await persist(false);
+        await enqueuePersist(false);
       } catch {
         /* still load */
       }
     }
     const rec = await reverseTaskLoad(id);
-    jobs.value = rec.jobs.map((item) => ({
-      ...item,
-      status: (item.status as ReverseJobStatus) || "idle",
-    }));
+    onDisk.clear();
+    fullImages.clear();
+    jobs.value = rec.jobs.map((item) => {
+      onDisk.add(item.id);
+      return {
+        ...item,
+        image: "",
+        status: (item.status as ReverseJobStatus) || "idle",
+      };
+    });
     currentTaskId.value = rec.id;
     model.value = rec.model || DEFAULT_MODEL;
     generalThresh.value = rec.generalThresh;
@@ -159,6 +216,8 @@ export const useReverseStore = defineStore("reverse", () => {
       activeId.value = "";
       currentTaskId.value = "";
       sealed.value = false;
+      onDisk.clear();
+      fullImages.clear();
     }
     await refreshList();
   }
@@ -205,6 +264,9 @@ export const useReverseStore = defineStore("reverse", () => {
     doneJobs,
     busy,
     patchJob,
+    rememberImage,
+    forgetImage,
+    peekImage,
     persist,
     schedulePersist,
     ensureTask,

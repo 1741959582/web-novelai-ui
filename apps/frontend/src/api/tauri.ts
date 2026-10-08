@@ -335,6 +335,7 @@ export interface ReverseJob {
   id: string;
   name: string;
   image: string;
+  thumb?: string;
   path?: string;
   status: "idle" | "running" | "done" | "error" | "cancelled" | string;
   progress: number;
@@ -376,6 +377,7 @@ export function reverseTaskCurrent() {
 
 export function reverseTaskSave(payload: {
   id?: string;
+  sourceTaskId?: string;
   name?: string;
   model: string;
   generalThresh: number;
@@ -397,6 +399,10 @@ export function reverseTaskDelete(id: string) {
 
 export function reverseTaskNew() {
   return invoke<void>("reverse_task_new");
+}
+
+export function reverseJobImage(taskId: string, jobId: string) {
+  return invoke<string>("reverse_job_image", { taskId, jobId });
 }
 
 export interface QuickCollection {

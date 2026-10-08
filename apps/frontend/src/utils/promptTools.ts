@@ -139,12 +139,13 @@ export async function translateWeightedPrompt(text: string): Promise<{ text: str
 
   const out = await Promise.all(
     weightSpans(text).map(async (span) => {
-      if (span.weight == null) return tr(span.raw);
+      if (span.weight == null && !span.disabled) return tr(span.raw);
       const tag = parseWeightedTag(span.raw);
       if (!hasCjkText(tag.core)) return span.raw;
       const parts = tag.parts.length ? tag.parts : [tag.core];
       const next = await Promise.all(parts.map((part) => tr(part)));
-      return serializeWeightedTag(next.join(", "), tag.level, tag.numeric);
+      const body = serializeWeightedTag(next.join(", "), tag.level, tag.numeric);
+      return span.disabled ? `~~${body}~~` : body;
     }),
   );
   const next = out.join("");
