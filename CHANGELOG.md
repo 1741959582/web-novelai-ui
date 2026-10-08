@@ -2,6 +2,12 @@
 
 从新到旧。安装包在 [最新发行版](https://github.com/caiweida/web-novelai-ui/releases/latest)。已安装的程序启动后会读到新版本，顶栏可以点「立即更新」。
 
+## [1.0.0](https://github.com/caiweida/web-novelai-ui/releases/tag/v1.0.0)
+
+- 积木里每个关键词可以停用。词还留在列表里，生成时不会使用，再点启用会连同权重一起恢复。
+- 生成页的大图可以点叉隐藏，再用「显示图片」打开。新图出来时会自动显示。
+- 图片反推队列改用小缩略图。几十张图时切换回生成页不再卡住。
+
 ## [0.1.19](https://github.com/caiweida/web-novelai-ui/releases/tag/v0.1.19)
 
 - 菜单新增标签超市，在窗口里打开 Danbooru 标签分类、预设和模型索引。
