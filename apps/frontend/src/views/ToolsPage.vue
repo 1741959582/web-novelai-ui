@@ -9,7 +9,7 @@ const tools = [
   { title: "画风实验室", desc: "随机画师串、目标画风迭代与收藏。" },
   { title: "灵感胶囊 / Tag 补全", desc: "本地词库与在线补全。" },
   { title: "反推", desc: "WD Tagger 走 Hugging Face 空间；若设置里启用了本地 GPU，CL Tagger v2 会在本机跑。", path: "/reverse" },
-  { title: "APNG 伪装 / GIF", desc: "封面藏缩略图，真图藏进点开后的动画帧；也能合成 GIF、还原、清元数据和打码。", path: "/apng" },
+  { title: "APNG 伪装 / GIF", desc: "封面藏缩略图，真图藏进点开后的动画帧；也能合成 GIF、还原、清元数据、打码和添加杂色。", path: "/apng" },
   { title: "个人法典", desc: "离线查找章节与分类提示词。" },
 ];
 </script>

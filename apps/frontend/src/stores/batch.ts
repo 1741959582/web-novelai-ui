@@ -1,6 +1,6 @@
 import { acceptHMRUpdate, defineStore } from "pinia";
 import { computed, ref, watch } from "vue";
-import { inspectImage, readImageDataUrl } from "@/api/tauri";
+import { batchLibraryLoad, batchLibrarySave, inspectImage, readImageDataUrl } from "@/api/tauri";
 import {
   DEFAULT_PARAMS,
   maxCharacterPrompts,
@@ -589,17 +589,55 @@ export const useBatchStore = defineStore("batch", () => {
     );
   }
 
+  function libraryPayload() {
+    snapshotActive();
+    return {
+      activeId: activeListId.value,
+      lists: lists.value,
+      sharedCharacters: sharedCharacters.value,
+      sharedNeg: sharedNeg.value,
+      sharedCopies: sharedCopies.value,
+    };
+  }
+
+  let diskTimer = 0;
+  let diskTail: Promise<void> = Promise.resolve();
+
+  function writeLocal(payload: ReturnType<typeof libraryPayload>) {
+    try {
+      localStorage.setItem(LISTS_KEY, JSON.stringify(payload));
+    } catch {
+      /* the installed app drops this cache on exit; the file copy is the one that stays */
+    }
+  }
+
+  function enqueueDisk(payload: ReturnType<typeof libraryPayload>) {
+    const run = diskTail
+      .catch(() => undefined)
+      .then(() => batchLibrarySave(payload))
+      .then(() => undefined);
+    diskTail = run.catch(() => undefined);
+    return run;
+  }
+
   function persistLibrary() {
     if (!booted.value) return;
-    snapshotActive();
-    try {
-      localStorage.setItem(
-        LISTS_KEY,
-        JSON.stringify({ activeId: activeListId.value, lists: lists.value }),
-      );
-    } catch {
-      /* ignore quota */
-    }
+    const payload = libraryPayload();
+    writeLocal(payload);
+    window.clearTimeout(diskTimer);
+    diskTimer = window.setTimeout(() => {
+      diskTimer = 0;
+      void enqueueDisk(libraryPayload());
+    }, 400);
+  }
+
+  async function flushLibrary() {
+    if (!booted.value) return;
+    window.clearTimeout(diskTimer);
+    diskTimer = 0;
+    const payload = libraryPayload();
+    writeLocal(payload);
+    await enqueueDisk(payload);
   }
 
   let previewGen = 0;
@@ -680,7 +718,8 @@ export const useBatchStore = defineStore("batch", () => {
   async function boot() {
     if (booted.value) return;
     try {
-      const saved = readLibrary();
+      let saved = await readDiskLibrary();
+      if (!saved.lists.length) saved = readLibrary();
       if (!saved.lists.length) {
         const legacy = readLegacyJobs();
         if (legacy.length) {
@@ -702,10 +741,14 @@ export const useBatchStore = defineStore("batch", () => {
       listName.value = active.name;
       bulkText.value = active.bulkText || "";
       jobs.value = active.jobs.map((job) => hydrateJob(job));
+      if (saved.sharedCharacters?.length) sharedCharacters.value = saved.sharedCharacters.map((item) => ({ ...item }));
+      if (typeof saved.sharedNeg === "string") sharedNeg.value = saved.sharedNeg;
+      if (typeof saved.sharedCopies === "number" && saved.sharedCopies > 0) sharedCopies.value = saved.sharedCopies;
       applying = false;
       booted.value = true;
       persistLibrary();
       localStorage.removeItem(STORAGE_KEY);
+      bindPageHide();
       await loadPreviews();
     } catch {
       booted.value = true;
@@ -717,8 +760,17 @@ export const useBatchStore = defineStore("batch", () => {
     }
   }
 
+  let pageHideBound = false;
+  function bindPageHide() {
+    if (pageHideBound) return;
+    pageHideBound = true;
+    window.addEventListener("pagehide", () => {
+      void flushLibrary();
+    });
+  }
+
   watch(
-    [jobs, listName, bulkText],
+    [jobs, listName, bulkText, sharedCharacters, sharedNeg, sharedCopies],
     () => {
       if (!booted.value || applying) return;
       persistLibrary();
@@ -770,6 +822,7 @@ export const useBatchStore = defineStore("batch", () => {
     requestStop,
     runQueue,
     saveList,
+    flushLibrary,
     createList,
     switchList,
     removeList,
@@ -804,10 +857,15 @@ function readLegacyJobs(): BatchJob[] {
   return Array.isArray(parsed) ? parsed : [];
 }
 
-function readLibrary(): { activeId: string; lists: BatchList[] } {
-  const raw = localStorage.getItem(LISTS_KEY);
-  if (!raw) return { activeId: "", lists: [] };
-  const parsed = JSON.parse(raw) as { activeId?: string; lists?: BatchList[] };
+interface LibraryFile {
+  activeId: string;
+  lists: BatchList[];
+  sharedCharacters?: CharCaption[];
+  sharedNeg?: string;
+  sharedCopies?: number;
+}
+
+function normalizeLibrary(parsed: { activeId?: string; lists?: BatchList[]; sharedCharacters?: CharCaption[]; sharedNeg?: string; sharedCopies?: number } | null): LibraryFile {
   if (!parsed || !Array.isArray(parsed.lists)) return { activeId: "", lists: [] };
   const next = parsed.lists
     .filter((item) => item && typeof item.id === "string" && Array.isArray(item.jobs))
@@ -818,7 +876,29 @@ function readLibrary(): { activeId: string; lists: BatchList[] } {
       bulkText: typeof item.bulkText === "string" ? item.bulkText : "",
       updatedAt: Number(item.updatedAt) || Date.now(),
     }));
-  return { activeId: typeof parsed.activeId === "string" ? parsed.activeId : "", lists: next };
+  return {
+    activeId: typeof parsed.activeId === "string" ? parsed.activeId : "",
+    lists: next,
+    sharedCharacters: Array.isArray(parsed.sharedCharacters) ? parsed.sharedCharacters : undefined,
+    sharedNeg: typeof parsed.sharedNeg === "string" ? parsed.sharedNeg : undefined,
+    sharedCopies: typeof parsed.sharedCopies === "number" ? parsed.sharedCopies : undefined,
+  };
+}
+
+function readLibrary(): LibraryFile {
+  const raw = localStorage.getItem(LISTS_KEY);
+  if (!raw) return { activeId: "", lists: [] };
+  return normalizeLibrary(JSON.parse(raw) as LibraryFile);
+}
+
+async function readDiskLibrary(): Promise<LibraryFile> {
+  try {
+    const disk = await batchLibraryLoad();
+    if (!disk || typeof disk !== "object") return { activeId: "", lists: [] };
+    return normalizeLibrary(disk as LibraryFile);
+  } catch {
+    return { activeId: "", lists: [] };
+  }
 }
 
 if (import.meta.hot) {

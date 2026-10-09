@@ -1,4 +1,5 @@
 mod apng;
+mod batch_lists;
 mod censor;
 mod cl_tagger_local;
 mod danbooru;
@@ -90,6 +91,7 @@ pub fn run() {
             apng::apng_clean,
             apng::apng_strip,
             apng::apng_mosaic,
+            apng::apng_grain,
             censor::censor_status,
             censor::censor_download,
             censor::censor_open_dir,
@@ -117,6 +119,8 @@ pub fn run() {
             video::reapi_video_task,
             video::reapi_publish_image,
             video::reapi_save_video,
+            batch_lists::batch_library_load,
+            batch_lists::batch_library_save,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

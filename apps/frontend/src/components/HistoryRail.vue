@@ -29,6 +29,7 @@ const sendTargets: { id: ApngTab; label: string }[] = [
   { id: "restore", label: "还原真图" },
   { id: "meta", label: "清除元数据" },
   { id: "mosaic", label: "打马赛克" },
+  { id: "noise", label: "添加杂色" },
 ];
 
 const items = computed(() => store.visibleHistory());

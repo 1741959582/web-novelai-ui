@@ -29,6 +29,14 @@ export function settingsGet() {
   return invoke<AppSettings>("settings_get");
 }
 
+export function batchLibraryLoad() {
+  return invoke<unknown>("batch_library_load");
+}
+
+export function batchLibrarySave(library: unknown) {
+  return invoke<void>("batch_library_save", { library });
+}
+
 export function settingsSave(settings: AppSettings) {
   return invoke<AppSettings>("settings_save", { settings });
 }
@@ -628,6 +636,16 @@ export function fileCleanedImages(items: { path: string; sourcePath: string; nam
 
 export function apngMosaic(image: string, block = 16) {
   return invoke<SavedImage>("apng_mosaic", { image, block });
+}
+
+export function apngGrain(payload: { image: string; amount?: number; size?: number; color?: boolean; name?: string }) {
+  return invoke<SavedImage>("apng_grain", {
+    image: payload.image,
+    amount: payload.amount,
+    size: payload.size,
+    color: payload.color,
+    name: payload.name,
+  });
 }
 
 export interface CensorEngineInfo {

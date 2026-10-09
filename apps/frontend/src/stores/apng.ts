@@ -20,7 +20,7 @@ export interface ApngItem {
   error: string;
 }
 
-export type ApngTab = "disguise" | "gif" | "restore" | "meta" | "mosaic";
+export type ApngTab = "disguise" | "gif" | "restore" | "meta" | "mosaic" | "noise";
 export type CoverMode = "default" | "custom";
 
 const MAX_QUEUE = 150;

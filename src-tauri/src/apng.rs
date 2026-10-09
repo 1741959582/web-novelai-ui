@@ -485,6 +485,96 @@ pub fn apng_strip(image: String, name: Option<String>) -> Result<SavedImage, Str
     save_bytes(&encode_png(&img)?, ".png", Some(label))
 }
 
+struct GrainRng(u64);
+
+impl GrainRng {
+    fn next_u32(&mut self) -> u32 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        (x >> 33) as u32
+    }
+
+    fn unit(&mut self) -> f32 {
+        self.next_u32() as f32 / u32::MAX as f32
+    }
+
+    fn gauss(&mut self) -> f32 {
+        self.unit() + self.unit() + self.unit() - 1.5
+    }
+}
+
+fn add_grain(img: &mut RgbaImage, amount: u32, size: u32, color: bool) {
+    let amp = amount.clamp(1, 80) as f32;
+    let cell = size.clamp(1, 12);
+    let (w, h) = img.dimensions();
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0xA5A5_5A5A);
+    let mut rng = GrainRng(seed | 1);
+    if cell <= 1 {
+        for px in img.pixels_mut() {
+            if px.0[3] < 16 {
+                continue;
+            }
+            let n = if color {
+                [rng.gauss(), rng.gauss(), rng.gauss()]
+            } else {
+                let g = rng.gauss();
+                [g, g, g]
+            };
+            for c in 0..3 {
+                px.0[c] = (px.0[c] as f32 + n[c] * amp).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+        return;
+    }
+    let cw = ((w + cell - 1) / cell) as usize;
+    let ch = ((h + cell - 1) / cell) as usize;
+    let mut field = vec![[0f32; 3]; cw * ch];
+    for sample in &mut field {
+        if color {
+            *sample = [rng.gauss(), rng.gauss(), rng.gauss()];
+        } else {
+            let g = rng.gauss();
+            *sample = [g, g, g];
+        }
+    }
+    for y in 0..h {
+        for x in 0..w {
+            let px = img.get_pixel_mut(x, y);
+            if px.0[3] < 16 {
+                continue;
+            }
+            let sample = field[(y / cell) as usize * cw + (x / cell) as usize];
+            for c in 0..3 {
+                px.0[c] = (px.0[c] as f32 + sample[c] * amp).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+}
+
+#[tauri::command]
+pub fn apng_grain(
+    image: String,
+    amount: Option<u32>,
+    size: Option<u32>,
+    color: Option<bool>,
+    name: Option<String>,
+) -> Result<SavedImage, String> {
+    let mut img = decode_data_url(&image)?;
+    add_grain(&mut img, amount.unwrap_or(18), size.unwrap_or(1), color.unwrap_or(true));
+    let label = name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("grain");
+    save_bytes(&encode_png(&img)?, ".png", Some(label))
+}
+
 #[tauri::command]
 pub fn apng_mosaic(image: String, block: Option<u32>) -> Result<SavedImage, String> {
     let img = decode_data_url(&image)?;

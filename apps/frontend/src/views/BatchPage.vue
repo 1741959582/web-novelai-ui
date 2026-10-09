@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { NAI_MODELS, NAI_SAMPLERS, NAI_UC_PRESETS, isV4Plus, maxCharacterPrompts } from "@/types/nai";
 import { useAppStore } from "@/stores/app";
@@ -62,6 +62,10 @@ function revealJob(id: string) {
 
 onMounted(() => {
   void store.boot().then(() => revealJob(store.focusId));
+});
+
+onUnmounted(() => {
+  void store.flushLibrary();
 });
 
 watch(() => store.focusId, (id) => revealJob(id));
@@ -603,12 +607,18 @@ async function start() {
 }
 .queue-scroll { flex: 1; min-height: 0; overflow: auto; }
 h3 { margin: 0; font-size: 16px; }
-.left-scroll textarea, .editor :deep(textarea), .cfg input, .cfg select, .inline select {
+.left-scroll textarea, .cfg input, .cfg select, .inline select {
   width: 100%;
   background: var(--bg0);
   border: 1px solid var(--bg3);
   border-radius: 8px;
   padding: 8px 10px;
+}
+.editor :deep(textarea) {
+  width: 100%;
+  background: transparent;
+  color: transparent;
+  caret-color: #fff;
 }
 label { display: grid; gap: 6px; font-size: 12px; color: var(--muted); }
 .inline { grid-template-columns: 1fr auto; align-items: center; }

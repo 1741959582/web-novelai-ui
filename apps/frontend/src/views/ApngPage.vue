@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import {
   apngDisguise,
   apngGif,
+  apngGrain,
   apngRestore,
   apngStrip,
   censorApply,
@@ -27,7 +28,7 @@ import NaiIcon from "@/components/NaiIcon.vue";
 const store = useApngStore();
 const app = useAppStore();
 const busy = ref(false);
-type QueueImage = SavedImage & { sourcePath?: string; sourceDataUrl?: string; id: string; censored?: boolean; block?: number };
+type QueueImage = SavedImage & { sourcePath?: string; sourceDataUrl?: string; id: string; censored?: boolean; block?: number; grained?: boolean };
 const extra = ref<QueueImage[]>([]);
 const metaActive = ref(0);
 const metaPicked = ref<string[]>([]);
@@ -102,6 +103,7 @@ function queueSnapshot() {
       sourceDataUrl: item.sourceDataUrl && item.sourceDataUrl !== item.dataUrl ? item.sourceDataUrl : "",
       censored: item.censored,
       block: item.block,
+      grained: item.grained,
     })),
   };
 }
@@ -123,8 +125,12 @@ function rememberQueue() {
   }, 0);
 }
 
-function isApngTab(tab: string | null | undefined): tab is "disguise" | "gif" | "restore" | "meta" | "mosaic" {
-  return tab === "disguise" || tab === "gif" || tab === "restore" || tab === "meta" || tab === "mosaic";
+function isApngTab(tab: string | null | undefined): tab is "disguise" | "gif" | "restore" | "meta" | "mosaic" | "noise" {
+  return tab === "disguise" || tab === "gif" || tab === "restore" || tab === "meta" || tab === "mosaic" || tab === "noise";
+}
+
+function isImageQueue(tab: string) {
+  return tab === "meta" || tab === "mosaic" || tab === "noise";
 }
 
 async function restoreQueue() {
@@ -385,12 +391,29 @@ const tabs = [
   { id: "restore", label: "还原真图" },
   { id: "meta", label: "清除元数据" },
   { id: "mosaic", label: "打马赛克" },
+  { id: "noise", label: "添加杂色" },
 ] as const;
+
+const grainAmount = ref(Math.min(80, Math.max(1, Number(localStorage.getItem("nai-grain-amount")) || 18)));
+const grainSize = ref(Math.min(12, Math.max(1, Number(localStorage.getItem("nai-grain-size")) || 1)));
+const grainColor = ref(localStorage.getItem("nai-grain-color") !== "0");
+const grainSaveDir = ref(localStorage.getItem("nai-grain-save-dir") || "");
+const grainSaveLabel = computed(() => dirLabel(grainSaveDir.value));
+
+watch([grainAmount, grainSize, grainColor], () => {
+  const amount = Math.min(80, Math.max(1, Math.round(Number(grainAmount.value) || 18)));
+  const size = Math.min(12, Math.max(1, Math.round(Number(grainSize.value) || 1)));
+  if (amount !== grainAmount.value) grainAmount.value = amount;
+  if (size !== grainSize.value) grainSize.value = size;
+  localStorage.setItem("nai-grain-amount", String(grainAmount.value));
+  localStorage.setItem("nai-grain-size", String(grainSize.value));
+  localStorage.setItem("nai-grain-color", grainColor.value ? "1" : "0");
+});
 
 const selected = computed(() => store.items.find((item) => item.id === store.selectedId) || store.items[0] || null);
 const previewFile = computed(() => {
   if (!extra.value.length) return null;
-  if (store.tab === "meta" || store.tab === "mosaic") {
+  if (isImageQueue(store.tab)) {
     return extra.value[Math.min(metaActive.value, extra.value.length - 1)] || extra.value[0];
   }
   return extra.value[0];
@@ -553,7 +576,7 @@ async function run<T>(fn: () => Promise<T>) {
   }
 }
 
-async function fromPicker(target: "cover" | "reals" | "gif" | "restore" | "meta" | "mosaic" | "disguise") {
+async function fromPicker(target: "cover" | "reals" | "gif" | "restore" | "meta" | "mosaic" | "noise" | "disguise") {
   const files = byFileName(await pickImages());
   if (!files.length) return;
   if (target === "cover") await store.setCover(files[0].dataUrl);
@@ -565,12 +588,12 @@ async function fromPicker(target: "cover" | "reals" | "gif" | "restore" | "meta"
     for (const file of files) await store.addGif(file.dataUrl, file.path.split(/[/\\]/).pop() || "帧");
   }
   if (target === "restore") extra.value = files.map((file) => withId(file));
-  if (target === "meta" || target === "mosaic") {
+  if (isImageQueue(target)) {
     readyToFile.value = false;
     const incoming = await Promise.all(
       files.map(async (file) => withId({ ...file, sourcePath: file.path, dataUrl: target === "meta" ? await cleanPreview(file.dataUrl) : file.dataUrl })),
     );
-    if (target === "mosaic") {
+    if (target === "mosaic" || target === "noise") {
       extra.value = [...extra.value, ...incoming];
       metaActive.value = Math.max(extra.value.length - incoming.length, 0);
       metaPicked.value = [extra.value[metaActive.value].id];
@@ -672,14 +695,14 @@ async function cleanPreview(dataUrl: string) {
   }
 }
 
-async function fromFiles(files: FileList | null, target: "cover" | "reals" | "gif" | "restore" | "meta" | "mosaic" | "disguise") {
+async function fromFiles(files: FileList | null, target: "cover" | "reals" | "gif" | "restore" | "meta" | "mosaic" | "noise" | "disguise") {
   if (!files?.length) return;
   const list = Array.from(files).sort((a, b) => a.name.localeCompare(b.name, "zh", { numeric: true, sensitivity: "base" }));
   if (target === "restore") {
     extra.value = await Promise.all(list.map(async (file) => withId({ path: file.name, dataUrl: await readFile(file) })));
     return;
   }
-  if (target === "meta" || target === "mosaic") {
+  if (isImageQueue(target)) {
     readyToFile.value = false;
     const incoming = await Promise.all(
       list.map(async (file) => {
@@ -692,11 +715,12 @@ async function fromFiles(files: FileList | null, target: "cover" | "reals" | "gi
       }),
     );
     extra.value = [...extra.value, ...incoming];
-    if (target === "mosaic") {
+    if (target === "mosaic" || target === "noise") {
       metaActive.value = Math.max(extra.value.length - incoming.length, 0);
       metaPicked.value = [extra.value[metaActive.value].id];
     }
     if (target === "meta") app.status = `已加入 ${incoming.length} 张，拖动缩略图可以调整顺序`;
+    if (target === "noise") app.status = `已加入 ${incoming.length} 张，点添加杂色`;
     return;
   }
   for (const file of list) {
@@ -717,6 +741,7 @@ async function onPaste(ev: ClipboardEvent) {
   else if (store.tab === "restore") await fromFiles(asFileList(files), "restore");
   else if (store.tab === "meta") await fromFiles(asFileList(files), "meta");
   else if (store.tab === "mosaic") await fromFiles(asFileList(files), "mosaic");
+  else if (store.tab === "noise") await fromFiles(asFileList(files), "noise");
 }
 
 function asFileList(files: File[]) {
@@ -813,15 +838,40 @@ function applyName() {
   store.patchItem(item.id, { name, status: "pending", outPath: "", outUrl: "" });
 }
 
-async function makeGif() {
-  const saved = await run(() => apngGif({
+const gifOutPath = ref("");
+
+watch(
+  () => [store.gifFrames.map((item) => item.id).join("|"), store.delayMs, store.padColor, store.fitFirst] as const,
+  () => {
+    gifOutPath.value = "";
+  },
+);
+
+async function exportGif() {
+  const saved = await apngGif({
     frames: store.gifFrames.map((item) => item.dataUrl),
     delayMs: store.delayMs,
     padColor: store.padColor,
     fitFirst: store.fitFirst,
-  }));
+  });
   extra.value = [withId(saved)];
+  gifOutPath.value = saved.path;
+  return saved;
+}
+
+async function makeGif() {
+  const saved = await run(() => exportGif());
   app.status = `已合成 GIF：${saved.path}`;
+}
+
+async function copyGif() {
+  if (store.gifFrames.length < 2) {
+    app.status = "至少 2 帧才能复制 GIF";
+    return;
+  }
+  const path = gifOutPath.value || (await run(() => exportGif())).path;
+  await run(() => copyImageFiles([path]));
+  app.status = "已复制 GIF 文件，到聊天窗口 Ctrl+V 粘贴";
 }
 
 async function sendGifToDisguise() {
@@ -881,7 +931,7 @@ function metaIndexAt(clientX: number) {
 }
 
 function queueCanSort() {
-  return store.tab === "meta" || store.tab === "mosaic";
+  return isImageQueue(store.tab);
 }
 
 function onMetaPointerDown(index: number, ev: PointerEvent) {
@@ -952,7 +1002,7 @@ async function applyPending() {
     extra.value = batch.map((file) => withId(file));
     return;
   }
-  if (store.tab === "meta" || store.tab === "mosaic") {
+  if (isImageQueue(store.tab)) {
     readyToFile.value = false;
     metaActive.value = 0;
     metaPicked.value = [];
@@ -994,6 +1044,73 @@ async function strip() {
   app.status = outs.length > 1
     ? `已清除 ${outs.length} 张，按当前顺序命名为 ${numberedName(0, outs.length)}.png 到 ${last}.png`
     : `已清除元数据：${outs[0]?.path || ""}`;
+}
+
+async function chooseGrainDir() {
+  const picked = await pickOutputDir();
+  if (!picked) return "";
+  grainSaveDir.value = picked;
+  localStorage.setItem("nai-grain-save-dir", picked);
+  app.status = `杂色保存位置：${picked}`;
+  return picked;
+}
+
+async function addGrain() {
+  if (!extra.value.length) return;
+  const amount = Math.min(80, Math.max(1, Math.round(Number(grainAmount.value) || 18)));
+  const size = Math.min(12, Math.max(1, Math.round(Number(grainSize.value) || 1)));
+  grainAmount.value = amount;
+  grainSize.value = size;
+  const outs: QueueImage[] = [];
+  await run(async () => {
+    for (const [index, src] of extra.value.entries()) {
+      app.status = `正在加杂色 ${index + 1}/${extra.value.length}`;
+      const saved = await apngGrain({
+        image: src.sourceDataUrl || src.dataUrl,
+        amount,
+        size,
+        color: grainColor.value,
+        name: numberedName(index, extra.value.length),
+      });
+      outs.push(withId({
+        ...saved,
+        sourcePath: src.sourcePath || src.path,
+        sourceDataUrl: src.sourceDataUrl || src.dataUrl,
+        grained: true,
+      }));
+    }
+  });
+  extra.value = outs;
+  metaActive.value = Math.min(metaActive.value, Math.max(outs.length - 1, 0));
+  const kind = grainColor.value ? "彩色杂色" : "单色噪点";
+  app.status = `已给 ${outs.length} 张加上${kind}，强度 ${amount}，颗粒 ${size} 像素。再点一次会按原图重加。`;
+}
+
+async function saveGrain() {
+  const queued = extra.value.filter((item) => item.grained && item.path);
+  if (!queued.length) {
+    app.status = "先给图片添加杂色";
+    return;
+  }
+  const dest = grainSaveDir.value || (await chooseGrainDir());
+  if (!dest) {
+    app.status = "先选择保存位置";
+    return;
+  }
+  await run(async () => {
+    const result = await copyNumberedImages(
+      queued.map((item, index) => ({
+        path: item.path,
+        sourcePath: item.sourcePath || item.path,
+        name: numberedName(index, queued.length),
+      })),
+      dest,
+    );
+    const last = numberedName(Math.max(queued.length - 1, 0), queued.length);
+    app.status = result.moved
+      ? `已把 ${result.moved} 张杂色图保存到 ${dest}，从 ${numberedName(0, queued.length)}.png 到 ${last}.png`
+      : "这些图片已经在所选位置";
+  });
 }
 
 async function chooseSaveDir() {
@@ -1679,7 +1796,8 @@ onUnmounted(() => {
         <button type="button" :class="{ on: !store.fitFirst }" @click="store.fitFirst = false">按最大图</button>
         <button type="button" :class="{ on: store.fitFirst }" @click="store.fitFirst = true">按第一张</button>
         <span class="spacer" />
-        <button type="button" class="primary" :disabled="busy" @click="makeGif">导出 GIF</button>
+        <button type="button" class="primary" :disabled="busy || store.gifFrames.length < 2" @click="makeGif">导出 GIF</button>
+        <button type="button" class="primary" :disabled="busy || store.gifFrames.length < 2" @click="copyGif">复制 GIF</button>
         <button type="button" @click="sendGifToDisguise">加入伪装</button>
         <button type="button" @click="store.clearGif()">清空</button>
       </div>
@@ -1708,10 +1826,10 @@ onUnmounted(() => {
       <div class="toolbar">
         <button type="button" @click="fromPicker(store.tab)">选图片</button>
         <label class="file">本地文件<input type="file" accept="image/*" multiple @change="fromFiles(($event.target as HTMLInputElement).files, store.tab)" /></label>
-        <button v-if="store.tab === 'mosaic'" type="button" :disabled="busy" @click="fromMosaicFolder">选文件夹</button>
-        <button v-if="store.tab === 'meta' || store.tab === 'mosaic'" type="button" :disabled="extra.length < 2" @click="reverseExtra">倒序</button>
-        <button v-if="store.tab === 'meta' || store.tab === 'mosaic'" type="button" :disabled="!extra.length" @click="deleteCurrent">删除当前</button>
-        <button v-if="store.tab === 'mosaic'" type="button" :disabled="!extra.length" @click="clearExtra">清空</button>
+        <button v-if="store.tab === 'mosaic' || store.tab === 'noise'" type="button" :disabled="busy" @click="fromMosaicFolder">选文件夹</button>
+        <button v-if="isImageQueue(store.tab)" type="button" :disabled="extra.length < 2" @click="reverseExtra">倒序</button>
+        <button v-if="isImageQueue(store.tab)" type="button" :disabled="!extra.length" @click="deleteCurrent">删除当前</button>
+        <button v-if="store.tab === 'mosaic' || store.tab === 'noise'" type="button" :disabled="!extra.length" @click="clearExtra">清空</button>
         <span class="spacer" />
         <button v-if="store.tab === 'restore'" type="button" class="primary" :disabled="busy" @click="restore">
           {{ extra.length > 1 ? `还原全部 ${extra.length}` : "还原当前" }}
@@ -1724,6 +1842,14 @@ onUnmounted(() => {
         <button v-if="store.tab === 'meta'" type="button" :disabled="busy || !readyToFile" @click="saveToFolders">
           保存到此位置
         </button>
+        <template v-if="store.tab === 'noise'">
+          <button type="button" :disabled="busy" @click="chooseGrainDir">保存位置</button>
+          <span class="save-dir" :title="grainSaveDir">{{ grainSaveDir ? grainSaveLabel : "未选择" }}</span>
+          <button type="button" :disabled="busy || !extra.some((item) => item.grained)" @click="saveGrain">保存到此位置</button>
+          <button type="button" class="primary" :disabled="busy || !extra.length" @click="addGrain">
+            {{ extra.length > 1 ? `给全部 ${extra.length} 张加杂色` : "添加杂色" }}
+          </button>
+        </template>
         <template v-if="store.tab === 'mosaic'">
           <button type="button" :disabled="busy" @click="chooseMosaicDir('save')">保存目录</button>
           <span class="save-dir" :title="mosaicSaveDir">{{ mosaicSaveDir ? mosaicSaveLabel : "未选择" }}</span>
@@ -1737,6 +1863,13 @@ onUnmounted(() => {
             {{ reviewOn ? "退出审核" : "人工审核" }}
           </button>
         </template>
+      </div>
+      <div v-if="store.tab === 'noise'" class="censor">
+        <label>强度 <input v-model.number="grainAmount" type="number" min="1" max="80" /></label>
+        <label>颗粒 <input v-model.number="grainSize" type="number" min="1" max="12" /> 像素</label>
+        <button type="button" :class="{ on: grainColor }" @click="grainColor = true">彩色杂色</button>
+        <button type="button" :class="{ on: !grainColor }" @click="grainColor = false">单色噪点</button>
+        <span class="hint">彩色会分别扰动红、绿、蓝，单色只改明暗。强度 1 很轻，18 左右能看出来，80 很重。颗粒 1 是细点，数字越大颗粒越粗。再点一次按原图重加，不会叠两层。</span>
       </div>
       <div v-if="store.tab === 'mosaic'" class="censor">
         <span>部位</span>
@@ -1802,7 +1935,7 @@ onUnmounted(() => {
       </div>
       <div class="stage" :class="{ single: store.tab !== 'restore' }">
         <article class="pane">
-          <b>{{ reviewOn && store.tab === "mosaic" ? "人工审核 · 补漏或擦掉多打的" : store.tab === "restore" ? "伪装图 · 要原文件" : store.tab === "meta" ? "已去元数据的预览" : "当前图片" }}</b>
+          <b>{{ reviewOn && store.tab === "mosaic" ? "人工审核 · 补漏或擦掉多打的" : store.tab === "restore" ? "伪装图 · 要原文件" : store.tab === "meta" ? "已去元数据的预览" : store.tab === "noise" ? "加杂色后的预览" : "当前图片" }}</b>
           <div class="view" @wheel.prevent="onReviewWheel" @contextmenu.prevent>
             <canvas
               v-show="reviewOn && store.tab === 'mosaic'"
@@ -1815,7 +1948,7 @@ onUnmounted(() => {
               @pointerleave="brushCursor.show = false"
             />
             <img v-if="previewFile && !(reviewOn && store.tab === 'mosaic')" :src="previewFile.dataUrl" alt="" />
-            <p v-else-if="!(reviewOn && store.tab === 'mosaic')">{{ store.tab === "restore" ? "拖进来或 Ctrl+V 的必须是伪装 PNG 文件" : store.tab === "mosaic" ? "可以一次放进多张，或选整个文件夹。打码后先审核，再保存到目录。" : "Ctrl+V 可以贴图。生成图放进来会清掉提示词和透明通道隐写" }}</p>
+            <p v-else-if="!(reviewOn && store.tab === 'mosaic')">{{ store.tab === "restore" ? "拖进来或 Ctrl+V 的必须是伪装 PNG 文件" : store.tab === "mosaic" ? "可以一次放进多张，或选整个文件夹。打码后先审核，再保存到目录。" : store.tab === "noise" ? "放进图片后点添加杂色。可以一次放多张，或选整个文件夹，Ctrl+V 也能贴图。" : "Ctrl+V 可以贴图。生成图放进来会清掉提示词和透明通道隐写" }}</p>
           </div>
         </article>
         <article v-if="store.tab === 'restore' && extra.length > 1" class="pane">
@@ -1825,8 +1958,8 @@ onUnmounted(() => {
           </div>
         </article>
       </div>
-      <p v-if="(store.tab === 'meta' || store.tab === 'mosaic') && extra.length" class="path">单击选中当前图，按住 Ctrl 加选，按住 Shift 连选。拖已选的缩略图一起调整顺序。{{ store.tab === "mosaic" ? "没有需要打码的图片也会按这个顺序保存。" : `清除和保存按这个顺序命名，例如 ${numberedName(0, extra.length)}.png。` }}</p>
-      <div v-if="store.tab === 'meta' || store.tab === 'mosaic' ? extra.length : extra.length > 1" ref="metaQueue" class="queue" :class="{ sorting: dragFrom >= 0 }">
+      <p v-if="isImageQueue(store.tab) && extra.length" class="path">单击选中当前图，按住 Ctrl 加选，按住 Shift 连选。拖已选的缩略图一起调整顺序。{{ store.tab === "mosaic" ? "没有需要打码的图片也会按这个顺序保存。" : store.tab === "noise" ? `添加杂色和保存按这个顺序命名，例如 ${numberedName(0, extra.length)}.png。` : `清除和保存按这个顺序命名，例如 ${numberedName(0, extra.length)}.png。` }}</p>
+      <div v-if="isImageQueue(store.tab) ? extra.length : extra.length > 1" ref="metaQueue" class="queue" :class="{ sorting: dragFrom >= 0 }">
         <button
           v-for="(file, i) in extra"
           :key="file.id"
