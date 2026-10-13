@@ -2,6 +2,13 @@
 
 从新到旧。安装包在 [最新发行版](https://github.com/caiweida/web-novelai-ui/releases/latest)。已安装的程序启动后会读到新版本，顶栏可以点「立即更新」。
 
+## [1.0.1](https://github.com/caiweida/web-novelai-ui/releases/tag/v1.0.1)
+
+- APNG 伪装每次导出或复制都会在右下角印一个新的 000~999 序号，同一张图重复发不容易被吞。聊天里仍是封面，点开才是真图。
+- 图片工具新增添加杂色，可以调强度、颗粒和是否彩色，加完后保存到指定文件夹。
+- GIF 可以复制成文件，到聊天窗口粘贴。
+- 批量任务写到本机文件里，关掉窗口后再打开还在。编辑提示词时能看见权重颜色。
+
 ## [1.0.0](https://github.com/caiweida/web-novelai-ui/releases/tag/v1.0.0)
 
 - 积木里每个关键词可以停用。词还留在列表里，生成时不会使用，再点启用会连同权重一起恢复。

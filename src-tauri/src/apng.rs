@@ -11,7 +11,6 @@ use uuid::Uuid;
 
 const PNG_SIG: &[u8] = b"\x89PNG\r\n\x1a\n";
 const MAX_SIDE: u32 = 1600;
-const IDAT_SPLIT: usize = 65536;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -218,18 +217,19 @@ fn filter_rows(img: &RgbaImage) -> Vec<u8> {
     out
 }
 
-fn zlib_bytes(data: &[u8]) -> Result<Vec<u8>, String> {
-    let mut enc = ZlibEncoder::new(Vec::new(), Compression::new(6));
+fn zlib_bytes(data: &[u8], level: u32) -> Result<Vec<u8>, String> {
+    let mut enc = ZlibEncoder::new(Vec::new(), Compression::new(level.clamp(1, 9)));
     enc.write_all(data).map_err(|e| e.to_string())?;
     enc.finish().map_err(|e| e.to_string())
 }
 
-fn split_chunks(kind: &[u8; 4], data: &[u8], with_seq: bool, mut seq: u32) -> (Vec<Vec<u8>>, u32) {
+fn split_chunks(kind: &[u8; 4], data: &[u8], with_seq: bool, mut seq: u32, split: usize) -> (Vec<Vec<u8>>, u32) {
+    let split = split.max(4096);
     let mut parts = Vec::new();
     let src = if data.is_empty() { &[0u8; 0][..] } else { data };
     let mut i = 0;
     while i < src.len() || parts.is_empty() {
-        let piece = &src[i..(i + IDAT_SPLIT).min(src.len())];
+        let piece = &src[i..(i + split).min(src.len())];
         let payload = if with_seq {
             let mut v = seq.to_be_bytes().to_vec();
             v.extend_from_slice(piece);
@@ -242,7 +242,7 @@ fn split_chunks(kind: &[u8; 4], data: &[u8], with_seq: bool, mut seq: u32) -> (V
         if src.is_empty() {
             break;
         }
-        i += IDAT_SPLIT;
+        i += split;
         if i >= src.len() {
             break;
         }
@@ -250,36 +250,184 @@ fn split_chunks(kind: &[u8; 4], data: &[u8], with_seq: bool, mut seq: u32) -> (V
     (parts, seq)
 }
 
-fn write_apng(cover: &RgbaImage, frames: &[RgbaImage], delay_num: u16, delay_den: u16) -> Result<Vec<u8>, String> {
+const DIGITS: [[u8; 7]; 10] = [
+    [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110],
+    [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110],
+    [0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111],
+    [0b01110, 0b10001, 0b00001, 0b00110, 0b00001, 0b10001, 0b01110],
+    [0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010],
+    [0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110],
+    [0b00110, 0b01000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110],
+    [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000],
+    [0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110],
+    [0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b01100],
+];
+
+fn stamp_serial(img: &mut RgbaImage, serial: &str) {
+    let digits: Vec<usize> = serial
+        .bytes()
+        .filter(|b| b.is_ascii_digit())
+        .take(3)
+        .map(|b| (b - b'0') as usize)
+        .collect();
+    if digits.is_empty() {
+        return;
+    }
+    let scale: i32 = 2;
+    let gap: i32 = 2;
+    let margin: i32 = 8;
+    let dw = 5 * scale;
+    let dh = 7 * scale;
+    let total = digits.len() as i32 * dw + (digits.len() as i32 - 1) * gap;
+    let (w, h) = img.dimensions();
+    if w < (total + margin) as u32 || h < (dh + margin) as u32 {
+        return;
+    }
+    let x0 = w as i32 - margin - total;
+    let y0 = h as i32 - margin - dh;
+    let paint = |img: &mut RgbaImage, ox: i32, oy: i32, color: Rgba<u8>| {
+        for (i, digit) in digits.iter().enumerate() {
+            let glyph = DIGITS[*digit];
+            let gx = x0 + i as i32 * (dw + gap) + ox;
+            for row in 0..7i32 {
+                for col in 0..5i32 {
+                    if glyph[row as usize] & (1 << (4 - col as usize)) == 0 {
+                        continue;
+                    }
+                    for sy in 0..scale {
+                        for sx in 0..scale {
+                            let x = gx + col * scale + sx;
+                            let y = y0 + oy + row * scale + sy;
+                            if x >= 0 && y >= 0 && (x as u32) < w && (y as u32) < h {
+                                img.put_pixel(x as u32, y as u32, color);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+    for oy in -1..=1 {
+        for ox in -1..=1 {
+            if ox != 0 || oy != 0 {
+                paint(img, ox, oy, Rgba([0, 0, 0, 255]));
+            }
+        }
+    }
+    paint(img, 0, 0, Rgba([255, 255, 255, 255]));
+}
+
+fn entropy_rng(serial: Option<&str>) -> GrainRng {
+    let tick = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0xA5A5_5A5A);
+    let mut seed = tick ^ 0x9E37_79B9_7F4A_7C15;
+    if let Some(code) = serial {
+        for b in code.bytes() {
+            seed = seed.wrapping_mul(0x100_0000_01B3).wrapping_add(b as u64);
+        }
+    }
+    GrainRng(seed | 1)
+}
+
+fn salt_image(img: &mut RgbaImage, rng: &mut GrainRng) {
+    let mut bias = (rng.next_u32() % 7) as i16 + 1;
+    if rng.next_u32() % 2 == 0 {
+        bias = -bias;
+    }
+    let (w, h) = img.dimensions();
+    for px in img.pixels_mut() {
+        if px.0[3] < 16 {
+            continue;
+        }
+        for c in 0..3 {
+            px.0[c] = (px.0[c] as i16 + bias).clamp(0, 255) as u8;
+        }
+    }
+    let step = 5u32;
+    for y in (0..h).step_by(step as usize) {
+        for x in (0..w).step_by(step as usize) {
+            let px = img.get_pixel_mut(x, y);
+            if px.0[3] < 16 {
+                continue;
+            }
+            for c in 0..3 {
+                let delta = (rng.next_u32() % 5) as i16 - 2;
+                px.0[c] = (px.0[c] as i16 + delta).clamp(0, 255) as u8;
+            }
+        }
+    }
+}
+
+fn static_png_prefix(rng: &mut GrainRng) -> Vec<Vec<u8>> {
+    let mut phys = Vec::with_capacity(9);
+    let ppm = 2400 + (rng.next_u32() % 800);
+    phys.extend_from_slice(&ppm.to_be_bytes());
+    phys.extend_from_slice(&ppm.to_be_bytes());
+    phys.push(1);
+    vec![
+        png_chunk(b"sRGB", &[0]),
+        png_chunk(b"gAMA", &45455u32.to_be_bytes()),
+        png_chunk(b"pHYs", &phys),
+    ]
+}
+
+fn random_text_chunk(rng: &mut GrainRng) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(28);
+    for _ in 0..8 {
+        payload.push(b'a' + (rng.next_u32() % 26) as u8);
+    }
+    payload.push(0);
+    for _ in 0..16 {
+        payload.push(33 + (rng.next_u32() % 94) as u8);
+    }
+    png_chunk(b"tEXt", &payload)
+}
+
+fn write_apng(cover: &RgbaImage, frames: &[RgbaImage], delay_num: u16, delay_den: u16, serial: Option<&str>) -> Result<Vec<u8>, String> {
     if frames.is_empty() {
         return Err("至少需要 1 张真图".into());
     }
     let (w, h) = frames[0].dimensions();
-    let cover = if cover.dimensions() == (w, h) {
+    let mut cover = if cover.dimensions() == (w, h) {
         cover.clone()
     } else {
         imageops::resize(cover, w, h, imageops::FilterType::Nearest)
     };
-    let cover_z = zlib_bytes(&filter_rows(&cover))?;
+    let mut frames = frames.to_vec();
+    let serial = serial.map(str::trim).filter(|s| !s.is_empty());
+    let mut rng = entropy_rng(serial);
+    salt_image(&mut cover, &mut rng);
+    for frame in &mut frames {
+        if frame.dimensions() != (w, h) {
+            return Err("动画帧尺寸必须一致".into());
+        }
+        salt_image(frame, &mut rng);
+    }
+    if let Some(code) = serial {
+        stamp_serial(&mut cover, code);
+        for frame in &mut frames {
+            stamp_serial(frame, code);
+        }
+    }
+    let mut twin = None;
+    if frames.len() == 1 {
+        let mut extra = frames[0].clone();
+        salt_image(&mut extra, &mut rng);
+        twin = Some(extra);
+    }
+    let level = 1 + (rng.next_u32() % 9);
+    let split = 8_192 + (rng.next_u32() as usize % 40_000);
+    let cover_z = zlib_bytes(&filter_rows(&cover), level)?;
     let frame_z = frames
         .iter()
-        .map(|f| {
-            if f.dimensions() != (w, h) {
-                return Err("动画帧尺寸必须一致".into());
-            }
-            zlib_bytes(&filter_rows(f))
-        })
+        .map(|f| zlib_bytes(&filter_rows(f), level))
         .collect::<Result<Vec<_>, String>>()?;
-    let use_keepalive = frames.len() == 1;
-    let num_anim = frames.len() as u32 + u32::from(use_keepalive);
-    let kind: &[u8] = if frames.len() > 1 { b"ANIMATED" } else { b"STATIC" };
-    let marker = [
-        b"ChatBarApngDisguise\x001;".as_slice(),
-        kind,
-        b";",
-        frames.len().to_string().as_bytes(),
-    ]
-    .concat();
+    let twin_z = twin.as_ref().map(|f| zlib_bytes(&filter_rows(f), level)).transpose()?;
+    let num_anim = frames.len() as u32 + u32::from(twin_z.is_some());
+    let delay_num = delay_num.max(1).saturating_add((rng.next_u32() % 17) as u16);
+    let delay_den = delay_den.max(1);
     let mut chunks = vec![
         PNG_SIG.to_vec(),
         png_chunk(b"IHDR", &{
@@ -289,13 +437,11 @@ fn write_apng(cover: &RgbaImage, frames: &[RgbaImage], delay_num: u16, delay_den
             ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
             ihdr
         }),
-        png_chunk(b"acTL", &[num_anim.to_be_bytes(), 0u32.to_be_bytes()].concat()),
-        png_chunk(b"tEXt", &marker),
     ];
-    chunks.extend(split_chunks(b"IDAT", &cover_z, false, 0).0);
+    chunks.extend(static_png_prefix(&mut rng));
+    chunks.push(png_chunk(b"acTL", &[num_anim.to_be_bytes(), 0u32.to_be_bytes()].concat()));
+    chunks.extend(split_chunks(b"IDAT", &cover_z, false, 0, split).0);
     let mut seq = 0u32;
-    let delay_num = delay_num.max(1);
-    let delay_den = delay_den.max(1);
     for zdata in &frame_z {
         let mut fctl = Vec::with_capacity(26);
         fctl.extend_from_slice(&seq.to_be_bytes());
@@ -308,25 +454,26 @@ fn write_apng(cover: &RgbaImage, frames: &[RgbaImage], delay_num: u16, delay_den
         fctl.extend_from_slice(&[0, 0]);
         seq += 1;
         chunks.push(png_chunk(b"fcTL", &fctl));
-        let (fdats, next) = split_chunks(b"fdAT", zdata, true, seq);
+        let (fdats, next) = split_chunks(b"fdAT", zdata, true, seq, split);
         seq = next;
         chunks.extend(fdats);
     }
-    if use_keepalive {
-        let hb = zlib_bytes(&filter_rows(&RgbaImage::from_pixel(1, 1, Rgba([0, 0, 0, 0]))))?;
+    if let Some(zdata) = twin_z.as_ref() {
         let mut fctl = Vec::with_capacity(26);
         fctl.extend_from_slice(&seq.to_be_bytes());
-        fctl.extend_from_slice(&1u32.to_be_bytes());
-        fctl.extend_from_slice(&1u32.to_be_bytes());
+        fctl.extend_from_slice(&w.to_be_bytes());
+        fctl.extend_from_slice(&h.to_be_bytes());
         fctl.extend_from_slice(&0u32.to_be_bytes());
         fctl.extend_from_slice(&0u32.to_be_bytes());
-        fctl.extend_from_slice(&10u16.to_be_bytes());
+        let twin_delay = 18 + (rng.next_u32() % 40) as u16;
+        fctl.extend_from_slice(&twin_delay.to_be_bytes());
         fctl.extend_from_slice(&100u16.to_be_bytes());
-        fctl.extend_from_slice(&[0, 1]);
+        fctl.extend_from_slice(&[0, 0]);
         seq += 1;
         chunks.push(png_chunk(b"fcTL", &fctl));
-        chunks.extend(split_chunks(b"fdAT", &hb, true, seq).0);
+        chunks.extend(split_chunks(b"fdAT", zdata, true, seq, split).0);
     }
+    chunks.push(random_text_chunk(&mut rng));
     chunks.push(png_chunk(b"IEND", &[]));
     Ok(chunks.concat())
 }
@@ -435,6 +582,7 @@ pub fn apng_disguise(
     delay_ms: Option<u32>,
     pad_color: Option<String>,
     name: Option<String>,
+    serial: Option<String>,
 ) -> Result<SavedImage, String> {
     if reals.is_empty() {
         return Err("请先加入至少一张真图".into());
@@ -449,22 +597,34 @@ pub fn apng_disguise(
     let cover_src = knockout_edge(limit_side(decode_data_url(&cover)?));
     let cover = fit_contain(&cover_src, real0.width(), real0.height(), pad);
     let delay = delay_ms.unwrap_or(400).max(20);
+    let code = serial.as_deref();
     let bytes = if frames.len() == 1 {
-        write_apng(&cover, &frames, 10, 100)?
+        write_apng(&cover, &frames, 10, 100, code)?
     } else {
-        write_apng(&cover, &frames, delay as u16, 1000)?
+        write_apng(&cover, &frames, delay as u16, 1000, code)?
     };
     save_bytes(&bytes, ".png", name.as_deref())
 }
 
 #[tauri::command]
-pub fn apng_gif(frames: Vec<String>, delay_ms: Option<u32>, pad_color: Option<String>, fit_first: Option<bool>) -> Result<SavedImage, String> {
+pub fn apng_gif(
+    frames: Vec<String>,
+    delay_ms: Option<u32>,
+    pad_color: Option<String>,
+    fit_first: Option<bool>,
+    serial: Option<String>,
+) -> Result<SavedImage, String> {
     let pad = parse_color(pad_color.as_deref().unwrap_or("#ffffff"));
-    let aligned = align_frames(
+    let mut aligned = align_frames(
         &frames.iter().map(|s| decode_data_url(s)).collect::<Result<Vec<_>, _>>()?,
         pad,
         fit_first.unwrap_or(false),
     );
+    if let Some(code) = serial.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        for frame in &mut aligned {
+            stamp_serial(frame, code);
+        }
+    }
     save_bytes(&encode_gif(&aligned, delay_ms.unwrap_or(400))?, ".gif", None)
 }
 
@@ -808,11 +968,29 @@ fn extract_hidden(data: &[u8]) -> Result<Vec<RgbaImage>, String> {
         }
         pos += 12 + len;
     }
+    if frames.len() == 2 && mean_abs_diff(&frames[0], &frames[1]) <= 10 {
+        frames.pop();
+    }
     if frames.is_empty() {
         let img = image::load_from_memory(data).map_err(|e| e.to_string())?.to_rgba8();
         frames.push(img);
     }
     Ok(frames)
+}
+
+fn mean_abs_diff(a: &RgbaImage, b: &RgbaImage) -> u32 {
+    if a.dimensions() != b.dimensions() {
+        return 255;
+    }
+    let mut sum = 0u64;
+    let mut n = 0u64;
+    for (p, q) in a.pixels().zip(b.pixels()) {
+        for c in 0..3 {
+            sum += (p.0[c] as i16 - q.0[c] as i16).unsigned_abs() as u64;
+            n += 1;
+        }
+    }
+    if n == 0 { 255 } else { (sum / n) as u32 }
 }
 
 fn take_next_fdat(data: &[u8], mut pos: usize, w: u32, h: u32) -> Option<RgbaImage> {
@@ -1031,7 +1209,8 @@ fn natural_str_cmp(a: &str, b: &str) -> std::cmp::Ordering {
 
 #[cfg(test)]
 mod tests {
-    use super::{hdrop_bytes, natural_str_cmp};
+    use super::{extract_hidden, hdrop_bytes, natural_str_cmp, stamp_serial, write_apng};
+    use image::RgbaImage;
     use std::cmp::Ordering;
 
     #[test]
@@ -1054,5 +1233,70 @@ mod tests {
         names.sort_by(|a, b| natural_str_cmp(a, b));
         assert_eq!(names, vec!["1.png", "2.png", "03.png", "10.png", "13.png"]);
         assert_eq!(natural_str_cmp("1.png", "10.png"), Ordering::Less);
+    }
+
+    #[test]
+    fn serial_changes_the_disguised_file() {
+        let cover = RgbaImage::from_pixel(64, 64, image::Rgba([20, 40, 80, 255]));
+        let real = RgbaImage::from_pixel(64, 64, image::Rgba([200, 30, 40, 255]));
+        let a = write_apng(&cover, &[real.clone()], 10, 100, Some("007")).unwrap();
+        let b = write_apng(&cover, &[real.clone()], 10, 100, Some("908")).unwrap();
+        let plain = write_apng(&cover, &[real], 10, 100, None).unwrap();
+        assert_ne!(a, b);
+        assert_ne!(a, plain);
+        assert!(!a.windows(18).any(|w| w == b"ChatBarApngDisguise"));
+        assert!(!a.windows(12).any(|w| w == b"Comment\0IDAT"));
+        assert!(!has_one_pixel_frame(&a));
+        let idat_at = chunk_type_at(&a, b"IDAT").unwrap();
+        let actl_at = chunk_type_at(&a, b"acTL").unwrap();
+        assert!(actl_at < idat_at);
+        let hidden = extract_hidden(&a).unwrap();
+        assert_eq!(hidden.len(), 1);
+        let mut stamped = RgbaImage::from_pixel(64, 64, image::Rgba([200, 30, 40, 255]));
+        let before = stamped.clone();
+        stamp_serial(&mut stamped, "042");
+        assert_ne!(stamped.as_raw(), before.as_raw());
+    }
+
+    fn chunk_type_at(data: &[u8], kind: &[u8; 4]) -> Option<usize> {
+        let mut pos = 8usize;
+        while pos + 8 <= data.len() {
+            let len = u32::from_be_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+            if pos + 12 + len > data.len() {
+                break;
+            }
+            if &data[pos + 4..pos + 8] == kind {
+                return Some(pos + 4);
+            }
+            if &data[pos + 4..pos + 8] == b"IEND" {
+                break;
+            }
+            pos += 12 + len;
+        }
+        None
+    }
+
+    fn has_one_pixel_frame(data: &[u8]) -> bool {
+        let mut pos = 8usize;
+        while pos + 8 <= data.len() {
+            let len = u32::from_be_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+            if pos + 12 + len > data.len() {
+                break;
+            }
+            let kind = &data[pos + 4..pos + 8];
+            let payload = &data[pos + 8..pos + 8 + len];
+            if kind == b"fcTL" && payload.len() >= 12 {
+                let w = u32::from_be_bytes(payload[4..8].try_into().unwrap());
+                let h = u32::from_be_bytes(payload[8..12].try_into().unwrap());
+                if w <= 1 && h <= 1 {
+                    return true;
+                }
+            }
+            if kind == b"IEND" {
+                break;
+            }
+            pos += 12 + len;
+        }
+        false
     }
 }

@@ -394,6 +394,13 @@ const tabs = [
   { id: "noise", label: "添加杂色" },
 ] as const;
 
+const antiSwallow = ref(localStorage.getItem("nai-apng-anti-swallow") !== "0");
+watch(antiSwallow, (on) => localStorage.setItem("nai-apng-anti-swallow", on ? "1" : "0"));
+
+function rollSerial() {
+  return String(Math.floor(Math.random() * 1000)).padStart(3, "0");
+}
+
 const grainAmount = ref(Math.min(80, Math.max(1, Number(localStorage.getItem("nai-grain-amount")) || 18)));
 const grainSize = ref(Math.min(12, Math.max(1, Number(localStorage.getItem("nai-grain-size")) || 1)));
 const grainColor = ref(localStorage.getItem("nai-grain-color") !== "0");
@@ -760,15 +767,17 @@ async function coverSource(item: ApngItem) {
 async function disguiseOne(item: ApngItem) {
   const cover = await coverSource(item);
   if (!cover) throw new Error("封面还没准备好");
+  const serial = antiSwallow.value ? rollSerial() : "";
   const saved = await apngDisguise({
     cover,
     reals: item.frames,
     delayMs: item.frames.length > 1 ? item.delayMs : 100,
     padColor: store.padColor,
     name: item.name.endsWith(".png") ? item.name : `${item.name}.png`,
+    serial: serial || undefined,
   });
   store.patchItem(item.id, { status: "done", outPath: saved.path, outUrl: saved.dataUrl, error: "" });
-  return saved;
+  return { ...saved, serial };
 }
 
 async function disguiseCurrent(copy = false) {
@@ -778,12 +787,13 @@ async function disguiseCurrent(copy = false) {
     return;
   }
   const saved = await run(() => disguiseOne(item));
+  const tag = saved.serial ? `防吞序号 ${saved.serial}。` : "";
   if (copy) {
     await copyImageFiles([saved.path]);
-    app.status = "已伪装并复制 APNG 文件，到聊天窗口 Ctrl+V 粘贴";
+    app.status = `已伪装并复制 APNG 文件，${tag}到聊天窗口 Ctrl+V 粘贴`;
     return;
   }
-  app.status = `已伪装：缩略图是封面，点开才是真图。${saved.path}`;
+  app.status = `已伪装：缩略图是封面，点开才是真图。${tag}${saved.path}`;
 }
 
 async function disguiseAll() {
@@ -808,7 +818,7 @@ async function copyCurrent() {
     app.status = "先把真图放进队列";
     return;
   }
-  if (item.status !== "done" || !item.outPath) {
+  if (antiSwallow.value || item.status !== "done" || !item.outPath) {
     await disguiseCurrent(true);
     return;
   }
@@ -848,20 +858,23 @@ watch(
 );
 
 async function exportGif() {
+  const serial = antiSwallow.value ? rollSerial() : "";
   const saved = await apngGif({
     frames: store.gifFrames.map((item) => item.dataUrl),
     delayMs: store.delayMs,
     padColor: store.padColor,
     fitFirst: store.fitFirst,
+    serial: serial || undefined,
   });
   extra.value = [withId(saved)];
   gifOutPath.value = saved.path;
-  return saved;
+  return { ...saved, serial };
 }
 
 async function makeGif() {
   const saved = await run(() => exportGif());
-  app.status = `已合成 GIF：${saved.path}`;
+  const tag = saved.serial ? `防吞序号 ${saved.serial}。` : "";
+  app.status = `已合成 GIF。${tag}${saved.path}`;
 }
 
 async function copyGif() {
@@ -869,9 +882,10 @@ async function copyGif() {
     app.status = "至少 2 帧才能复制 GIF";
     return;
   }
-  const path = gifOutPath.value || (await run(() => exportGif())).path;
-  await run(() => copyImageFiles([path]));
-  app.status = "已复制 GIF 文件，到聊天窗口 Ctrl+V 粘贴";
+  const saved = antiSwallow.value || !gifOutPath.value ? await run(() => exportGif()) : { path: gifOutPath.value, serial: "" };
+  await run(() => copyImageFiles([saved.path]));
+  const tag = saved.serial ? `防吞序号 ${saved.serial}。` : "";
+  app.status = `已复制 GIF 文件，${tag}到聊天窗口 Ctrl+V 粘贴`;
 }
 
 async function sendGifToDisguise() {
@@ -1086,6 +1100,31 @@ async function addGrain() {
   app.status = `已给 ${outs.length} 张加上${kind}，强度 ${amount}，颗粒 ${size} 像素。再点一次会按原图重加。`;
 }
 
+function pictureForNext(item: QueueImage) {
+  if (item.grained && item.dataUrl) return item.dataUrl;
+  return item.sourceDataUrl || item.dataUrl;
+}
+
+function sendGrainedTo(target: "meta" | "mosaic") {
+  const ready = extra.value.filter((item) => item.grained && item.dataUrl);
+  if (!ready.length) {
+    app.status = "先给图片添加杂色";
+    return;
+  }
+  const readyIds = new Set(ready.map((item) => item.id));
+  const index = extra.value.findIndex((item) => readyIds.has(item.id));
+  metaActive.value = index >= 0 ? index : 0;
+  const current = extra.value[metaActive.value];
+  metaPicked.value = current ? [current.id] : [];
+  if (target === "meta") readyToFile.value = false;
+  store.tab = target;
+  const label = target === "meta" ? "清除元数据" : "打码";
+  const skipped = extra.value.length - ready.length;
+  app.status = skipped
+    ? `已把 ${ready.length} 张杂色图放进${label}，还有 ${skipped} 张没加杂色`
+    : `已把 ${ready.length} 张杂色图放进${label}`;
+}
+
 async function saveGrain() {
   const queued = extra.value.filter((item) => item.grained && item.path);
   if (!queued.length) {
@@ -1185,7 +1224,7 @@ async function mosaic() {
     for (const src of extra.value) {
       app.status = `正在打码 ${outs.length + 1}/${extra.value.length}`;
       const out = await censorApply({
-        image: src.sourceDataUrl || src.dataUrl,
+        image: pictureForNext(src),
         engines: chosen.map((engine) => ({ id: engine.id, conf: enginePref.value[engine.id]?.conf || 0.4 })),
         parts: censorParts.value,
         precise: censorPrecise.value,
@@ -1309,8 +1348,9 @@ async function loadReview() {
   blockColors.clear();
   blurCanvas = null;
   blurKey = "";
-  const source = await loadHtmlImage(item.sourceDataUrl || item.dataUrl);
-  const current = item.dataUrl === (item.sourceDataUrl || item.dataUrl) ? source : await loadHtmlImage(item.dataUrl);
+  const baseUrl = pictureForNext(item);
+  const source = await loadHtmlImage(baseUrl);
+  const current = item.dataUrl === baseUrl ? source : await loadHtmlImage(item.dataUrl);
   if (token !== reviewToken) return;
   originCanvas = document.createElement("canvas");
   originCanvas.width = source.naturalWidth;
@@ -1735,6 +1775,13 @@ onUnmounted(() => {
         <button v-else type="button" @click="fromPicker('cover')">选封面</button>
         <label v-if="store.coverMode === 'custom'" class="file">本地封面<input type="file" accept="image/*" @change="fromFiles(($event.target as HTMLInputElement).files, 'cover')" /></label>
         <label class="color">多余边 <input v-model="store.padColor" type="color" @change="store.invalidate()" /></label>
+        <label class="swallow">
+          <input v-model="antiSwallow" type="checkbox" />
+          <span>
+            <b>防吞序号：每次伪装/导出随机换号 000~999</b>
+            <small>(同一张图重复发会被 QQ 吞，随机换号可避开；推荐开启)</small>
+          </span>
+        </label>
         <input v-model="nameDraft" class="name" placeholder="导出文件名" @change="applyName" />
         <button type="button" @click="fromPicker('reals')">加真图</button>
         <label class="file">本地真图<input type="file" accept="image/*" multiple @change="fromFiles(($event.target as HTMLInputElement).files, 'reals')" /></label>
@@ -1793,6 +1840,13 @@ onUnmounted(() => {
         <label class="file">本地帧<input type="file" accept="image/*" multiple @change="fromFiles(($event.target as HTMLInputElement).files, 'gif')" /></label>
         <label>间隔 <input v-model.number="store.delayMs" type="number" min="50" step="50" /> ms</label>
         <label class="color">多余边 <input v-model="store.padColor" type="color" /></label>
+        <label class="swallow">
+          <input v-model="antiSwallow" type="checkbox" />
+          <span>
+            <b>防吞序号：每次导出随机换号 000~999</b>
+            <small>(同一张图重复发会被 QQ 吞，随机换号可避开；推荐开启)</small>
+          </span>
+        </label>
         <button type="button" :class="{ on: !store.fitFirst }" @click="store.fitFirst = false">按最大图</button>
         <button type="button" :class="{ on: store.fitFirst }" @click="store.fitFirst = true">按第一张</button>
         <span class="spacer" />
@@ -1846,6 +1900,8 @@ onUnmounted(() => {
           <button type="button" :disabled="busy" @click="chooseGrainDir">保存位置</button>
           <span class="save-dir" :title="grainSaveDir">{{ grainSaveDir ? grainSaveLabel : "未选择" }}</span>
           <button type="button" :disabled="busy || !extra.some((item) => item.grained)" @click="saveGrain">保存到此位置</button>
+          <button type="button" :disabled="busy || !extra.some((item) => item.grained)" @click="sendGrainedTo('meta')">放入清除元数据</button>
+          <button type="button" :disabled="busy || !extra.some((item) => item.grained)" @click="sendGrainedTo('mosaic')">放入打码</button>
           <button type="button" class="primary" :disabled="busy || !extra.length" @click="addGrain">
             {{ extra.length > 1 ? `给全部 ${extra.length} 张加杂色` : "添加杂色" }}
           </button>
@@ -1869,7 +1925,7 @@ onUnmounted(() => {
         <label>颗粒 <input v-model.number="grainSize" type="number" min="1" max="12" /> 像素</label>
         <button type="button" :class="{ on: grainColor }" @click="grainColor = true">彩色杂色</button>
         <button type="button" :class="{ on: !grainColor }" @click="grainColor = false">单色噪点</button>
-        <span class="hint">彩色会分别扰动红、绿、蓝，单色只改明暗。强度 1 很轻，18 左右能看出来，80 很重。颗粒 1 是细点，数字越大颗粒越粗。再点一次按原图重加，不会叠两层。</span>
+        <span class="hint">彩色会分别扰动红、绿、蓝，单色只改明暗。强度 1 很轻，18 左右能看出来，80 很重。颗粒 1 是细点，数字越大颗粒越粗。再点一次按原图重加，不会叠两层。加完可以放进清除元数据或打码，后面用的是这张杂色图。</span>
       </div>
       <div v-if="store.tab === 'mosaic'" class="censor">
         <span>部位</span>
@@ -2003,8 +2059,25 @@ onUnmounted(() => {
   flex: none;
 }
 .tabs { padding: 10px 12px 0; }
-.toolbar, .queue-bar { padding: 8px 12px; overflow-x: auto; flex-wrap: nowrap; }
+.toolbar, .queue-bar { padding: 8px 12px; }
+.toolbar { flex-wrap: wrap; overflow: hidden; }
+.queue-bar { overflow: hidden; flex-wrap: nowrap; }
 .toolbar > *, .queue-bar > * { flex: none; white-space: nowrap; }
+.toolbar > .swallow { flex: 1 1 280px; white-space: normal; }
+.swallow {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  max-width: 460px;
+  background: transparent;
+  padding: 0 4px;
+  font-size: 12px;
+  line-height: 1.35;
+  text-align: left;
+}
+.swallow input { margin-top: 2px; accent-color: #7aa2ff; }
+.swallow b { display: block; font-weight: 600; }
+.swallow small { display: block; color: #b7b9d6; }
 .save-dir {
   max-width: 180px;
   overflow: hidden;
@@ -2042,7 +2115,7 @@ input[type="text"], input:not([type]), .grow, .name {
 }
 .color input { width: 36px; height: 24px; padding: 0; }
 .primary { background: #f5f3c2; color: #0e0f21; font-weight: 700; }
-.spacer { flex: 1 0 12px; }
+.spacer { flex: 1 1 12px; min-width: 0; }
 .stage {
   flex: 1;
   min-height: 0;

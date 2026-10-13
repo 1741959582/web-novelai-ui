@@ -582,7 +582,7 @@ export interface SavedImage {
   dataUrl: string;
 }
 
-export function apngDisguise(payload: { cover: string; reals: string[]; delayMs?: number; padColor?: string; name?: string }) {
+export function apngDisguise(payload: { cover: string; reals: string[]; delayMs?: number; padColor?: string; name?: string; serial?: string }) {
   return invoke<SavedImage>("apng_disguise", {
     cover: payload.cover,
     reals: payload.reals,
@@ -591,6 +591,7 @@ export function apngDisguise(payload: { cover: string; reals: string[]; delayMs?
     padColor: payload.padColor,
     pad_color: payload.padColor,
     name: payload.name,
+    serial: payload.serial,
   });
 }
 
@@ -602,7 +603,7 @@ export function copyImageFiles(paths: string[]) {
   return invoke<void>("copy_image_files", { paths });
 }
 
-export function apngGif(payload: { frames: string[]; delayMs?: number; padColor?: string; fitFirst?: boolean }) {
+export function apngGif(payload: { frames: string[]; delayMs?: number; padColor?: string; fitFirst?: boolean; serial?: string }) {
   return invoke<SavedImage>("apng_gif", {
     frames: payload.frames,
     delayMs: payload.delayMs,
@@ -611,6 +612,7 @@ export function apngGif(payload: { frames: string[]; delayMs?: number; padColor?
     pad_color: payload.padColor,
     fitFirst: payload.fitFirst,
     fit_first: payload.fitFirst,
+    serial: payload.serial,
   });
 }
 
