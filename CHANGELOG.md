@@ -2,6 +2,12 @@
 
 从新到旧。安装包在 [最新发行版](https://github.com/caiweida/web-novelai-ui/releases/latest)。已安装的程序启动后会读到新版本，顶栏可以点「立即更新」。
 
+## [1.0.2](https://github.com/caiweida/web-novelai-ui/releases/tag/v1.0.2)
+
+- 指纹浏览器可以登录并保存推特和 Pixiv 账号。推特可以养号，Pixiv 目前只有登录和保存指纹。
+- 设置里可以检查本机指纹浏览器。没有 `electron/firefox/firefox.exe` 时，从 151-5 发布页下载并解压。
+- 脚本包更新到 0.1.34。同一备注名可以分别用在推特和 Pixiv，打开窗口时会带上选中的代理节点。
+
 ## [1.0.1](https://github.com/caiweida/web-novelai-ui/releases/tag/v1.0.1)
 
 - APNG 伪装每次导出或复制都会在右下角印一个新的 000~999 序号，同一张图重复发不容易被吞。聊天里仍是封面，点开才是真图。

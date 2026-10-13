@@ -1,0 +1,72 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ruyiPage"
+version = "1.2.73"
+description = "专用于 AI 分析和数据采集场景，可拦截任意请求响应包的 Firefox 自动化库。"
+readme = { file = "README.md", content-type = "text/markdown" }
+requires-python = ">=3.9"
+license = "BSD-3-Clause"
+authors = [
+  { name = "ruyiPage" }
+]
+keywords = [
+  "firefox",
+  "webdriver-bidi",
+  "browser-automation",
+  "automation",
+  "bidi"
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Testing",
+  "Topic :: Internet :: WWW/HTTP :: Browsers",
+]
+dependencies = [
+  "websocket-client>=1.0",
+  "lxml>=4.9",
+  "cssselect>=1.2",
+]
+
+[project.optional-dependencies]
+async = [
+  "greenlet>=3.2",
+  "websockets>=13.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/LoseNine/ruyipage"
+Repository = "https://github.com/LoseNine/ruyipage"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.package-data]
+"ruyipage._fingerprint.data" = ["*.json"]
+
+[tool.setuptools.packages.find]
+include = ["ruyipage*"]
+exclude = ["examples*", "dist*", "build*", "tests*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra"
+markers = [
+  "smoke: 最核心的启动与基础行为回归",
+  "feature: 模块级能力回归",
+  "integration: 多模块串联工作流回归",
+  "release: 发版前最小通过集合",
+  "local_server: 依赖本地测试 server",
+  "fast: 不需要真实 Firefox/BiDi 会话的快速测试",
+  "browser: 需要真实 Firefox/BiDi 会话的测试",
+  "asyncio: 异步 pytest 测试",
+]

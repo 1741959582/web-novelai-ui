@@ -10,6 +10,7 @@ mod png_meta;
 mod quicktag;
 mod reference_presets;
 mod reverse_tasks;
+mod ruyi;
 mod store;
 mod tavern;
 mod update;
@@ -22,6 +23,10 @@ pub fn run() {
         .append_invoke_initialization_script(
             r#"if(location.hostname==="tags.novelai.dev"){try{localStorage.setItem("vueuse-color-scheme","\"light\"")}catch(e){}}"#,
         )
+        .setup(|_app| {
+            ruyi::start_on_launch();
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             store::settings_get,
             store::settings_save,
@@ -121,7 +126,40 @@ pub fn run() {
             video::reapi_save_video,
             batch_lists::batch_library_load,
             batch_lists::batch_library_save,
+            ruyi::ruyi_status,
+            ruyi::ruyi_accounts,
+            ruyi::ruyi_ensure,
+            ruyi::ruyi_cache_firefox,
+            ruyi::ruyi_open_browser,
+            ruyi::ruyi_script_status,
+            ruyi::ruyi_script_check,
+            ruyi::ruyi_script_download,
+            ruyi::ruyi_firefox_status,
+            ruyi::ruyi_firefox_download,
+            ruyi::ruyi_twitter_create,
+            ruyi::ruyi_twitter_update,
+            ruyi::ruyi_twitter_delete,
+            ruyi::ruyi_twitter_refresh,
+            ruyi::ruyi_twitter_open,
+            ruyi::ruyi_pixiv_create,
+            ruyi::ruyi_pixiv_update,
+            ruyi::ruyi_pixiv_delete,
+            ruyi::ruyi_pixiv_refresh,
+            ruyi::ruyi_pixiv_open,
+            ruyi::ruyi_clash_nodes,
+            ruyi::ruyi_proxy_map,
+            ruyi::ruyi_proxy_set,
+            ruyi::ruyi_node_ip,
+            ruyi::ruyi_exit_ip,
+            ruyi::ruyi_nurture_start,
+            ruyi::ruyi_nurture_stop,
+            ruyi::ruyi_nurture_status,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|_app, event| {
+            if let tauri::RunEvent::Exit = event {
+                ruyi::stop_if_spawned();
+            }
+        });
 }

@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from "vue";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { censorDownload, censorOpenDir, censorStatus, danbooruStatus, downloadDanbooru, openOutputDir, pickOutputDir, type CensorEngineInfo } from "@/api/tauri";
+import { censorDownload, censorOpenDir, censorStatus, danbooruStatus, downloadDanbooru, openOutputDir, pickOutputDir, ruyiFirefoxDownload, ruyiFirefoxStatus, ruyiScriptCheck, ruyiScriptDownload, ruyiScriptStatus, type CensorEngineInfo, type FirefoxBrowserStatus, type ScriptPackageStatus } from "@/api/tauri";
 import { useAppStore } from "@/stores/app";
 import ClTaggerPanel from "@/components/ClTaggerPanel.vue";
 import NaiIcon from "@/components/NaiIcon.vue";
 
-type Tab = "api" | "storage" | "tags" | "tagger" | "censor" | "perf" | "about";
+type Tab = "api" | "storage" | "tags" | "tagger" | "censor" | "script" | "firefox" | "perf" | "about";
 
 const store = useAppStore();
 const tab = ref<Tab>("api");
@@ -20,13 +20,36 @@ const censorDir = ref("");
 const censorBusy = ref("");
 const censorPct = ref(0);
 const censorProgress = ref("");
+const scriptPkg = ref<ScriptPackageStatus | null>(null);
+const scriptBusy = ref("");
+const scriptPct = ref(0);
+const scriptProgress = ref("");
+const firefoxPkg = ref<FirefoxBrowserStatus | null>(null);
+const firefoxBusy = ref("");
+const firefoxPct = ref(0);
+const firefoxProgress = ref("");
 let unlistenCensor: UnlistenFn | undefined;
+let unlistenScript: UnlistenFn | undefined;
+let unlistenFirefox: UnlistenFn | undefined;
 
 onMounted(async () => {
   unlistenCensor = await listen<{ percent: number; message: string }>("censor-download", (event) => {
     censorPct.value = Math.max(0, Math.min(100, Math.round(event.payload.percent)));
     censorProgress.value = event.payload.message;
   });
+  unlistenScript = await listen<{ percent: number; message: string }>("script-package-download", (event) => {
+    scriptPct.value = Math.max(0, Math.min(100, Math.round(event.payload.percent)));
+    scriptProgress.value = event.payload.message;
+  });
+  unlistenFirefox = await listen<{ percent: number; message: string }>("firefox-browser-download", (event) => {
+    firefoxPct.value = Math.max(0, Math.min(100, Math.round(event.payload.percent)));
+    firefoxProgress.value = event.payload.message;
+  });
+  try {
+    scriptPkg.value = await ruyiScriptStatus();
+  } catch {
+    /* ignore */
+  }
   try {
     tagLib.value = await danbooruStatus();
   } catch {
@@ -36,7 +59,75 @@ onMounted(async () => {
 
 onUnmounted(() => {
   unlistenCensor?.();
+  unlistenScript?.();
+  unlistenFirefox?.();
 });
+
+function scriptSize(bytes = 0) {
+  if (!bytes) return "";
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+async function loadScript() {
+  try {
+    scriptPkg.value = await ruyiScriptStatus();
+  } catch (error) {
+    message.value = error instanceof Error ? error.message : String(error);
+  }
+}
+
+async function checkScript() {
+  scriptBusy.value = "check";
+  message.value = "正在检查脚本包";
+  try {
+    scriptPkg.value = await ruyiScriptCheck();
+    message.value = scriptPkg.value.message;
+  } catch (error) {
+    message.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    scriptBusy.value = "";
+  }
+}
+
+async function downloadScript() {
+  scriptBusy.value = "download";
+  scriptPct.value = 0;
+  scriptProgress.value = "正在下载脚本包";
+  message.value = scriptProgress.value;
+  try {
+    scriptPkg.value = await ruyiScriptDownload();
+    scriptPct.value = 100;
+    message.value = scriptPkg.value.message;
+  } catch (error) {
+    message.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    scriptBusy.value = "";
+  }
+}
+
+async function loadFirefox() {
+  try {
+    firefoxPkg.value = await ruyiFirefoxStatus();
+  } catch (error) {
+    message.value = error instanceof Error ? error.message : String(error);
+  }
+}
+
+async function downloadFirefox() {
+  firefoxBusy.value = "download";
+  firefoxPct.value = 0;
+  firefoxProgress.value = "正在检查指纹浏览器";
+  message.value = firefoxProgress.value;
+  try {
+    firefoxPkg.value = await ruyiFirefoxDownload();
+    firefoxPct.value = 100;
+    message.value = firefoxPkg.value.message;
+  } catch (error) {
+    message.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    firefoxBusy.value = "";
+  }
+}
 
 async function loadCensor() {
   try {
@@ -154,6 +245,14 @@ async function save() {
         <NaiIcon name="folder" :size="16" />
         <span>打码模型</span>
       </button>
+      <button type="button" :class="{ on: tab === 'script' }" @click="tab = 'script'; loadScript()">
+        <NaiIcon name="folder" :size="16" />
+        <span>脚本包</span>
+      </button>
+      <button type="button" :class="{ on: tab === 'firefox' }" @click="tab = 'firefox'; loadFirefox()">
+        <NaiIcon name="folder" :size="16" />
+        <span>指纹浏览器</span>
+      </button>
       <button type="button" :class="{ on: tab === 'perf' }" @click="tab = 'perf'">
         <NaiIcon name="sparkle" :size="16" />
         <span>性能</span>
@@ -259,6 +358,51 @@ async function save() {
           <button class="btn" type="button" @click="loadCensor()">刷新</button>
         </div>
         <p class="hint">{{ censorDir }}</p>
+      </div>
+
+      <div v-else-if="tab === 'script'" class="card">
+        <h2>脚本包</h2>
+        <p class="hint">指纹浏览器的脚本包放在本机 electron 目录，不进安装包。发行版页面提供 ruyipage-server.exe。这里可以检查热更新，没有文件时直接下载。</p>
+        <p class="hint">{{ scriptPkg?.message || "正在读取本机脚本包" }}</p>
+        <p class="hint">
+          本机 {{ scriptPkg?.present ? (scriptPkg.version || "已就绪") : "未下载" }}
+          {{ scriptSize(scriptPkg?.bytes) }}
+          <template v-if="scriptPkg?.latest"> · 发行版 {{ scriptPkg.latest }}</template>
+        </p>
+        <p v-if="scriptPkg?.path" class="hint">{{ scriptPkg.path }}</p>
+        <div v-if="scriptBusy === 'download'" class="progress">
+          <span>{{ scriptProgress || "下载中…" }} {{ scriptPct }}%</span>
+          <i :style="{ width: `${Math.max(scriptPct ? 4 : 0, scriptPct)}%` }" />
+        </div>
+        <div class="actions">
+          <button class="btn" type="button" :disabled="!!scriptBusy" @click="checkScript">
+            {{ scriptBusy === "check" ? "检查中…" : "检查热更新" }}
+          </button>
+          <button class="btn primary" type="button" :disabled="!!scriptBusy || (scriptPkg?.present && !scriptPkg?.updateAvailable)" @click="downloadScript">
+            {{ scriptBusy === "download" ? "下载中…" : scriptPkg?.present ? "更新脚本包" : "下载脚本包" }}
+          </button>
+        </div>
+      </div>
+
+      <div v-else-if="tab === 'firefox'" class="card">
+        <h2>指纹浏览器</h2>
+        <p class="hint">检查 electron/firefox/firefox.exe。没有这个文件时，从 151-5 发布页下载 firefox-155.0a1.en-US.win64-20260803.zip，再解压到 electron/firefox。</p>
+        <p class="hint">{{ firefoxPkg?.message || "正在检查本机指纹浏览器" }}</p>
+        <p class="hint">
+          本机 {{ firefoxPkg?.present ? "已就绪" : "未找到" }}
+          {{ scriptSize(firefoxPkg?.bytes) }}
+        </p>
+        <p v-if="firefoxPkg?.path" class="hint">{{ firefoxPkg.path }}</p>
+        <div v-if="firefoxBusy === 'download'" class="progress">
+          <span>{{ firefoxProgress || "下载中…" }} {{ firefoxPct }}%</span>
+          <i :style="{ width: `${Math.max(firefoxPct ? 4 : 0, firefoxPct)}%` }" />
+        </div>
+        <div class="actions">
+          <button class="btn" type="button" :disabled="!!firefoxBusy" @click="loadFirefox">重新检查</button>
+          <button class="btn primary" type="button" :disabled="!!firefoxBusy || !!firefoxPkg?.present" @click="downloadFirefox">
+            {{ firefoxBusy === "download" ? "下载中…" : "下载并解压" }}
+          </button>
+        </div>
       </div>
 
       <div v-else-if="tab === 'perf'" class="card">

@@ -1,0 +1,1786 @@
+# -*- coding: utf-8 -*-
+"""Firefox 浏览器启动配置"""
+
+import copy as _copy
+import os
+import re
+import sys
+from urllib.parse import unquote, urlsplit
+
+
+DEFAULT_REMOTE_DEBUGGING_PORT = 9222
+DEFAULT_DEBUGGER_PORT = 6000
+DEFAULT_RANDOM_PORT_START = 10000
+# 上界压在系统 TCP 动态端口段之下（Windows 默认 49152 起，Linux 32768 起）。
+# 动态端口段里的端口会被内核随时分给出站连接做源端口，可能在我们探测到
+# 「可用」之后、Firefox 真正 bind 之前被抢走。
+DEFAULT_RANDOM_PORT_END = 32767
+UINT32_MAX = (2**32) - 1
+_SYSTEM_ACCESS_ARGUMENTS = {
+    "-remote-allow-system-access",
+    "--remote-allow-system-access",
+}
+
+
+def _is_system_access_argument(arg):
+    name = str(arg).strip().split("=", 1)[0]
+    return name in _SYSTEM_ACCESS_ARGUMENTS
+
+
+def _is_elevated_windows():
+    """Return whether this process has an elevated Windows token."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def _validate_touch_max_touch_points(value):
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(
+            "max_touch_points must be an integer in range 0..{}".format(UINT32_MAX)
+        )
+    if value < 0 or value > UINT32_MAX:
+        raise ValueError(
+            "max_touch_points must be in range 0..{}".format(UINT32_MAX)
+        )
+    return value
+
+
+class FirefoxOptions(object):
+    """Firefox 浏览器启动选项
+
+    用法::
+
+        opts = FirefoxOptions()
+        opts.set_port(9222)
+        opts.headless()
+        opts.set_proxy('http://127.0.0.1:7890')
+        opts.set_fpfile('/path/to/fingerprint.json')
+        opts.set_window_size(1920, 1080)
+        page = FirefoxPage(opts)
+
+    新手最常改的基础项：
+        1. 浏览器程序路径
+           例如 Firefox 安装在非默认位置时，用 ``set_browser_path()``。
+        2. 用户目录 / profile 目录
+           例如想复用自己已有登录态、Cookie、扩展时，用 ``set_user_dir()``。
+        3. 端口
+           例如同机多开时，用 ``set_port()``。
+    """
+
+    def __init__(self):
+        # 浏览器可执行文件路径
+        if sys.platform == "win32":
+            self._browser_path = r"C:\Program Files\Mozilla Firefox\firefox.exe"
+        elif sys.platform == "darwin":
+            self._browser_path = "/Applications/Firefox.app/Contents/MacOS/firefox"
+        else:
+            self._browser_path = "firefox"
+
+        self._address = "127.0.0.1"
+        self._port = DEFAULT_REMOTE_DEBUGGING_PORT
+        self._profile_path = None
+        self._arguments = []
+        self._preferences = {}
+        self._headless = False
+        self._download_path = None
+        self._load_mode = "normal"  # 'normal', 'eager', 'none'
+        self._timeouts = {
+            "base": 10,
+            "page_load": 30,
+            "script": 30,
+        }
+        self._existing_only = False
+        self._close_on_exit = True
+        self._high_density_mode_enabled = False
+        self._retry_times = 10
+        self._retry_interval = 2.0
+        # 启动宽限期（秒）。None 表示按 retry 预算自动推算，0 关闭。
+        self._retry_grace = None
+        self._proxy = None
+        self._auto_port = False
+        self._random_port = True
+        self._random_port_start = DEFAULT_RANDOM_PORT_START
+        self._random_port_end = DEFAULT_RANDOM_PORT_END
+        self._startup_window_size = None
+        self._user_context = None  # 容器标签页
+        self._fpfile = None  # 指纹配置文件路径
+        self._source_fpfile = None  # 用户显式传入的原始 fpfile 路径
+        self._runtime_fpfile = None  # 运行期生成的 session fpfile 路径
+        self._per_tab_proxies = []  # 规范化后的 proxy.rotate.proxy 列表
+        self._per_tab_proxy_exhausted = "wrap"  # proxy.rotate.exhausted
+        self._fpfile_http_proxy_enabled = False  # httpauth.host/port 生成的 HTTP 代理
+        self._touch_fallback_enabled = False
+        self._touch_fallback_max_touch_points = 1
+        self._touch_fallback_profile = "mobile"
+        self._private_mode = False  # Firefox 私密浏览模式
+        self._user_prompt_handler = None  # session.UserPromptHandler
+        self._debugger_port = None  # RDP 断点调试端口
+        self._xpath_picker_enabled = False  # 页面 XPath 选择浮窗
+        self._action_visual_enabled = False  # 鼠标行为可视化调试
+        self._human_algorithm = "bezier"  # 拟人鼠标轨迹算法
+        self._trace_enabled = False  # debug trace 记录
+        self._failure_snapshot_enabled = False  # 失败自动诊断快照
+        self._snapshot_dir = None  # 诊断快照保存目录
+        # 某些 Firefox / 指纹浏览器 / 个别机器环境在带 --marionette
+        # 启动时会直接崩溃或闪退，导致后续 BiDi 端口连接失败。
+        # 默认保持启用以兼容历史行为，但允许用户显式关闭。
+        self._marionette_enabled = True  # 是否启用 Marionette 启动通道
+        # None 表示仅在 Windows 提权会话中自动启用；True/False 是显式覆盖。
+        # 这既修复提权环境的 Firefox 155 连接问题，也避免在其他环境中
+        # 无条件扩大 Remote Agent 权限。
+        self._allow_system_access = None
+
+    # ===== 属性读取 =====
+
+    @property
+    def browser_path(self):
+        return self._browser_path
+
+    @property
+    def address(self):
+        return "{}:{}".format(self._address, self._port)
+
+    @property
+    def host(self):
+        return self._address
+
+    @property
+    def port(self):
+        return self._port
+
+    @property
+    def profile_path(self):
+        return self._profile_path
+
+    @property
+    def arguments(self):
+        return self._arguments[:]
+
+    @property
+    def preferences(self):
+        return self._preferences.copy()
+
+    @property
+    def is_headless(self):
+        return self._headless
+
+    @property
+    def download_path(self):
+        return self._download_path
+
+    @property
+    def load_mode(self):
+        return self._load_mode
+
+    @property
+    def timeouts(self):
+        return self._timeouts.copy()
+
+    @property
+    def is_existing_only(self):
+        return self._existing_only
+
+    @property
+    def retry_times(self):
+        return self._retry_times
+
+    @property
+    def close_on_exit_enabled(self):
+        """Python 进程退出时是否自动关闭浏览器。"""
+        return self._close_on_exit
+
+    @property
+    def retry_interval(self):
+        return self._retry_interval
+
+    @property
+    def retry_grace(self):
+        """启动宽限期（秒）；None 表示自动推算。"""
+        return self._retry_grace
+
+    @property
+    def proxy(self):
+        return self._proxy
+
+    @property
+    def uses_fpfile_http_proxy(self):
+        return bool(self._fpfile_http_proxy_enabled)
+
+    @property
+    def auto_port(self):
+        return self._auto_port
+
+    @property
+    def random_port(self):
+        return self._random_port
+
+    @property
+    def random_port_range(self):
+        return (self._random_port_start, self._random_port_end)
+
+    @property
+    def startup_window_size(self):
+        return self._startup_window_size
+
+    @property
+    def fpfile(self):
+        """指纹配置文件路径"""
+        return self._fpfile
+
+    @property
+    def debugger_port(self):
+        """RDP 断点调试端口；未启用时为 None。"""
+        return self._debugger_port
+
+    @property
+    def touch_fallback_enabled(self):
+        return bool(self._touch_fallback_enabled)
+
+    @property
+    def touch_fallback_profile(self):
+        return self._touch_fallback_profile
+
+    @property
+    def touch_fallback_max_touch_points(self):
+        return self._touch_fallback_max_touch_points
+
+    @property
+    def touch_fallback_active(self):
+        return bool(self._touch_fallback_enabled and self._runtime_fpfile)
+
+    @property
+    def per_tab_proxies(self):
+        """per-tab SOCKS5 代理列表（规范化后的 socks5://...）。"""
+        return self._per_tab_proxies[:]
+
+    @property
+    def per_tab_proxy_exhausted(self):
+        """per-tab 代理耗尽策略。"""
+        return self._per_tab_proxy_exhausted
+
+    @property
+    def is_private_mode(self):
+        """是否启用 Firefox 私密浏览模式。"""
+        return self._private_mode
+
+    @property
+    def user_prompt_handler(self):
+        """session 级默认用户提示框处理策略。"""
+        return (
+            dict(self._user_prompt_handler)
+            if isinstance(self._user_prompt_handler, dict)
+            else None
+        )
+
+    @property
+    def xpath_picker_enabled(self):
+        """是否在启动时自动注入 XPath 选择浮窗。"""
+        return self._xpath_picker_enabled
+
+    @property
+    def action_visual_enabled(self):
+        """是否启用鼠标行为可视化调试模式。"""
+        return self._action_visual_enabled
+
+    @property
+    def human_algorithm(self):
+        """默认拟人鼠标轨迹算法。"""
+        return self._human_algorithm
+
+    @property
+    def trace_enabled(self):
+        """是否启用 debug trace 记录。"""
+        return self._trace_enabled
+
+    @property
+    def failure_snapshot_enabled(self):
+        """是否启用失败自动诊断快照。"""
+        return self._failure_snapshot_enabled
+
+    @property
+    def snapshot_dir(self):
+        """诊断快照保存目录。"""
+        return self._snapshot_dir
+
+    @property
+    def marionette_enabled(self):
+        """是否启用 Marionette 启动通道。"""
+        return self._marionette_enabled
+
+    @property
+    def system_access_allowed(self):
+        """是否允许 WebDriver 访问 Firefox 的特权上下文。"""
+        if self._allow_system_access is None:
+            return _is_elevated_windows()
+        return self._allow_system_access
+
+    @property
+    def high_density_mode_enabled(self):
+        return self._high_density_mode_enabled
+
+    # ===== 链式设置方法 =====
+
+    def set_browser_path(self, path):
+        """设置浏览器可执行文件路径。
+
+        Args:
+            path: Firefox 可执行文件路径。
+                常见值：
+                Windows: ``r'C:\\Program Files\\Mozilla Firefox\\firefox.exe'``
+                macOS: ``'/Applications/Firefox.app/Contents/MacOS/firefox'``
+                Linux: ``'/usr/bin/firefox'`` or a directory containing ``firefox``
+
+        Returns:
+            self: 原配置对象，便于链式调用。
+
+        适用场景：
+            - Firefox 安装在非默认目录
+            - 同时存在多个 Firefox 版本，想指定其中一个
+            - 便携版 Firefox 需要显式指定 exe 路径
+        """
+        path = os.path.expanduser(str(path))
+        if os.path.isdir(path):
+            exe_name = "firefox.exe" if sys.platform == "win32" else "firefox"
+            path = os.path.join(path, exe_name)
+        self._browser_path = path
+        return self
+
+    def set_address(self, address):
+        """设置连接地址（host:port 或仅 host）
+
+        Args:
+            address: '127.0.0.1:9222' 或 '127.0.0.1'
+
+        Returns:
+            self
+        """
+        if ":" in str(address):
+            parts = str(address).rsplit(":", 1)
+            self._address = parts[0]
+            self._port = int(parts[1])
+            self._auto_port = False
+            self._random_port = False
+        else:
+            self._address = str(address)
+        return self
+
+    def set_port(self, port):
+        """设置远程调试端口
+
+        Args:
+            port: 端口号
+
+        Returns:
+            self
+        """
+        self._port = int(port)
+        self._auto_port = False
+        self._random_port = False
+        return self
+
+    def _set_port_for_launch(self, port):
+        """Update the selected runtime port without changing port mode."""
+        self._port = int(port)
+        return self
+
+    def set_profile(self, path):
+        """设置 Firefox 配置文件路径。
+
+        Args:
+            path: profile 目录路径。
+                这就是很多人常说的 userdir / 用户目录。
+                常见值：
+                Windows: ``r'D:\firefox_profile'``
+                Linux/macOS: ``'/Users/name/firefox_profile'``
+
+        Returns:
+            self: 原配置对象，便于链式调用。
+
+        适用场景：
+            - 想复用已有登录状态、Cookie、本地存储
+            - 想让浏览器持久保存数据，而不是每次用临时目录
+            - 想加载已安装到该 profile 的扩展、证书、首选项
+
+        说明：
+            - 如果不设置，ruyipage 会自动创建一个临时 profile。
+            - 临时 profile 适合一次性测试，但关闭后通常会被清理。
+            - 想长期复用浏览器数据时，建议显式设置这个路径。
+        """
+        self._profile_path = path
+        return self
+
+    def set_user_dir(self, path):
+        """设置用户目录（userdir）。
+
+        这是 ``set_profile()`` 的新手友好别名。
+
+        Args:
+            path: 用户目录 / profile 目录路径。
+                常见值：``r'D:\\my_firefox_userdir'``。
+
+        Returns:
+            self: 原配置对象，便于链式调用。
+
+        适用场景：
+            - 你只知道“我要设置 userdir”，但不关心 Firefox 内部叫 profile
+            - 教程和快速开始里希望用更直白的名字
+        """
+        return self.set_profile(path)
+
+    def enable_debugger(self, on_off=True, port=None):
+        """启用 JS 断点调试通道（``page.debugger``）。
+
+        断点、单步这类能力不在 WebDriver BiDi 规范内，需要额外启动 Firefox
+        的 DevTools server（RDP）。本方法负责写入所需 pref 并添加启动参数。
+
+        Args:
+            on_off: ``True`` 启用，``False`` 关闭。
+            port: RDP 监听端口，默认 6000。
+
+        Returns:
+            self
+
+        Note:
+            RDP 端口只监听本机回环地址（``devtools.debugger.force-local``
+            默认为真）。``devtools.debugger.prompt-connection`` 被置为 False，
+            否则每次连接都会弹出授权对话框而无法自动化。
+        """
+        if not on_off:
+            self._debugger_port = None
+            self.remove_argument("--start-debugger-server")
+            for key in (
+                "devtools.debugger.remote-enabled",
+                "devtools.chrome.enabled",
+                "devtools.debugger.prompt-connection",
+                "devtools.debugger.remote-port",
+            ):
+                self._preferences.pop(key, None)
+            return self
+
+        port = int(port or DEFAULT_DEBUGGER_PORT)
+        self._debugger_port = port
+        self.set_pref("devtools.debugger.remote-enabled", True)
+        self.set_pref("devtools.chrome.enabled", True)
+        self.set_pref("devtools.debugger.prompt-connection", False)
+        self.set_pref("devtools.debugger.remote-port", port)
+        # 裸标志会读取 devtools.debugger.remote-port；带值形式要求参数是独立
+        # 的 argv token，与本类拼接 "--flag=value" 的方式不兼容。
+        self.set_argument("--start-debugger-server")
+        return self
+
+    def set_argument(self, arg, value=None):
+        """添加启动参数
+
+        Args:
+            arg: 参数名，如 '--width'
+            value: 参数值，如 '1920'
+
+        Returns:
+            self
+        """
+        if _is_system_access_argument(arg):
+            return self.allow_system_access(True)
+        if value is not None:
+            self._arguments.append("{}={}".format(arg, value))
+        else:
+            if arg not in self._arguments:
+                self._arguments.append(arg)
+        return self
+
+    def remove_argument(self, arg):
+        """移除启动参数
+
+        Args:
+            arg: 参数名
+
+        Returns:
+            self
+        """
+        if _is_system_access_argument(arg):
+            return self.allow_system_access(False)
+        self._arguments = [
+            a for a in self._arguments if a != arg and not a.startswith(arg + "=")
+        ]
+        return self
+
+    def set_pref(self, key, value):
+        """设置 Firefox 首选项（about:config）
+
+        Args:
+            key: 首选项名称
+            value: 首选项值
+
+        Returns:
+            self
+        """
+        self._preferences[key] = value
+        return self
+
+    def set_user_prompt_handler(self, handler):
+        """设置 session 级默认用户提示框处理策略。
+
+        Args:
+            handler: dict，键可包含 alert/beforeUnload/confirm/default/file/prompt
+                     值必须为 'accept' / 'dismiss' / 'ignore'
+
+        Returns:
+            self
+        """
+        self._user_prompt_handler = dict(handler) if handler else None
+        return self
+
+    def headless(self, on_off=True):
+        """设置无头模式
+
+        Args:
+            on_off: True 启用无头，False 禁用
+
+        Returns:
+            self
+        """
+        self._headless = on_off
+        return self
+
+    def set_proxy(self, proxy):
+        """设置代理
+
+        Args:
+            proxy: 代理地址，如 'http://127.0.0.1:7890' 或 'socks5://127.0.0.1:1080'
+
+        Returns:
+            self
+        """
+        self._proxy = proxy
+        return self
+
+    def set_download_path(self, path):
+        """设置下载路径
+
+        Args:
+            path: 下载目录路径
+
+        Returns:
+            self
+        """
+        self._download_path = os.path.normpath(
+            os.path.abspath(os.path.expanduser(os.fspath(path)))
+        )
+        return self
+
+    def set_load_mode(self, mode):
+        """设置加载模式
+
+        Args:
+            mode: 'normal' 完全加载 / 'eager' DOMContentLoaded / 'none' 不等待
+
+        Returns:
+            self
+        """
+        if mode not in ("normal", "eager", "none"):
+            raise ValueError("load_mode 必须是 'normal', 'eager' 或 'none'")
+        self._load_mode = mode
+        return self
+
+    def set_timeouts(self, base=None, page_load=None, script=None):
+        """设置各种超时时间（秒）
+
+        Args:
+            base: 基础超时（元素查找等）
+            page_load: 页面加载超时
+            script: 脚本执行超时
+
+        Returns:
+            self
+        """
+        if base is not None:
+            self._timeouts["base"] = base
+        if page_load is not None:
+            self._timeouts["page_load"] = page_load
+        if script is not None:
+            self._timeouts["script"] = script
+        return self
+
+    def existing_only(self, on_off=True):
+        """仅连接已有浏览器，不启动新的
+
+        Args:
+            on_off: True 仅连接
+
+        Returns:
+            self
+        """
+        self._existing_only = on_off
+        if on_off:
+            self._auto_port = False
+            self._random_port = False
+        return self
+
+    def close_on_exit(self, on_off=True):
+        """设置 Python 进程退出时是否自动关闭浏览器。
+
+        Args:
+            on_off: ``True`` 表示当前 Python 程序退出时自动关闭由 ruyipage
+                    启动的浏览器；``False`` 表示仅断开连接，不主动关闭浏览器。
+
+        Returns:
+            self
+
+        说明：
+            - 默认值为 ``True``，更符合“脚本结束即收尾”的直觉。
+            - 对 ``existing_only(True)`` 接管的外部浏览器，此选项不会强制杀掉
+              外部进程；退出时仍只做断开连接，避免误关用户自己打开的浏览器。
+            - 对 ruyipage 自动创建的临时 profile，若执行完整关闭，会一并清理
+              该临时目录。
+        """
+        self._close_on_exit = bool(on_off)
+        return self
+
+    def set_auto_port(self, on_off=True):
+        """自动寻找可用端口
+
+        Args:
+            on_off: True 自动端口 / int 指定范围起始端口
+
+        Returns:
+            self
+        """
+        self._auto_port = on_off
+        self._random_port = False
+        return self
+
+    def set_random_port(
+        self,
+        on_off=True,
+        start=DEFAULT_RANDOM_PORT_START,
+        end=DEFAULT_RANDOM_PORT_END,
+    ):
+        """随机选择远程调试端口。
+
+        Args:
+            on_off: True 启用随机端口，False 关闭随机端口
+            start: 随机端口起始值，默认 10000
+            end: 随机端口结束值，默认 32767（避开系统动态端口段）
+
+        Returns:
+            self
+        """
+        if not on_off:
+            self._random_port = False
+            return self
+
+        start = int(start)
+        end = int(end)
+        if start < 1025 or end > 65535 or start > end:
+            raise ValueError("随机端口范围必须在 1025-65535 内，且 start <= end")
+
+        self._random_port = True
+        self._auto_port = False
+        self._random_port_start = start
+        self._random_port_end = end
+        return self
+
+    def set_retry(self, times=None, interval=None, grace=None):
+        """设置连接重试
+
+        Args:
+            times: 重试次数
+            interval: 重试间隔（秒）
+            grace: 启动宽限期（秒）。retry 预算耗尽后，只要 Firefox 进程还
+                活着就再等这么久，而不是立刻判死重启。并发启动多个实例时
+                Windows 冷启动会明显变慢，默认按 retry 预算自动推算；
+                传 0 关闭宽限等待，恢复快速失败。
+
+        Returns:
+            self
+        """
+        if times is not None:
+            self._retry_times = times
+        if interval is not None:
+            self._retry_interval = interval
+        if grace is not None:
+            grace = float(grace)
+            if grace < 0:
+                raise ValueError("grace 不能为负数")
+            self._retry_grace = grace
+        return self
+
+    def copy(self):
+        """返回一份独立副本。
+
+        启动流程会把解析出的端口、profile 目录和 session fpfile 写回选项对象。
+        若多个浏览器实例共用同一个对象，这些写回会互相覆盖，导致并发启动的
+        Firefox 落到同一个 profile 目录上。
+        """
+        return _copy.deepcopy(self)
+
+    def set_fpfile(self, path):
+        """设置指纹配置文件路径
+
+        指纹配置文件用于浏览器指纹伪装，通过 --fpfile 参数传递给 Firefox。
+
+        Args:
+            path: 指纹配置文件的路径
+
+        Returns:
+            self
+        """
+        self._source_fpfile = path
+        self._fpfile = path
+        self._runtime_fpfile = None
+        self._fpfile_http_proxy_enabled = False
+        return self
+
+    def set_per_tab_proxies(self, proxies, exhausted="wrap"):
+        """设置 per-tab SOCKS5 代理池。
+
+        该能力依赖定制 Firefox 内核读取 ``proxy.rotate.*`` fpfile 配置，
+        并按 container tab 的 userContextId 为每个 tab 分配不同代理。
+
+        Args:
+            proxies: 代理列表。每项支持以下格式：
+                - ``"host:port:username:password"``
+                - ``"socks5://host:port:username:password"``
+            exhausted: 代理耗尽策略。
+                可选 ``"wrap"``、``"direct"``、``"none"``、``"stop"``。
+
+        Returns:
+            self
+        """
+        allowed = {"wrap", "direct", "none", "stop"}
+        exhausted = str(exhausted or "wrap").strip().lower()
+        if exhausted not in allowed:
+            raise ValueError(
+                "exhausted 必须是 'wrap'、'direct'、'none' 或 'stop'"
+            )
+
+        normalized = []
+        for proxy in proxies or []:
+            normalized.append(self._normalize_per_tab_proxy(proxy))
+
+        if not normalized:
+            raise ValueError("per-tab 代理列表不能为空")
+
+        self._per_tab_proxies = normalized
+        self._per_tab_proxy_exhausted = exhausted
+        self._runtime_fpfile = None
+        return self
+
+    def set_proxy_rotate(self, proxies, exhausted="wrap"):
+        """``set_per_tab_proxies()`` 的新手友好别名。"""
+        return self.set_per_tab_proxies(proxies, exhausted=exhausted)
+
+    def set_touch_fallback(self, enabled=True, max_touch_points=1, profile="mobile"):
+        profile = str(profile or "mobile").strip().lower()
+        if profile not in {"mobile"}:
+            raise ValueError("profile 必须是 'mobile'")
+
+        max_touch_points = _validate_touch_max_touch_points(max_touch_points)
+
+        self._touch_fallback_enabled = bool(enabled)
+        self._touch_fallback_max_touch_points = max_touch_points
+        self._touch_fallback_profile = profile
+        if self._runtime_fpfile and self._fpfile == self._runtime_fpfile:
+            self._fpfile = self._source_fpfile
+        self._runtime_fpfile = None
+        return self
+
+    def can_install_touch_fallback(self):
+        return bool(
+            self._touch_fallback_enabled
+            and not self._existing_only
+            and self._profile_path
+        )
+
+    def prepare_runtime_files(self):
+        """在 profile 就绪后生成运行期 session fpfile。"""
+        has_http_proxy = self._source_fpfile_has_http_proxy_fields()
+        self._fpfile_http_proxy_enabled = bool(has_http_proxy)
+        proxy_url_auth_lines = self._proxy_url_auth_runtime_lines()
+        has_touch_fallback = self._touch_fallback_enabled
+        if (
+            not self._per_tab_proxies
+            and not has_http_proxy
+            and not proxy_url_auth_lines
+            and not has_touch_fallback
+        ):
+            return
+
+        if not self._profile_path:
+            raise ValueError("prepare_runtime_files() 需要先设置 profile_path")
+
+        session_name = (
+            "ruyipage_per_tab_proxy_fp.txt"
+            if self._per_tab_proxies
+            else "ruyipage_runtime_fp.txt"
+        )
+        session_fpfile = os.path.join(self._profile_path, session_name)
+
+        source_lines = []
+        if self._source_fpfile:
+            source_path = os.path.abspath(self._source_fpfile)
+            if not os.path.exists(source_path):
+                raise FileNotFoundError("fpfile 不存在: {}".format(source_path))
+            with open(source_path, "r", encoding="utf-8", errors="ignore") as f:
+                source_lines = f.read().splitlines()
+
+        lines = []
+        for raw_line in source_lines:
+            if self._should_omit_runtime_http_proxy_line(raw_line):
+                continue
+            if self._should_omit_per_tab_proxy_line(raw_line):
+                continue
+            if self._should_omit_touch_fallback_line(raw_line):
+                continue
+            lines.append(raw_line)
+
+        if self._per_tab_proxies and lines and lines[-1].strip():
+            lines.append("")
+
+        if self._per_tab_proxies:
+            lines.append("proxy.rotate.enabled=true")
+            lines.append(
+                "proxy.rotate.exhausted={}".format(self._per_tab_proxy_exhausted)
+            )
+            for proxy in self._per_tab_proxies:
+                lines.append("proxy.rotate.proxy={}".format(proxy))
+
+        if proxy_url_auth_lines:
+            if lines and lines[-1].strip():
+                lines.append("")
+            lines.extend(proxy_url_auth_lines)
+
+        if has_touch_fallback:
+            if lines and lines[-1].strip():
+                lines.append("")
+            lines.extend(self._touch_fallback_runtime_lines())
+
+        os.makedirs(self._profile_path, exist_ok=True)
+        with open(session_fpfile, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines).rstrip() + "\n")
+
+        self._runtime_fpfile = session_fpfile
+        self._fpfile = session_fpfile
+
+    def _source_fpfile_has_http_proxy_fields(self):
+        if not self._source_fpfile:
+            return False
+        return self._read_http_proxy_from_fpfile(self._source_fpfile) is not None
+
+    def _source_fpfile_has_proxy_auth_fields(self):
+        if not self._source_fpfile:
+            return False
+        return bool(
+            self._read_httpauth_from_fpfile(self._source_fpfile)
+            or self._read_socksauth_from_fpfile(self._source_fpfile)
+        )
+
+    def _proxy_url_auth_runtime_lines(self):
+        if self._source_fpfile_has_proxy_auth_fields():
+            return []
+
+        auth = self._read_proxy_auth_from_proxy_url(self._proxy)
+        if not auth:
+            return []
+
+        scheme = urlsplit(str(self._proxy or "").strip()).scheme.lower()
+        prefix = "socksauth" if scheme.startswith("socks") else "httpauth"
+        return [
+            "{}.username:{}".format(prefix, auth.get("username", "")),
+            "{}.password:{}".format(prefix, auth.get("password", "")),
+        ]
+
+    def _should_omit_runtime_http_proxy_line(self, raw_line):
+        line = str(raw_line or "").strip()
+        if not line or line.startswith("#") or line.startswith("//"):
+            return False
+
+        delimiter_positions = [
+            pos for pos in (line.find(":"), line.find("=")) if pos != -1
+        ]
+        if not delimiter_positions:
+            return False
+
+        key = line[: min(delimiter_positions)].strip().lower()
+        return key in {"httpauth.host", "httpauth.port"}
+
+    def _touch_fallback_runtime_lines(self):
+        if self._touch_fallback_profile == "mobile":
+            return [
+                "touch.enabled=true",
+                "touch.maxTouchPoints={}".format(
+                    self._touch_fallback_max_touch_points
+                ),
+                "touch.legacyApis=true",
+                "touch.primaryPointer=coarse",
+                "touch.anyPointer=coarse",
+            ]
+        return []
+
+    def _should_omit_touch_fallback_line(self, raw_line):
+        line = str(raw_line or "").strip()
+        if not line or line.startswith("#") or line.startswith("//"):
+            return False
+
+        delimiter_positions = [
+            pos for pos in (line.find(":"), line.find("=")) if pos != -1
+        ]
+        if not delimiter_positions:
+            return False
+
+        key = line[: min(delimiter_positions)].strip().lower()
+        return key in {
+            "touch.enabled",
+            "touch.maxtouchpoints",
+            "touch.legacyapis",
+            "touch.primarypointer",
+            "touch.anypointer",
+        }
+
+    def smart_fingerprint(self, **kwargs):
+        """一站式智能指纹配置（链式调用入口）。
+
+        基于 ``firefox-fingerprintBrowser`` 内核与 ruyipage 内置的 22 套
+        Windows 真机硬件特征 + 30 国语言映射，自动完成：
+
+        1. 出口 IP / 地理位置探测（10 个数据源回退，可选 IPv6 富化）；
+        2. 国家校验（``require_country`` 不匹配直接抛 ``CountryMismatchError``）；
+        3. 随机抽取硬件指纹 + 按浏览器实际主版本拼装 UA + 独立 Canvas/Audio 种子；
+        4. 写入符合内核 ``key:value`` 字段顺序的 ``fpfile.txt``；配了代理时
+           同时写入 ``webrtc.ice_proxy_only:true``，把 ICE 钉在代理上；
+        5. 配置当前 ``FirefoxOptions`` 的 proxy / userdir / fpfile，并默认加入
+           可直接执行 BiDi 覆盖的 ``about:blank`` 启动页；
+           ``set_window_size_on_opts`` 仅为兼容保留且已忽略。
+           If an outer window is required, call ``opts.set_window_size()`` explicitly before creating the page.
+
+        所有关键字参数透传到 :func:`ruyipage.apply_smart_fingerprint`，常用
+        参数包括 ``proxy_host`` / ``proxy_port`` / ``proxy_user`` / ``proxy_pwd``
+        / ``require_country`` / ``manual_geo`` / ``base_dir`` /
+        ``set_startup_page_on_opts`` / ``webrtc_ice_proxy_only`` / ``extra``
+        / ``logger`` 等。
+        内核支持、但智能指纹不覆盖的字段（``touch.maxTouchPoints``、
+        ``fonts.whitelist``、``width`` / ``height``、``screen.devicePixelRatio``、
+        ``media.devices``、其余 ``webgl.*`` / ``webgl2.*``、``webgpu.*``）
+        通过 ``extra={...}`` 追加到 fpfile 末尾。
+        当 10 个在线 Geo 数据源全部失败时，可通过 ``manual_geo`` 显式指定
+        ``ip`` / ``country_code`` / ``timezone`` / ``latitude`` / ``longitude``
+        继续生成指纹；如果在线 Geo 成功，优先使用在线结果。
+
+        Returns:
+            FingerprintContext: 指纹上下文。同步页面调用
+            ``ctx.apply_emulation(page)``，异步页面调用
+            ``await ctx.apply_emulation_async(page)`` 注入 BiDi 仿真覆盖层；
+            也可调用 ``ctx.summary()`` 输出单行日志。
+
+        Raises:
+            CountryMismatchError: 出口 IP 国家与 ``require_country`` 不一致。
+            GeoError: 10 个 geo 数据源全部失败。
+            FingerprintConfigError: 内置 JSON 数据文件损坏。
+
+        Example::
+
+            opts = FirefoxOptions().set_port(9222)
+            opts.set_browser_path(r"C:/Program Files/Mozilla Firefox/firefox.exe")
+            ctx = opts.smart_fingerprint(
+                proxy_host="proxy.example.com", proxy_port=8080,
+                proxy_user="u", proxy_pwd="p",
+                require_country="US",
+                manual_geo={
+                    "ip": "75.166.187.10",
+                    "country_code": "US",
+                    "timezone": "America/Denver",
+                    "latitude": 39.7392,
+                    "longitude": -104.9903,
+                },
+                logger=print,
+            )
+            page = FirefoxPage(opts)
+            ctx.apply_emulation(page)
+        """
+        # Lazy import 避免与 ruyipage.__init__ 的循环依赖。
+        from .._fingerprint import apply_smart_fingerprint
+        return apply_smart_fingerprint(self, **kwargs)
+
+    def private_mode(self, on_off=True):
+        """设置 Firefox 私密浏览模式。
+
+        Args:
+            on_off: ``True`` 启用私密模式，``False`` 关闭。
+
+        Returns:
+            self
+
+        说明：
+            - 启用后会在启动命令中加入 ``-private``。
+            - 这与临时 profile / user context 不同，属于 Firefox 原生私密浏览模式。
+        """
+        self._private_mode = bool(on_off)
+        return self
+
+    def enable_xpath_picker(self, on_off=True):
+        """设置是否在页面中启用 XPath 选择浮窗。
+
+        Args:
+            on_off: ``True`` 启用，``False`` 关闭。
+
+        Returns:
+            self
+
+        说明：
+            - 启用后会在页面右下角注入一个半透明磨砂玻璃浮窗。
+            - 点击页面元素时会锁定并显示元素名、文本、绝对/相对 XPath、中心点坐标。
+            - 点击浮窗中的“解锁”后，才会重新允许选择下一个元素。
+        """
+        self._xpath_picker_enabled = bool(on_off)
+        return self
+
+    def enable_action_visual(self, on_off=True):
+        """设置是否启用鼠标行为可视化调试模式。
+
+        Args:
+            on_off: ``True`` 启用，``False`` 关闭。
+
+        Returns:
+            self
+
+        说明：
+            - 这是浏览器启动配置，应在创建 ``FirefoxPage`` 前设置。
+            - 启用后页面上会显示实时鼠标坐标指示器。
+            - 拟人化移动时渲染贝塞尔曲线轨迹。
+            - 点击位置显示扩散圆环 + 十字准星动画。
+            - 键盘输入在右上角短暂显示按键文字。
+        """
+        self._action_visual_enabled = bool(on_off)
+        return self
+
+    def set_human_algorithm(self, name="bezier"):
+        """设置默认拟人鼠标轨迹算法。
+
+        Args:
+            name: 轨迹算法名。
+                当前支持：
+                - ``"bezier"``：当前默认算法，轨迹更平滑，支持 ``style`` 变体
+                - ``"windmouse"``：模拟风力 + 重力拖拽的轨迹，路径更飘逸
+
+        Returns:
+            self
+
+        说明：
+            - 默认值为 ``"bezier"``，兼容已有行为。
+            - 该设置会作为 ``page.actions.human_move()`` /
+              ``page.actions.human_click()`` 的默认算法。
+            - 单次调用时可通过 ``algorithm=...`` 覆盖这里的默认值。
+        """
+        value = str(name or "bezier").strip().lower()
+        if value not in ("bezier", "windmouse"):
+            raise ValueError('human_algorithm 必须是 "bezier" 或 "windmouse"')
+        self._human_algorithm = value
+        return self
+
+    def enable_trace(self, on_off=True):
+        """启用 debug trace 记录。
+
+        开启后，所有 BiDi 命令、事件、网络活动将记录到内存环形缓冲区，
+        可通过 ``page.trace.summary()`` 或 ``page.trace.dump_json()`` 查看。
+
+        Args:
+            on_off: ``True`` 启用，``False`` 关闭。默认关闭。
+
+        Returns:
+            self
+
+        说明：
+            - 关闭状态下零开销（仅一次属性检查 ~10ns/命令）。
+            - 缓冲区大小通过 ``Settings.trace_max_entries`` 控制（默认 1000）。
+        """
+        self._trace_enabled = bool(on_off)
+        return self
+
+    def enable_failure_snapshot(self, on_off=True):
+        """启用自动化失败时的诊断快照。
+
+        开启后，元素查找失败、页面加载超时、JS 异常等操作失败时，
+        框架自动收集截图、DOM、URL 和最近网络请求记录，
+        并附加到异常对象的 ``.diagnostics`` 属性上。
+
+        Args:
+            on_off: ``True`` 启用，``False`` 关闭。默认关闭。
+
+        Returns:
+            self
+
+        说明：
+            - 配合 ``set_snapshot_dir()`` 可自动保存快照文件到磁盘。
+            - 收集过程每步独立容错，某步失败不影响其他信息的收集。
+        """
+        self._failure_snapshot_enabled = bool(on_off)
+        return self
+
+    def enable_marionette(self, on_off=True):
+        """设置是否启用 Firefox Marionette 通道。
+
+        Args:
+            on_off: ``True`` 启用，``False`` 关闭。
+
+        Returns:
+            self
+
+        说明：
+            - 默认值为 ``True``，保持现有兼容行为。
+            - 若某些 Firefox / 指纹浏览器在带 ``--marionette`` 时崩溃，
+              可显式关闭：``FirefoxOptions().enable_marionette(False)``。
+            - 关闭后不会在启动命令里加入 ``--marionette``，也不会向
+              profile 写入 ``marionette.enabled=true``。
+        """
+        self._marionette_enabled = bool(on_off)
+        return self
+
+    def allow_system_access(self, on_off=True):
+        """设置是否允许 WebDriver 访问 Firefox 的特权上下文。
+
+        启用后，启动命令会附加 ``--remote-allow-system-access``。该参数会
+        扩大远程调试权限，仅应在确实需要访问 Firefox 父进程、浏览器 UI、
+        扩展进程或其他特权上下文时开启。
+
+        Args:
+            on_off: ``True`` 启用，``False`` 关闭。
+
+        Returns:
+            self
+        """
+        self._allow_system_access = bool(on_off)
+        self._arguments = [
+            arg for arg in self._arguments
+            if not _is_system_access_argument(arg)
+        ]
+        return self
+
+    def enable_high_density_mode(self, on_off=True):
+        self._high_density_mode_enabled = bool(on_off)
+        return self
+
+    def set_snapshot_dir(self, path):
+        """设置诊断快照的保存目录。
+
+        当自动化失败且 ``enable_failure_snapshot(True)`` 时，
+        截图、DOM、trace 等文件将保存到此目录。
+
+        Args:
+            path: 目录路径，如 ``'./ruyipage_snapshots'``。
+                传入 None 则不保存文件（仅附加到异常对象）。
+
+        Returns:
+            self
+        """
+        import os
+        self._snapshot_dir = os.path.abspath(path) if path else None
+        return self
+
+    def _get_proxy_auth_credentials(self):
+        """从 fpfile 中读取代理认证用户名密码。"""
+        auth = self._read_httpauth_from_fpfile(self._fpfile)
+        if not auth:
+            # SOCKS5 password proxies are stored under socksauth.* by the
+            # fingerprint browser.  The BiDi authRequired handler still needs
+            # the same username/password pair when Firefox reports a 407.
+            auth = self._read_socksauth_from_fpfile(self._fpfile)
+        if not auth:
+            auth = self._read_proxy_auth_from_proxy_url(self._proxy)
+        if not auth:
+            return None
+
+        username = auth.get("username")
+        password = auth.get("password")
+        if username is None and password is None:
+            return None
+
+        return {
+            "username": username or "",
+            "password": password or "",
+        }
+
+    def _normalize_per_tab_proxy(self, proxy):
+        value = str(proxy or "").strip()
+        if not value:
+            raise ValueError("per-tab 代理项不能为空")
+
+        if value.lower().startswith("socks5://"):
+            value = value[len("socks5://") :]
+        elif "://" in value:
+            raise ValueError("per-tab 代理仅支持 socks5:// 或 host:port:username:password")
+
+        parts = value.split(":")
+        if len(parts) != 4:
+            raise ValueError(
+                "per-tab 代理格式必须是 host:port:username:password 或 socks5://host:port:username:password"
+            )
+
+        host, port_text, username, password = [p.strip() for p in parts]
+        if not host:
+            raise ValueError("per-tab 代理 host 不能为空")
+        try:
+            port = int(port_text)
+        except (TypeError, ValueError):
+            raise ValueError("per-tab 代理端口必须是整数")
+        if port <= 0 or port > 65535:
+            raise ValueError("per-tab 代理端口必须在 1..65535 之间")
+        if not username:
+            raise ValueError("per-tab 代理 username 不能为空")
+        if not password:
+            raise ValueError("per-tab 代理 password 不能为空")
+        if ":" in username or ":" in password:
+            raise ValueError("per-tab 代理 username/password 里不能包含冒号")
+
+        return "socks5://{}:{}:{}:{}".format(host, port, username, password)
+
+    def _should_omit_per_tab_proxy_line(self, raw_line):
+        line = str(raw_line or "").strip()
+        if not line or line.startswith("#") or line.startswith("//"):
+            return False
+
+        delimiter_positions = [
+            pos for pos in (line.find(":"), line.find("=")) if pos != -1
+        ]
+        if not delimiter_positions:
+            return False
+
+        key = line[: min(delimiter_positions)].strip().lower()
+        omit = {
+            "proxy.rotate.enabled",
+            "proxy.rotate.exhausted",
+            "proxy.rotate.proxy",
+            "httpproxy.rotate.enabled",
+            "httpproxy.rotate.exhausted",
+            "httpproxy.rotate.proxy",
+            "socks5proxy.rotate.proxy",
+        }
+        return key in omit
+
+    def _read_httpauth_from_fpfile(self, path):
+        """从 fpfile 中读取代理认证字段。"""
+        if not path:
+            return {}
+
+        fpfile_path = os.path.abspath(path)
+        if not os.path.exists(fpfile_path):
+            raise FileNotFoundError("fpfile 不存在: {}".format(fpfile_path))
+
+        result = {}
+        pattern = re.compile(
+            r"^\s*(httpauth\.(?:username|password))\s*[:=]\s*(.*?)\s*$"
+        )
+        with open(fpfile_path, "r", encoding="utf-8") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or line.startswith("//"):
+                    continue
+                match = pattern.match(line)
+                if not match:
+                    continue
+                key, value = match.groups()
+                if key == "httpauth.username":
+                    result["username"] = value
+                elif key == "httpauth.password":
+                    result["password"] = value
+        return result
+
+    def _read_socksauth_from_fpfile(self, path):
+        """Read SOCKS5 proxy credentials from socksauth.* fpfile fields."""
+        if not path:
+            return {}
+
+        fpfile_path = os.path.abspath(path)
+        if not os.path.exists(fpfile_path):
+            raise FileNotFoundError("fpfile 不存在: {}".format(fpfile_path))
+
+        result = {}
+        pattern = re.compile(
+            r"^\s*(socksauth\.(?:username|password))\s*[:=]\s*(.*?)\s*$"
+        )
+        with open(fpfile_path, "r", encoding="utf-8") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or line.startswith("//"):
+                    continue
+                match = pattern.match(line)
+                if not match:
+                    continue
+                key, value = match.groups()
+                if key == "socksauth.username":
+                    result["username"] = value
+                elif key == "socksauth.password":
+                    result["password"] = value
+        return result
+
+    def _read_proxy_auth_from_proxy_url(self, proxy):
+        """Read username/password embedded in set_proxy URL values."""
+        value = str(proxy or "").strip()
+        if "://" not in value:
+            return {}
+
+        parsed = urlsplit(value)
+        scheme = (parsed.scheme or "").lower()
+        if scheme not in {"http", "https", "socks", "socks4", "socks5", "socks5h"}:
+            return {}
+
+        if parsed.username is None and parsed.password is None:
+            return {}
+
+        return {
+            "username": unquote(parsed.username or ""),
+            "password": unquote(parsed.password or ""),
+        }
+
+    def _read_socks5_proxy_from_fpfile(self, path):
+        if not path:
+            return None
+
+        fpfile_path = os.path.abspath(path)
+        if not os.path.exists(fpfile_path):
+            return None
+
+        kv = {}
+        with open(fpfile_path, "r", encoding="utf-8", errors="ignore") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or line.startswith("//"):
+                    continue
+
+                parsed = self._parse_socks5_proxy_line(line, keyed=False)
+                if parsed:
+                    return parsed
+
+                if ":" in line:
+                    key, value = line.split(":", 1)
+                    key = key.strip().lower()
+                    value = value.strip()
+                    kv[key] = value
+                    parsed = self._parse_socks5_proxy_value(key, value)
+                    if parsed:
+                        return parsed
+
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    key = key.strip().lower()
+                    value = value.strip()
+                    kv[key] = value
+                    parsed = self._parse_socks5_proxy_value(key, value)
+                    if parsed:
+                        return parsed
+
+        return self._parse_socks5_proxy_kv(kv)
+
+    def _read_http_proxy_from_fpfile(self, path):
+        if not path:
+            return None
+
+        fpfile_path = os.path.abspath(path)
+        if not os.path.exists(fpfile_path):
+            return None
+
+        kv = {}
+        with open(fpfile_path, "r", encoding="utf-8", errors="ignore") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or line.startswith("//"):
+                    continue
+
+                if ":" in line:
+                    key, value = line.split(":", 1)
+                    kv[key.strip().lower()] = value.strip()
+
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    kv[key.strip().lower()] = value.strip()
+
+        return self._parse_http_proxy_kv(kv)
+
+    def _parse_http_proxy_kv(self, values):
+        host = (
+            values.get("httpauth.host")
+            or values.get("httpauth_host")
+            or values.get("http.host")
+            or values.get("http_host")
+            or values.get("httpproxy.host")
+            or values.get("httpproxy_host")
+        )
+        port = (
+            values.get("httpauth.port")
+            or values.get("httpauth_port")
+            or values.get("http.port")
+            or values.get("http_port")
+            or values.get("httpproxy.port")
+            or values.get("httpproxy_port")
+        )
+        return self._coerce_proxy(host, port)
+
+    def _parse_socks5_proxy_value(self, key, value):
+        if key in ("socks5", "socks5.proxy", "socks5.url"):
+            return self._parse_socks5_proxy_line(value, keyed=True)
+        if key in ("proxy", "proxy.url"):
+            if value.lower().startswith(("socks://", "socks4://", "socks5://")):
+                return self._parse_socks5_proxy_line(value, keyed=True)
+        return None
+
+    def _parse_socks5_proxy_kv(self, values):
+        scheme = (
+            values.get("proxy.scheme")
+            or values.get("proxy.type")
+            or values.get("scheme")
+            or "socks5"
+        )
+        if not str(scheme).lower().startswith("socks"):
+            return None
+
+        host = (
+            values.get("socks5.host")
+            or values.get("socks5_host")
+            or values.get("socksauth.host")
+            or values.get("socksauth_host")
+            or values.get("socks.host")
+            or values.get("socks_host")
+            or values.get("proxy.host")
+            or values.get("proxy_host")
+        )
+        port = (
+            values.get("socks5.port")
+            or values.get("socks5_port")
+            or values.get("socksauth.port")
+            or values.get("socksauth_port")
+            or values.get("socks.port")
+            or values.get("socks_port")
+            or values.get("proxy.port")
+            or values.get("proxy_port")
+        )
+        return self._coerce_socks5_proxy(host, port)
+
+    def _parse_socks5_proxy_line(self, value, keyed):
+        value = (value or "").strip()
+        if not value:
+            return None
+
+        lowered = value.lower()
+        if lowered.startswith(("socks://", "socks4://", "socks5://")):
+            parsed = urlsplit(value)
+            if not parsed.hostname or parsed.port is None:
+                return None
+            return self._coerce_socks5_proxy(parsed.hostname, parsed.port)
+
+        parts = value.split(":")
+        if len(parts) < (2 if keyed else 4):
+            return None
+        if not keyed and not self._looks_like_proxy_host(parts[0]):
+            return None
+        return self._coerce_socks5_proxy(parts[0], parts[1])
+
+    def _coerce_socks5_proxy(self, host, port):
+        return self._coerce_proxy(host, port)
+
+    def _coerce_proxy(self, host, port):
+        host = str(host or "").strip()
+        if not host:
+            return None
+        try:
+            port = int(str(port).strip())
+        except (TypeError, ValueError):
+            return None
+        if port <= 0 or port > 65535:
+            return None
+        return {"host": host, "port": port}
+
+    def _split_proxy_for_profile(self, proxy):
+        value = str(proxy or "").strip()
+        if not value:
+            return None
+
+        if "://" in value:
+            parsed = urlsplit(value)
+            scheme = (parsed.scheme or "http").lower()
+            host = parsed.hostname or ""
+            port = parsed.port
+            if port is None:
+                port = 1080 if scheme.startswith("socks") else 8080
+            if not host:
+                raise ValueError("proxy host 不能为空")
+            return scheme, host, int(port)
+
+        scheme = "http"
+        addr = value.rsplit("@", 1)[-1]
+        host, port = addr.rsplit(":", 1) if ":" in addr else (addr, "8080")
+        host = host.strip()
+        if not host:
+            raise ValueError("proxy host 不能为空")
+        return scheme, host, int(port)
+
+    def _looks_like_proxy_host(self, host):
+        host = str(host or "").strip().lower()
+        if host == "localhost":
+            return True
+        if re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$", host):
+            return True
+        return "." in host
+
+    def set_window_size(self, width, height):
+        """设置浏览器窗口大小
+
+        通过 --width 和 --height 启动参数设置窗口初始大小。
+
+        Args:
+            width: 窗口宽度（像素）
+            height: 窗口高度（像素）
+
+        Returns:
+            self
+        """
+        # 先移除已有的 width/height 参数
+        self._arguments = [
+            a
+            for a in self._arguments
+            if not a.startswith("--width=") and not a.startswith("--height=")
+        ]
+        width = int(width)
+        height = int(height)
+        self._startup_window_size = (width, height)
+        self._arguments.append("--width={}".format(width))
+        self._arguments.append("--height={}".format(height))
+        return self
+
+    def quick_start(
+        self,
+        *,
+        browser_path=None,
+        user_dir=None,
+        proxy=None,
+        fpfile=None,
+        close_on_exit=True,
+        private=False,
+        headless=False,
+        xpath_picker=False,
+        action_visual=False,
+        human_algorithm="bezier",
+        window_size=(1280, 800),
+        timeout_base=10,
+        timeout_page_load=30,
+        timeout_script=30,
+        trace=False,
+        failure_snapshot=False,
+        snapshot_dir=None,
+        marionette=True,
+        allow_system_access=None,
+    ):
+        """小白友好的一键启动预设。
+
+        该方法会一次性设置常用参数，便于快速开始。
+        这是给”先跑起来再深入”的使用场景准备的快捷入口。
+
+        Args:
+            browser_path: Firefox 可执行文件路径。
+                适用于 Firefox 安装在非默认目录时。
+            user_dir: 用户目录 / profile 目录。
+                适用于希望复用登录态、Cookie、扩展时。
+            proxy: 代理地址。
+                例如 ``"http://127.0.0.1:7890"`` 或
+                ``"socks5://127.0.0.1:1080"``。
+            fpfile: 指纹 / 代理认证配置文件路径。
+            close_on_exit: Python 程序退出时是否自动关闭浏览器。
+                默认 ``True``，适合脚本跑完自动收尾。
+            private: 是否启用 Firefox 私密浏览模式。
+            headless: 是否无头
+            xpath_picker: 是否启用页面 XPath 选择浮窗
+            action_visual: 是否启用鼠标行为可视化调试模式
+            human_algorithm: 默认拟人鼠标轨迹算法。
+                可选 ``"bezier"`` 或 ``"windmouse"``。
+            window_size: 窗口大小 (width, height)
+            timeout_base: 基础超时
+            timeout_page_load: 页面加载超时
+            timeout_script: 脚本执行超时
+            trace: 是否启用 debug trace 记录
+            failure_snapshot: 是否启用失败自动诊断快照
+            snapshot_dir: 诊断快照保存目录
+            marionette: 是否启用 Firefox Marionette 通道
+            allow_system_access: 是否允许 WebDriver 访问 Firefox 特权上下文。
+                ``None`` 保留当前设置；``True``/``False`` 显式启用或关闭。
+
+        Returns:
+            self
+
+        典型用法::
+
+            opts = FirefoxOptions().set_port(9222).quick_start(
+                browser_path=r”D:\\FirefoxPortable\\firefox.exe”,
+                user_dir=r”D:\\my_firefox_userdir”,
+                headless=False,
+            )
+            page = FirefoxPage(opts)
+        """
+        if browser_path:
+            self.set_browser_path(browser_path)
+        if user_dir:
+            self.set_user_dir(user_dir)
+        if proxy:
+            self.set_proxy(proxy)
+        if fpfile:
+            self.set_fpfile(fpfile)
+        self.close_on_exit(close_on_exit)
+        self.private_mode(private)
+        self.headless(headless)
+        self.enable_xpath_picker(xpath_picker)
+        self.enable_action_visual(action_visual)
+        self.set_human_algorithm(human_algorithm)
+        if window_size and len(window_size) == 2:
+            self.set_window_size(window_size[0], window_size[1])
+        self.set_timeouts(
+            base=timeout_base,
+            page_load=timeout_page_load,
+            script=timeout_script,
+        )
+        self.enable_trace(trace)
+        self.enable_failure_snapshot(failure_snapshot)
+        self.enable_marionette(marionette)
+        if allow_system_access is not None:
+            self.allow_system_access(allow_system_access)
+        if snapshot_dir:
+            self.set_snapshot_dir(snapshot_dir)
+        return self
+
+    def build_command(self):
+        """构建 Firefox 启动命令行
+
+        Returns:
+            命令参数列表
+        """
+        cmd = [self._browser_path]
+
+        cmd.append("--remote-debugging-port={}".format(self._port))
+        cmd.append("--no-remote")
+        if self.system_access_allowed:
+            cmd.append("--remote-allow-system-access")
+        # Marionette 不是 BiDi 主链路必需项；若某些环境带该参数会闪退，
+        # 可通过 enable_marionette(False) 关闭，仅保留 remote-debugging-port。
+        if self._marionette_enabled:
+            cmd.append("--marionette")
+
+        if self._profile_path:
+            cmd.append("--profile")
+            cmd.append(self._profile_path)
+
+        if self._headless:
+            cmd.append("--headless")
+
+        if self._private_mode:
+            cmd.append("-private")
+
+        if self._fpfile:
+            # Firefox 的自定义指纹参数要求使用 --fpfile=<path> 形式。
+            cmd.append("--fpfile={}".format(self._fpfile))
+
+        for arg in self._arguments:
+            if _is_system_access_argument(arg):
+                continue
+            cmd.append(arg)
+
+        return cmd
+
+    def write_prefs_to_profile(self):
+        """将首选项和代理设置写入 profile 的 user.js
+
+        如果设置了 preferences 或 proxy，需要写入 user.js 文件
+        """
+        if not self._profile_path:
+            return
+
+        prefs = dict(self._preferences)
+
+        # 自动化推荐设置
+        prefs.setdefault("remote.prefs.recommended", True)
+        prefs.setdefault("datareporting.policy.dataSubmissionEnabled", False)
+        prefs.setdefault("toolkit.telemetry.reportingpolicy.firstRun", False)
+        prefs.setdefault("browser.shell.checkDefaultBrowser", False)
+        prefs.setdefault("browser.startup.homepage_override.mstone", "ignore")
+        prefs.setdefault("browser.tabs.warnOnClose", False)
+        prefs.setdefault("browser.warnOnQuit", False)
+        prefs.setdefault("browser.newtabpage.enabled", False)
+        prefs.setdefault("browser.newtabpage.activity-stream.feeds.topsites", False)
+        prefs.setdefault(
+            "browser.newtabpage.activity-stream.feeds.section.topstories", False
+        )
+        prefs.setdefault("browser.tabs.animate", False)
+        if self._high_density_mode_enabled:
+            prefs.setdefault("dom.ipc.processPrelaunch.enabled", False)
+            prefs.setdefault("dom.ipc.keepProcessesAlive.privilegedabout", 0)
+            prefs.setdefault("browser.sessionstore.resume_from_crash", False)
+            prefs.setdefault("accessibility.force_disabled", 1)
+        # 仅在显式启用时才写入该 pref，避免某些环境因 Marionette 启动异常
+        # 而在浏览器尚未建立 BiDi 连接前就崩溃/闪退。
+        if self._marionette_enabled:
+            prefs.setdefault("marionette.enabled", True)
+
+        # 下载设置
+        if self._download_path:
+            prefs["browser.download.dir"] = self._download_path
+            prefs["browser.download.folderList"] = 2
+            prefs["browser.download.useDownloadDir"] = True
+
+        # 代理设置
+        proxy = self._proxy
+        if not proxy and not self._per_tab_proxies:
+            proxy_fpfile = self._source_fpfile or self._fpfile
+            http_proxy = self._read_http_proxy_from_fpfile(proxy_fpfile)
+            if http_proxy:
+                proxy = "http://{}:{}".format(
+                    http_proxy["host"], http_proxy["port"]
+                )
+            else:
+                socks5_proxy = self._read_socks5_proxy_from_fpfile(proxy_fpfile)
+                if socks5_proxy:
+                    proxy = "socks5://{}:{}".format(
+                        socks5_proxy["host"], socks5_proxy["port"]
+                    )
+
+        if proxy:
+            scheme, host, port = self._split_proxy_for_profile(proxy)
+
+            if scheme.startswith("socks"):
+                prefs["network.proxy.type"] = 1
+                prefs["network.proxy.socks"] = host
+                prefs["network.proxy.socks_port"] = port
+                prefs["network.proxy.socks_version"] = 5 if "5" in scheme else 4
+                prefs["network.proxy.socks_remote_dns"] = True
+            else:
+                prefs["network.proxy.type"] = 1
+                prefs["network.proxy.http"] = host
+                prefs["network.proxy.http_port"] = port
+                prefs["network.proxy.ssl"] = host
+                prefs["network.proxy.ssl_port"] = port
+                # These startup probes can hit authenticated HTTP proxies before
+                # the BiDi session exists, leaving session.new waiting forever.
+                prefs.setdefault("network.captive-portal-service.enabled", False)
+                prefs.setdefault("network.connectivity-service.enabled", False)
+                prefs.setdefault("signon.autologin.proxy", True)
+                prefs.setdefault("network.auth.subresource-http-auth-allow", 2)
+
+        if not prefs:
+            return
+
+        os.makedirs(self._profile_path, exist_ok=True)
+        user_js_path = os.path.join(self._profile_path, "user.js")
+
+        lines = []
+        for key, value in prefs.items():
+            if isinstance(value, bool):
+                val_str = "true" if value else "false"
+            elif isinstance(value, int):
+                val_str = str(value)
+            elif isinstance(value, str):
+                val_str = '"{}"'.format(value.replace("\\", "\\\\").replace('"', '\\"'))
+            else:
+                val_str = '"{}"'.format(value)
+            lines.append('user_pref("{}", {});'.format(key, val_str))
+
+        with open(user_js_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")

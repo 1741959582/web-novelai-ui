@@ -769,3 +769,198 @@ export function reapiPublishImage(source: string) {
 export function reapiSaveVideo(url: string) {
   return invoke<string>("reapi_save_video", { url });
 }
+
+export interface RuyiStatus {
+  running: boolean;
+  port: number;
+  exePath: string;
+  firefoxReady: boolean;
+  firefoxCached: boolean;
+  message: string;
+}
+
+export interface FingerprintAccount {
+  account_id: string;
+  type?: string;
+  label?: string;
+  status?: string;
+  browser_open?: boolean;
+  username?: string;
+  last_error?: string;
+  profile_dir?: string;
+  cookie_header?: string;
+  avatar_url?: string;
+  updated_at?: string;
+}
+
+export function ruyiStatus() {
+  return invoke<RuyiStatus>("ruyi_status");
+}
+
+export function ruyiEnsure() {
+  return invoke<RuyiStatus>("ruyi_ensure");
+}
+
+export function ruyiAccounts() {
+  return invoke<{ accounts?: FingerprintAccount[] }>("ruyi_accounts");
+}
+
+export function ruyiCacheFirefox() {
+  return invoke<string>("ruyi_cache_firefox");
+}
+
+export function ruyiOpenBrowser(label: string, accountId = "", kind = "x") {
+  return invoke<{ accountId: string }>("ruyi_open_browser", {
+    label,
+    accountId,
+    kind,
+  });
+}
+
+export interface ScriptPackageStatus {
+  present: boolean;
+  version: string;
+  latest: string;
+  updateAvailable: boolean;
+  path: string;
+  bytes: number;
+  downloadUrl: string;
+  message: string;
+}
+
+export function ruyiScriptStatus() {
+  return invoke<ScriptPackageStatus>("ruyi_script_status");
+}
+
+export function ruyiScriptCheck() {
+  return invoke<ScriptPackageStatus>("ruyi_script_check");
+}
+
+export function ruyiScriptDownload() {
+  return invoke<ScriptPackageStatus>("ruyi_script_download");
+}
+
+export interface FirefoxBrowserStatus {
+  present: boolean;
+  path: string;
+  bytes: number;
+  message: string;
+}
+
+export function ruyiFirefoxStatus() {
+  return invoke<FirefoxBrowserStatus>("ruyi_firefox_status");
+}
+
+export function ruyiFirefoxDownload() {
+  return invoke<FirefoxBrowserStatus>("ruyi_firefox_download");
+}
+
+export function ruyiTwitterCreate(label: string, cookie = "", proxyName = "") {
+  return invoke<TwitterCreated>("ruyi_twitter_create", { label, cookie, proxyName });
+}
+
+export function ruyiTwitterUpdate(accountId: string, label: string, cookie = "") {
+  return invoke<Record<string, unknown>>("ruyi_twitter_update", { accountId, label, cookie });
+}
+
+export function ruyiTwitterDelete(accountId: string) {
+  return invoke<Record<string, unknown>>("ruyi_twitter_delete", { accountId });
+}
+
+export function ruyiTwitterRefresh(accountId: string) {
+  return invoke<Record<string, unknown>>("ruyi_twitter_refresh", { accountId });
+}
+
+export function ruyiTwitterOpen(accountId: string) {
+  return invoke<{ proxy?: string }>("ruyi_twitter_open", { accountId });
+}
+
+export function ruyiPixivCreate(label: string, cookie = "", proxyName = "") {
+  return invoke<TwitterCreated>("ruyi_pixiv_create", { label, cookie, proxyName });
+}
+
+export function ruyiPixivUpdate(accountId: string, label: string, cookie = "") {
+  return invoke<Record<string, unknown>>("ruyi_pixiv_update", { accountId, label, cookie });
+}
+
+export function ruyiPixivDelete(accountId: string) {
+  return invoke<Record<string, unknown>>("ruyi_pixiv_delete", { accountId });
+}
+
+export function ruyiPixivRefresh(accountId: string) {
+  return invoke<Record<string, unknown>>("ruyi_pixiv_refresh", { accountId });
+}
+
+export function ruyiPixivOpen(accountId: string) {
+  return invoke<{ proxy?: string }>("ruyi_pixiv_open", { accountId });
+}
+
+export interface ClashNodes {
+  ok: boolean;
+  message: string;
+  group: string;
+  current: string;
+  nodes: string[];
+}
+
+export function ruyiClashNodes() {
+  return invoke<ClashNodes>("ruyi_clash_nodes");
+}
+
+export function ruyiProxyMap() {
+  return invoke<Record<string, string>>("ruyi_proxy_map");
+}
+
+export function ruyiProxySet(accountId: string, proxyName: string) {
+  return invoke<void>("ruyi_proxy_set", { accountId, proxyName });
+}
+
+export interface ExitIp {
+  ip: string;
+  via: string;
+  checkUrl: string;
+}
+
+export function ruyiExitIp(accountId: string) {
+  return invoke<ExitIp>("ruyi_exit_ip", { accountId });
+}
+
+export function ruyiNodeIp(proxyName: string) {
+  return invoke<ExitIp>("ruyi_node_ip", { proxyName });
+}
+
+export interface TwitterCreated {
+  accountId: string;
+  ip: string;
+  via: string;
+  proxy: string;
+}
+
+export interface NurtureStatus {
+  running: boolean;
+  mode: string;
+  message: string;
+  log: string[];
+}
+
+export function ruyiNurtureStart(payload: {
+  mode: "browse" | "interact";
+  accountIds: string[];
+  handles: string;
+  feed: "for_you" | "following";
+  rounds: number;
+  likes: number;
+  reposts: number;
+  follows: number;
+  delaySecs: number;
+}) {
+  return invoke<NurtureStatus>("ruyi_nurture_start", payload);
+}
+
+export function ruyiNurtureStop() {
+  return invoke<NurtureStatus>("ruyi_nurture_stop");
+}
+
+export function ruyiNurtureStatus() {
+  return invoke<NurtureStatus>("ruyi_nurture_status");
+}

@@ -10,6 +10,7 @@ const tools = [
   { title: "灵感胶囊 / Tag 补全", desc: "本地词库与在线补全。" },
   { title: "反推", desc: "WD Tagger 走 Hugging Face 空间；若设置里启用了本地 GPU，CL Tagger v2 会在本机跑。", path: "/reverse" },
   { title: "APNG 伪装 / GIF", desc: "封面藏缩略图，真图藏进点开后的动画帧；也能合成 GIF、还原、清元数据、打码和添加杂色。", path: "/apng" },
+  { title: "指纹浏览器", desc: "启动时自动拉起脚本包，在这里打开指纹浏览器，或把浏览器缓存到本机。", path: "/fingerprint" },
   { title: "个人法典", desc: "离线查找章节与分类提示词。" },
 ];
 </script>

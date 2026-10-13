@@ -9,6 +9,7 @@ export default createRouter({
     { path: "/postprocess", name: "postprocess", component: () => import("@/views/PlaceholderPage.vue"), meta: { title: "后期", hint: "云端超分、Director Tools（去背景、线稿、上色等）将按原项目接口迁入。" } },
     { path: "/metadata", name: "metadata", component: () => import("@/views/MetadataPage.vue") },
     { path: "/tools", name: "tools", component: () => import("@/views/ToolsPage.vue") },
+    { path: "/fingerprint", name: "fingerprint", component: () => import("@/views/FingerprintPage.vue"), meta: { title: "指纹浏览器" } },
     { path: "/apng", name: "apng", component: () => import("@/views/ApngPage.vue"), meta: { title: "APNG" } },
     { path: "/reverse", name: "reverse", component: () => import("@/views/ReversePage.vue") },
     { path: "/reference", name: "reference", component: () => import("@/views/ReferencePage.vue"), meta: { title: "参考预设" } },

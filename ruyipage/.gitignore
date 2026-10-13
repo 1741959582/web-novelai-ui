@@ -1,0 +1,36 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Packaging outputs
+build/
+dist/
+*.egg-info/
+ruyiPage.egg-info/
+
+# Temp fingerprint profiles
+userdir_*/
+
+# Local tool cache
+.ruff_cache/
+.pytest_cache/
+.worktrees/
+
+# Generated example outputs
+examples/output/
+
+# Virtual environment
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+
+# 本地运行产物和密钥
+*.exe
+*.dll
+*.zip
+.env
+.env.*
+*.log

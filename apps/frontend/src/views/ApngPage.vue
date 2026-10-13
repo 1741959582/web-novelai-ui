@@ -1804,9 +1804,9 @@ onUnmounted(() => {
           <div class="view" @contextmenu="onCopyApng">
             <img v-if="realPreview" :src="realPreview" alt="" draggable="false" @dragstart.prevent />
             <p v-else>Ctrl+V 或从生成页丢进来。进来就会清掉提示词和隐写</p>
-          </div>
+              </div>
         </article>
-      </div>
+            </div>
 
       <div class="queue-bar">
         <span>队列 {{ store.items.length }}/150</span>
@@ -1817,7 +1817,7 @@ onUnmounted(() => {
         <button type="button" :disabled="!store.items.length" @click="sendQueueToGif">队列合成 GIF</button>
         <em v-if="selected?.outPath">{{ selected.outPath }}</em>
         <em v-else-if="selected?.error">{{ selected.error }}</em>
-      </div>
+          </div>
       <div class="queue">
         <button
           v-for="(item, i) in store.items"
@@ -1872,8 +1872,8 @@ onUnmounted(() => {
             <button type="button" @click="store.moveGif(item.id, 1)">↓</button>
             <button type="button" @click="store.removeGif(item.id)">删</button>
           </span>
+          </div>
         </div>
-      </div>
     </template>
 
     <template v-else>
@@ -2011,7 +2011,7 @@ onUnmounted(() => {
           <b>还原后</b>
           <div class="view">
             <img :src="extra[extra.length - 1].dataUrl" alt="" />
-          </div>
+      </div>
         </article>
       </div>
       <p v-if="isImageQueue(store.tab) && extra.length" class="path">单击选中当前图，按住 Ctrl 加选，按住 Shift 连选。拖已选的缩略图一起调整顺序。{{ store.tab === "mosaic" ? "没有需要打码的图片也会按这个顺序保存。" : store.tab === "noise" ? `添加杂色和保存按这个顺序命名，例如 ${numberedName(0, extra.length)}.png。` : `清除和保存按这个顺序命名，例如 ${numberedName(0, extra.length)}.png。` }}</p>

@@ -332,6 +332,7 @@ export const TABS = [
   { id: "postprocess", path: "/postprocess", label: "后期" },
   { id: "metadata", path: "/metadata", label: "原数据" },
   { id: "tools", path: "/tools", label: "工具" },
+  { id: "fingerprint", path: "/fingerprint", label: "指纹" },
   { id: "apng", path: "/apng", label: "APNG" },
   { id: "reverse", path: "/reverse", label: "反推" },
   { id: "reference", path: "/reference", label: "参考预设" },
