@@ -520,6 +520,9 @@ struct ClashEndpoint {
     mixed_port: u16,
 }
 
+const FREECAT_CONTROLLER: &str = "127.0.0.1:9090";
+const FREECAT_MIXED_PORT: u16 = 7892;
+
 fn clash_config_path() -> PathBuf {
     let home = std::env::var("APPDATA").unwrap_or_default();
     PathBuf::from(home)
@@ -538,7 +541,55 @@ fn yaml_value(text: &str, key: &str) -> String {
         .unwrap_or_default()
 }
 
-fn clash_endpoint() -> ClashEndpoint {
+fn freecat_prefs() -> Value {
+    let home = std::env::var("APPDATA").unwrap_or_default();
+    let path = PathBuf::from(home)
+        .join("ziyoumao")
+        .join("ziyoumao")
+        .join("shared_preferences.json");
+    let text = fs::read_to_string(path).unwrap_or_default();
+    let root: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    let config_text = root
+        .get("flutter.config")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    serde_json::from_str(config_text).unwrap_or(Value::Null)
+}
+
+fn freecat_endpoint() -> ClashEndpoint {
+    let patch = freecat_prefs()
+        .get("patchClashConfig")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let controller = patch
+        .get("external-controller")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let secret = patch
+        .get("secret")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let mixed_port = patch
+        .get("mixed-port")
+        .and_then(|value| value.as_u64())
+        .filter(|port| *port > 0 && *port <= u16::MAX as u64)
+        .unwrap_or(FREECAT_MIXED_PORT as u64) as u16;
+    ClashEndpoint {
+        controller: if controller.is_empty() {
+            FREECAT_CONTROLLER.to_string()
+        } else {
+            controller
+        },
+        secret,
+        mixed_port,
+    }
+}
+
+fn clash_verge_endpoint() -> ClashEndpoint {
     let text = fs::read_to_string(clash_config_path()).unwrap_or_default();
     let controller = yaml_value(&text, "external-controller");
     let controller = if controller.is_empty() {
@@ -657,18 +708,31 @@ fn clash_client() -> Result<reqwest::Client, String> {
         .map_err(|error| error.to_string())
 }
 
+fn clash_auth(request: reqwest::RequestBuilder, secret: &str) -> reqwest::RequestBuilder {
+    if secret.is_empty() {
+        request
+    } else {
+        request.header("Authorization", format!("Bearer {secret}"))
+    }
+}
+
 async fn clash_get_proxies(endpoint: &ClashEndpoint) -> Result<Value, String> {
     let client = clash_client()?;
-    let response = client
-        .get(format!("http://{}/proxies", endpoint.controller))
-        .header("Authorization", format!("Bearer {}", endpoint.secret))
-        .send()
-        .await
-        .map_err(|_| "Clash Verge 没有在运行。请先打开桌面上的 Clash Verge。".to_string())?;
+    let response = clash_auth(
+        client.get(format!("http://{}/proxies", endpoint.controller)),
+        &endpoint.secret,
+    )
+    .send()
+    .await
+    .map_err(|error| error.to_string())?;
     if !response.status().is_success() {
-        return Err(format!("读取 Clash 节点失败 HTTP {}", response.status()));
+        return Err(format!("读取节点失败 HTTP {}", response.status()));
     }
     response.json().await.map_err(|error| error.to_string())
+}
+
+fn is_freecat_group(name: &str) -> bool {
+    name.contains("自由猫") || name.to_ascii_lowercase().contains("freecat")
 }
 
 fn is_exit_node(item: &Value) -> bool {
@@ -679,23 +743,39 @@ fn is_exit_node(item: &Value) -> bool {
     )
 }
 
+fn is_selector(item: &Value) -> bool {
+    item.get("type").and_then(|value| value.as_str()) == Some("Selector")
+}
+
 fn pick_clash_group(proxies: &serde_json::Map<String, Value>) -> Option<(String, Value)> {
+    if let Some((name, item)) = proxies
+        .iter()
+        .find(|(name, item)| is_freecat_group(name) && is_selector(item))
+    {
+        return Some((name.clone(), item.clone()));
+    }
     let preferred = ["节点选择", "PROXY", "🚀 节点选择", "🔰 节点选择"];
     for name in preferred {
         if let Some(item) = proxies.get(name) {
-            if item.get("type").and_then(|value| value.as_str()) == Some("Selector") {
+            if is_selector(item) {
                 return Some((name.to_string(), item.clone()));
             }
         }
     }
     proxies
         .iter()
-        .filter(|(_, item)| item.get("type").and_then(|value| value.as_str()) == Some("Selector"))
+        .filter(|(name, item)| *name != "GLOBAL" && is_selector(item))
         .max_by_key(|(_, item)| item.get("all").and_then(|value| value.as_array()).map(|rows| rows.len()).unwrap_or(0))
         .map(|(name, item)| (name.clone(), item.clone()))
 }
 
-fn clash_nodes_from(value: &Value) -> ClashNodes {
+fn is_info_node(name: &str) -> bool {
+    ["剩余流量", "重置", "到期", "网址", "提示", "套餐"]
+        .iter()
+        .any(|mark| name.contains(mark))
+}
+
+fn clash_nodes_from(value: &Value, product: &str) -> ClashNodes {
     let proxies = value
         .get("proxies")
         .and_then(|item| item.as_object())
@@ -704,7 +784,7 @@ fn clash_nodes_from(value: &Value) -> ClashNodes {
     let Some((group, item)) = pick_clash_group(&proxies) else {
         return ClashNodes {
             ok: false,
-            message: "Clash 里没有可选的节点组".into(),
+            message: format!("{product} 里没有可选的节点组"),
             group: String::new(),
             current: String::new(),
             nodes: Vec::new(),
@@ -714,7 +794,11 @@ fn clash_nodes_from(value: &Value) -> ClashNodes {
     let mut nodes = Vec::new();
     if let Some(all) = item.get("all").and_then(|value| value.as_array()) {
         for name in all.iter().filter_map(|value| value.as_str()) {
-            if matches!(name, "DIRECT" | "REJECT" | "GLOBAL" | "PASS") {
+            if name == "自动选择" {
+                nodes.push(name.to_string());
+                continue;
+            }
+            if matches!(name, "DIRECT" | "REJECT" | "GLOBAL" | "PASS") || is_info_node(name) {
                 continue;
             }
             if proxies.get(name).is_some_and(is_exit_node) {
@@ -724,39 +808,124 @@ fn clash_nodes_from(value: &Value) -> ClashNodes {
     }
     ClashNodes {
         ok: true,
-        message: format!("已连接 Clash Verge，当前节点 {current}"),
+        message: format!("已连接{product}，当前节点 {current}"),
         group,
         current,
         nodes,
     }
 }
 
-async fn select_clash_node(node: &str) -> Result<String, String> {
-    let endpoint = clash_endpoint();
-    let value = clash_get_proxies(&endpoint).await?;
-    let listed = clash_nodes_from(&value);
+struct ProxySource {
+    endpoint: ClashEndpoint,
+    proxies: Value,
+    product: String,
+}
+
+async fn load_proxy_source() -> Result<ProxySource, String> {
+    let freecat = freecat_endpoint();
+    if let Ok(proxies) = clash_get_proxies(&freecat).await {
+        let listed = clash_nodes_from(&proxies, "自由猫");
+        if listed.ok && is_freecat_group(&listed.group) {
+            return Ok(ProxySource {
+                endpoint: freecat,
+                proxies,
+                product: "自由猫".into(),
+            });
+        }
+    }
+    let clash = clash_verge_endpoint();
+    match clash_get_proxies(&clash).await {
+        Ok(proxies) => Ok(ProxySource {
+            endpoint: clash,
+            proxies,
+            product: "Clash Verge".into(),
+        }),
+        Err(_) => Err("自由猫没有在运行。请先打开桌面上的自由猫。".into()),
+    }
+}
+
+async fn ensure_mixed_port(endpoint: &ClashEndpoint, freecat: bool) -> Result<u16, String> {
+    let client = clash_client()?;
+    let response = clash_auth(
+        client.get(format!("http://{}/configs", endpoint.controller)),
+        &endpoint.secret,
+    )
+    .send()
+    .await
+    .map_err(|error| error.to_string())?;
+    if response.status().is_success() {
+        if let Ok(value) = response.json::<Value>().await {
+            let port = value.get("mixed-port").and_then(|item| item.as_u64()).unwrap_or(0);
+            if (1..=u16::MAX as u64).contains(&port) {
+                return Ok(port as u16);
+            }
+        }
+    }
+    if !freecat {
+        return Ok(endpoint.mixed_port);
+    }
+    let port = if endpoint.mixed_port > 0 {
+        endpoint.mixed_port
+    } else {
+        FREECAT_MIXED_PORT
+    };
+    let client = clash_client()?;
+    let response = clash_auth(
+        client
+            .patch(format!("http://{}/configs", endpoint.controller))
+            .json(&json!({ "mixed-port": port })),
+        &endpoint.secret,
+    )
+    .send()
+    .await
+    .map_err(|error| error.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("打开自由猫本地端口失败 HTTP {}", response.status()));
+    }
+    Ok(port)
+}
+
+async fn select_clash_node(node: &str) -> Result<(String, u16), String> {
+    let source = load_proxy_source().await?;
+    let listed = clash_nodes_from(&source.proxies, &source.product);
     if !listed.ok {
         return Err(listed.message);
     }
     if !listed.nodes.iter().any(|name| name == node) {
-        return Err(format!("Clash 里没有节点 {node}"));
+        return Err(format!("{} 里没有节点 {node}", source.product));
     }
     let client = clash_client()?;
-    let response = client
-        .put(format!(
-            "http://{}/proxies/{}",
-            endpoint.controller,
-            encode_clash_name(&listed.group)
-        ))
-        .header("Authorization", format!("Bearer {}", endpoint.secret))
-        .json(&json!({ "name": node }))
-        .send()
-        .await
-        .map_err(|error| error.to_string())?;
+    let response = clash_auth(
+        client
+            .put(format!(
+                "http://{}/proxies/{}",
+                source.endpoint.controller,
+                encode_clash_name(&listed.group)
+            ))
+            .json(&json!({ "name": node })),
+        &source.endpoint.secret,
+    )
+    .send()
+    .await
+    .map_err(|error| error.to_string())?;
     if !response.status().is_success() {
-        return Err(format!("切换 Clash 节点失败 HTTP {}", response.status()));
+        return Err(format!("切换{}节点失败 HTTP {}", source.product, response.status()));
     }
-    Ok(format!("已切换到 {node}，浏览器走 127.0.0.1:{}", endpoint.mixed_port))
+    let port = ensure_mixed_port(&source.endpoint, source.product == "自由猫").await?;
+    Ok((format!("已切换到 {node}，浏览器走 127.0.0.1:{port}"), port))
+}
+
+fn launch_proxy_port(account_id: &str) -> Option<u16> {
+    let path = electron_root().join("data").join("firefox_proxy.json");
+    let map: Value = fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())?;
+    let port = map.get(account_id)?.get("port")?.as_u64()?;
+    if (1..=u16::MAX as u64).contains(&port) {
+        Some(port as u16)
+    } else {
+        None
+    }
 }
 
 fn write_launch_proxy(account_id: &str, port: u16, node: &str) -> Result<(), String> {
@@ -780,7 +949,6 @@ fn write_launch_proxy(account_id: &str, port: u16, node: &str) -> Result<(), Str
 
 async fn apply_account_proxy(account_id: &str) -> Result<String, String> {
     let node = proxy_name_for(account_id);
-    let endpoint = clash_endpoint();
     let profile = profile_dir_of(account_id);
     if node.is_empty() {
         write_launch_proxy(account_id, 0, "")?;
@@ -789,19 +957,18 @@ async fn apply_account_proxy(account_id: &str) -> Result<String, String> {
         }
         return Ok("本机直连".into());
     }
-    let switched = select_clash_node(&node).await?;
-    write_launch_proxy(account_id, endpoint.mixed_port, &node)?;
+    let (switched, port) = select_clash_node(&node).await?;
+    write_launch_proxy(account_id, port, &node)?;
     if let Some(profile) = profile.as_ref() {
-        write_firefox_proxy(profile, Some(endpoint.mixed_port))?;
+        write_firefox_proxy(profile, Some(port))?;
     }
     Ok(switched)
 }
 
 #[tauri::command]
 pub async fn ruyi_clash_nodes() -> ClashNodes {
-    let endpoint = clash_endpoint();
-    match clash_get_proxies(&endpoint).await {
-        Ok(value) => clash_nodes_from(&value),
+    match load_proxy_source().await {
+        Ok(source) => clash_nodes_from(&source.proxies, &source.product),
         Err(message) => ClashNodes {
             ok: false,
             message,
@@ -875,9 +1042,8 @@ pub async fn ruyi_exit_ip(account_id: String) -> Result<ExitIp, String> {
             check_url,
         });
     }
-    select_clash_node(&node).await?;
-    let endpoint = clash_endpoint();
-    let proxy = format!("http://127.0.0.1:{}", endpoint.mixed_port);
+    let (_, port) = select_clash_node(&node).await?;
+    let proxy = format!("http://127.0.0.1:{port}");
     let ip = lookup_public_ip(Some(&proxy)).await?;
     Ok(ExitIp {
         ip,
@@ -898,9 +1064,8 @@ pub async fn ruyi_node_ip(proxy_name: String) -> Result<ExitIp, String> {
             check_url,
         });
     }
-    select_clash_node(node).await?;
-    let endpoint = clash_endpoint();
-    let proxy = format!("http://127.0.0.1:{}", endpoint.mixed_port);
+    let (_, port) = select_clash_node(node).await?;
+    let proxy = format!("http://127.0.0.1:{port}");
     let ip = lookup_public_ip(Some(&proxy)).await?;
     Ok(ExitIp {
         ip,
@@ -979,13 +1144,10 @@ async fn create_typed_account(
         return Err("账号已提交，但没有拿到账号编号".into());
     };
     save_proxy_name(&account_id, proxy_name.trim())?;
-    if let Some(profile) = profile_dir_in(&created).or_else(|| profile_dir_of(&account_id)) {
-        let port = if proxy_name.trim().is_empty() {
-            None
-        } else {
-            Some(clash_endpoint().mixed_port)
-        };
-        let _ = write_firefox_proxy(&profile, port);
+    if proxy_name.trim().is_empty() {
+        if let Some(profile) = profile_dir_in(&created).or_else(|| profile_dir_of(&account_id)) {
+            let _ = write_firefox_proxy(&profile, None);
+        }
     }
     let opened = open_typed_account(&account_id, kind).await?;
     let via = if proxy_name.trim().is_empty() {
@@ -995,9 +1157,10 @@ async fn create_typed_account(
     };
     let ip = if proxy_name.trim().is_empty() {
         lookup_public_ip(None).await.unwrap_or_default()
+    } else if let Some(port) = launch_proxy_port(&account_id) {
+        lookup_public_ip(Some(&format!("http://127.0.0.1:{port}"))).await.unwrap_or_default()
     } else {
-        let proxy = format!("http://127.0.0.1:{}", clash_endpoint().mixed_port);
-        lookup_public_ip(Some(&proxy)).await.unwrap_or_default()
+        String::new()
     };
     Ok(json!({
         "created": created,

@@ -2,6 +2,11 @@
 
 从新到旧。安装包在 [最新发行版](https://github.com/caiweida/web-novelai-ui/releases/latest)。已安装的程序启动后会读到新版本，顶栏可以点「立即更新」。
 
+## [1.0.4](https://github.com/caiweida/web-novelai-ui/releases/tag/v1.0.4)
+
+- 指纹浏览器的代理节点可以改选自由猫里的固定节点。不选就走本机直连，选中后浏览器走自由猫的本地端口。
+- 脚本包可以单独启动。这个版本的发行页同时提供安装包和脚本包，设置里可以热更新脚本。
+
 ## [1.0.3](https://github.com/caiweida/web-novelai-ui/releases/tag/v1.0.3)
 
 - 养号改成任务队列。每个账号一条任务，气泡里能看到剩余时间，可以单独取消，也可以全部取消。排队或养号中的浏览器不能再打开，完成或取消后才能打开。

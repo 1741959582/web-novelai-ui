@@ -670,7 +670,7 @@ onUnmounted(() => {
           </div>
         </div>
       </div>
-      <p v-if="clashMessage" class="hint proxy-hint">{{ clashMessage }}。不选节点就用本机 IP，选了以后每次打开都走这个节点。</p>
+      <p v-if="clashMessage" class="hint proxy-hint">{{ clashMessage }}。下拉列表是自由猫的固定节点，不选就用本机 IP。自由猫只有一个出口，最后选中的节点会给正在使用它的窗口共用。</p>
 
       <div class="grid" :class="{ tall: orientation === 1 }">
         <p v-if="loading" class="empty">正在读取{{ site === "pixiv" ? " Pixiv " : "推特" }}账号</p>
