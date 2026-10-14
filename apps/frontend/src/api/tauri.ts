@@ -936,10 +936,20 @@ export interface TwitterCreated {
   proxy: string;
 }
 
+export interface NurtureTaskStatus {
+  id: number;
+  accountId: string;
+  label: string;
+  status: string;
+  minutes: number;
+  remainingSecs: number;
+  message: string;
+}
+
 export interface NurtureStatus {
   running: boolean;
-  mode: string;
   message: string;
+  tasks: NurtureTaskStatus[];
   log: string[];
 }
 
@@ -953,8 +963,13 @@ export function ruyiNurtureStart(payload: {
   reposts: number;
   follows: number;
   delaySecs: number;
+  minutes: number;
 }) {
   return invoke<NurtureStatus>("ruyi_nurture_start", payload);
+}
+
+export function ruyiNurtureCancel(taskId: number) {
+  return invoke<NurtureStatus>("ruyi_nurture_cancel", { taskId });
 }
 
 export function ruyiNurtureStop() {

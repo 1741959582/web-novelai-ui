@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -1066,6 +1066,9 @@ pub async fn ruyi_twitter_open(account_id: String) -> Result<Value, String> {
     if account_id.is_empty() {
         return Err("缺少账号编号".into());
     }
+    if nurture_blocks_open(&account_id) {
+        return Err("这个账号正在养号，完成或取消后才能打开".into());
+    }
     open_twitter_account(&account_id).await
 }
 
@@ -1526,52 +1529,111 @@ pub async fn ruyi_firefox_download(app: AppHandle) -> Result<FirefoxBrowserStatu
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct NurtureTaskStatus {
+    pub id: u64,
+    pub account_id: String,
+    pub label: String,
+    pub status: String,
+    pub minutes: u32,
+    pub remaining_secs: i64,
+    pub message: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NurtureStatus {
     pub running: bool,
-    pub mode: String,
     pub message: String,
+    pub tasks: Vec<NurtureTaskStatus>,
     pub log: Vec<String>,
 }
 
-struct NurtureJob {
-    running: bool,
+#[derive(Clone)]
+struct NurtureTask {
+    id: u64,
+    account_id: String,
+    label: String,
     mode: String,
+    feed: String,
+    handles: Vec<String>,
+    rounds: u32,
+    likes: u32,
+    reposts: u32,
+    follows: u32,
+    delay_secs: u32,
+    minutes: u32,
+    status: String,
+    deadline: f64,
     message: String,
+}
+
+struct NurtureState {
+    tasks: Vec<NurtureTask>,
     log: Vec<String>,
+    message: String,
 }
 
 static NURTURE_STOP: AtomicBool = AtomicBool::new(false);
-static NURTURE_GEN: AtomicU64 = AtomicU64::new(0);
-static NURTURE: Mutex<NurtureJob> = Mutex::new(NurtureJob {
-    running: false,
-    mode: String::new(),
-    message: String::new(),
+static NURTURE_WORKER: AtomicBool = AtomicBool::new(false);
+static NURTURE_SEQ: AtomicU64 = AtomicU64::new(1);
+static NURTURE: Mutex<NurtureState> = Mutex::new(NurtureState {
+    tasks: Vec::new(),
     log: Vec::new(),
+    message: String::new(),
 });
-static NURTURE_CHILD: Mutex<Option<Child>> = Mutex::new(None);
+
+fn nurture_is_active(status: &str) -> bool {
+    status == "queued" || status == "running"
+}
+
+fn nurture_blocks_open(account_id: &str) -> bool {
+    NURTURE.lock().ok().is_some_and(|state| {
+        state.tasks.iter().any(|task| task.account_id == account_id && nurture_is_active(&task.status))
+    })
+}
 
 fn nurture_snapshot() -> NurtureStatus {
-    let Some(job) = NURTURE.lock().ok() else {
+    let Some(state) = NURTURE.lock().ok() else {
         return NurtureStatus {
             running: false,
-            mode: String::new(),
             message: String::new(),
+            tasks: Vec::new(),
             log: Vec::new(),
         };
     };
+    let now = chrono::Utc::now().timestamp() as f64;
+    let tasks = state
+        .tasks
+        .iter()
+        .map(|task| {
+            let remaining_secs = if task.status == "running" {
+                (task.deadline - now).ceil().max(0.0) as i64
+            } else if task.status == "queued" {
+                i64::from(task.minutes) * 60
+            } else {
+                0
+            };
+            NurtureTaskStatus {
+                id: task.id,
+                account_id: task.account_id.clone(),
+                label: task.label.clone(),
+                status: task.status.clone(),
+                minutes: task.minutes,
+                remaining_secs,
+                message: task.message.clone(),
+            }
+        })
+        .collect();
     NurtureStatus {
-        running: job.running,
-        mode: job.mode.clone(),
-        message: job.message.clone(),
-        log: job.log.clone(),
+        running: state.tasks.iter().any(|task| nurture_is_active(&task.status)),
+        message: state.message.clone(),
+        tasks,
+        log: state.log.clone(),
     }
 }
 
-fn nurture_log(gen: u64, line: impl Into<String>) {
-    if NURTURE_GEN.load(Ordering::Relaxed) != gen {
-        return;
-    }
-    let Ok(mut job) = NURTURE.lock() else {
+fn nurture_log(line: impl Into<String>) {
+    let Ok(mut state) = NURTURE.lock() else {
         return;
     };
     let line = line.into();
@@ -1579,11 +1641,35 @@ fn nurture_log(gen: u64, line: impl Into<String>) {
     if line.is_empty() {
         return;
     }
-    job.message = line.to_string();
-    job.log.push(line.to_string());
-    if job.log.len() > 40 {
-        let extra = job.log.len() - 40;
-        job.log.drain(0..extra);
+    state.message = line.to_string();
+    state.log.push(line.to_string());
+    if state.log.len() > 40 {
+        let extra = state.log.len() - 40;
+        state.log.drain(0..extra);
+    }
+}
+
+fn nurture_task_status(id: u64) -> String {
+    NURTURE
+        .lock()
+        .ok()
+        .and_then(|state| state.tasks.iter().find(|task| task.id == id).map(|task| task.status.clone()))
+        .unwrap_or_default()
+}
+
+fn nurture_mark(id: u64, status: &str, message: impl Into<String>) {
+    let message = message.into();
+    let Ok(mut state) = NURTURE.lock() else {
+        return;
+    };
+    if let Some(task) = state.tasks.iter_mut().find(|task| task.id == id) {
+        if task.status == "cancelled" && status != "cancelled" {
+            return;
+        }
+        task.status = status.to_string();
+        if !message.is_empty() {
+            task.message = message;
+        }
     }
 }
 
@@ -1686,175 +1772,160 @@ fn clean_handles(raw: &str) -> Result<Vec<String>, String> {
     Ok(handles)
 }
 
-fn find_python() -> Result<(&'static str, Vec<&'static str>), String> {
-    for (program, prefix) in [("py", vec!["-3"]), ("python", Vec::new())] {
-        let mut cmd = Command::new(program);
-        cmd.args(&prefix).arg("--version").stdout(Stdio::null()).stderr(Stdio::null());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x0800_0000);
-        }
-        if cmd.status().map(|status| status.success()).unwrap_or(false) {
-            return Ok((program, prefix));
-        }
-    }
-    Err("没有找到 Python 3。养号需要本机 Python 才能操作已经打开的指纹浏览器。".into())
+fn nurture_log_path() -> PathBuf {
+    electron_root().join("data").join("nurture.log")
 }
 
-fn ruyipage_python_root() -> Result<PathBuf, String> {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../ruyipage");
-    if root.join("ruyipage").join("__init__.py").is_file() {
-        return Ok(root);
-    }
-    Err("没有找到 ruyipage 源码，暂时不能给指纹浏览器下发养号动作。".into())
-}
-
-fn nurture_script_path() -> Result<PathBuf, String> {
-    let bundled = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("scripts")
-        .join("nurture_x.py");
-    if bundled.is_file() {
-        return Ok(bundled);
-    }
-    let dest = electron_root().join("data").join("nurture_x.py");
-    if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    fs::write(&dest, include_str!("../scripts/nurture_x.py")).map_err(|error| error.to_string())?;
-    Ok(dest)
-}
-
-fn kill_nurture_child() {
-    let Some(mut slot) = NURTURE_CHILD.lock().ok() else {
+fn read_new_nurture_log(offset: &mut u64) {
+    let Ok(file) = fs::read(&nurture_log_path()) else {
         return;
     };
-    if let Some(child) = slot.as_mut() {
-        let _ = child.kill();
-        let _ = child.wait();
+    if file.len() as u64 <= *offset {
+        return;
     }
-    *slot = None;
+    let start = *offset as usize;
+    *offset = file.len() as u64;
+    let text = String::from_utf8_lossy(&file[start..]);
+    for line in text.lines() {
+        let line = line.trim();
+        if !line.is_empty() {
+            nurture_log(line);
+        }
+    }
 }
 
-fn run_nurture_python(gen: u64, cfg_path: &Path) -> Result<(), String> {
-    let (program, prefix) = find_python()?;
-    let script = nurture_script_path()?;
-    let root = ruyipage_python_root()?;
-    let mut cmd = Command::new(program);
-    cmd.args(&prefix)
-        .arg("-u")
-        .arg(&script)
-        .arg(cfg_path)
-        .env("RUYIPAGE_ROOT", &root)
-        .env("PYTHONIOENCODING", "utf-8")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(windows)]
+fn claim_next_nurture() -> Option<NurtureTask> {
+    let Ok(mut state) = NURTURE.lock() else {
+        return None;
+    };
+    let now = chrono::Utc::now().timestamp() as f64;
+    let task = state.tasks.iter_mut().find(|task| task.status == "queued")?;
+    task.status = "running".into();
+    task.deadline = now + f64::from(task.minutes) * 60.0;
+    task.message = "正在打开浏览器".into();
+    Some(task.clone())
+}
+
+fn nurture_has_queued() -> bool {
+    NURTURE
+        .lock()
+        .ok()
+        .is_some_and(|state| state.tasks.iter().any(|task| task.status == "queued"))
+}
+
+fn ensure_nurture_worker() {
+    if NURTURE_WORKER
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+        .is_ok()
     {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000);
+        tokio::spawn(nurture_worker());
     }
-    let mut child = cmd.spawn().map_err(|error| format!("启动养号脚本失败：{error}"))?;
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    if let Ok(mut slot) = NURTURE_CHILD.lock() {
-        *slot = Some(child);
-    }
-    if let Some(stderr) = stderr {
-        let stderr_gen = gen;
-        std::thread::spawn(move || {
-            for line in BufReader::new(stderr).lines() {
-                let Ok(line) = line else { break };
-                let line = line.trim();
-                if line.is_empty() || line.contains("DeprecationWarning") {
-                    continue;
-                }
-                nurture_log(stderr_gen, line);
-            }
-        });
-    }
-    if let Some(stdout) = stdout {
-        for line in BufReader::new(stdout).lines() {
-            let Ok(line) = line else { break };
-            nurture_log(gen, line);
-        }
-    }
-    if let Ok(mut slot) = NURTURE_CHILD.lock() {
-        if let Some(child) = slot.as_mut() {
-            let _ = child.wait();
-        }
-        *slot = None;
-    }
-    Ok(())
 }
 
-async fn nurture_accounts(
-    gen: u64,
-    mode: String,
-    account_ids: Vec<String>,
-    handles: Vec<String>,
-    feed: String,
-    rounds: u32,
-    likes: u32,
-    reposts: u32,
-    follows: u32,
-    delay_secs: u32,
-) {
-    for account_id in account_ids {
-        if NURTURE_STOP.load(Ordering::Relaxed) || NURTURE_GEN.load(Ordering::Relaxed) != gen {
-            break;
-        }
-        let label = account_label(&account_id);
-        nurture_log(gen, format!("正在打开 {label}"));
-        if let Err(error) = open_twitter_account(&account_id).await {
-            nurture_log(gen, format!("{label} 打开失败：{error}"));
-            continue;
-        }
-        let mut port = None;
-        for _ in 0..40 {
-            if NURTURE_STOP.load(Ordering::Relaxed) || NURTURE_GEN.load(Ordering::Relaxed) != gen {
-                break;
-            }
-            if let Some(found) = debug_port_for_account(&account_id) {
-                port = Some(found);
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-        let Some(port) = port else {
-            if !NURTURE_STOP.load(Ordering::Relaxed) {
-                nurture_log(gen, format!("{label} 的指纹浏览器没有暴露调试端口"));
-            }
-            continue;
-        };
-        let cfg = json!({
-            "mode": mode,
-            "port": port,
-            "feed": feed,
-            "rounds": rounds,
-            "likes": likes,
-            "reposts": reposts,
-            "follows": follows,
-            "delay": delay_secs,
-            "handles": handles,
-            "stop": nurture_stop_path(),
-        });
-        if let Err(error) = fs::write(nurture_config_path(), cfg.to_string()) {
-            nurture_log(gen, format!("写养号配置失败：{error}"));
-            break;
-        }
-        let cfg_path = nurture_config_path();
-        match tokio::task::spawn_blocking(move || run_nurture_python(gen, &cfg_path)).await {
-            Err(error) => nurture_log(gen, format!("{label} 养号中断：{error}")),
-            Ok(Err(error)) => nurture_log(gen, error),
-            Ok(Ok(())) => {}
-        }
+async fn run_nurture_task(task: NurtureTask) {
+    if nurture_task_status(task.id) == "cancelled" || NURTURE_STOP.load(Ordering::Relaxed) {
+        return;
     }
-    if NURTURE_GEN.load(Ordering::Relaxed) == gen {
-        nurture_log(gen, "养号结束");
-        if let Ok(mut job) = NURTURE.lock() {
-            job.running = false;
+    if !NURTURE_STOP.load(Ordering::Relaxed) {
+        let _ = fs::remove_file(nurture_stop_path());
+    }
+    nurture_log(format!("正在打开 {}，这次养号 {} 分钟", task.label, task.minutes));
+    if let Err(error) = open_twitter_account(&task.account_id).await {
+        let message = format!("{} 打开失败：{error}", task.label);
+        nurture_mark(task.id, "failed", message.clone());
+        nurture_log(message);
+        return;
+    }
+    let mut port = None;
+    for _ in 0..40 {
+        if nurture_task_status(task.id) != "running" || NURTURE_STOP.load(Ordering::Relaxed) {
+            break;
         }
+        if let Some(found) = debug_port_for_account(&task.account_id) {
+            port = Some(found);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let Some(port) = port else {
+        if nurture_task_status(task.id) == "running" && !NURTURE_STOP.load(Ordering::Relaxed) {
+            let message = format!("{} 的指纹浏览器没有暴露调试端口", task.label);
+            nurture_mark(task.id, "failed", message.clone());
+            nurture_log(message);
+        }
+        return;
+    };
+    if chrono::Utc::now().timestamp() as f64 >= task.deadline || nurture_task_status(task.id) != "running" {
+        if nurture_task_status(task.id) == "running" {
+            nurture_mark(task.id, "done", "养号时间到了");
+            nurture_log(format!("{} 养号时间到了", task.label));
+        }
+        return;
+    }
+    let cfg = json!({
+        "mode": task.mode,
+        "account_id": task.account_id,
+        "port": port,
+        "feed": task.feed,
+        "rounds": task.rounds,
+        "likes": task.likes,
+        "reposts": task.reposts,
+        "follows": task.follows,
+        "delay": task.delay_secs,
+        "minutes": task.minutes,
+        "deadline": task.deadline,
+        "handles": task.handles,
+        "stop": nurture_stop_path(),
+    });
+    if let Err(error) = fs::write(nurture_config_path(), cfg.to_string()) {
+        let message = format!("写养号配置失败：{error}");
+        nurture_mark(task.id, "failed", message.clone());
+        nurture_log(message);
+        return;
+    }
+    let _ = fs::write(nurture_log_path(), b"");
+    nurture_mark(task.id, "running", format!("养号中，共 {} 分钟", task.minutes));
+    nurture_log(format!("{} 已开始养号", task.label));
+    let mut offset = 0u64;
+    let mut quiet = 0u32;
+    while chrono::Utc::now().timestamp() as f64 <= task.deadline {
+        if nurture_task_status(task.id) != "running" || NURTURE_STOP.load(Ordering::Relaxed) {
+            break;
+        }
+        let before = offset;
+        read_new_nurture_log(&mut offset);
+        if offset == before {
+            quiet += 1;
+            if quiet == 25 {
+                nurture_log("窗口还没有开始滚动。请确认这个账号的指纹浏览器已经打开。");
+            }
+        } else {
+            quiet = 0;
+        }
+        tokio::time::sleep(Duration::from_millis(800)).await;
+    }
+    read_new_nurture_log(&mut offset);
+    let status = nurture_task_status(task.id);
+    if status == "running" && chrono::Utc::now().timestamp() as f64 >= task.deadline {
+        let _ = fs::write(nurture_stop_path(), b"stop");
+        nurture_mark(task.id, "done", "养号时间到了");
+        nurture_log(format!("{} 养号时间到了", task.label));
+    }
+}
+
+async fn nurture_worker() {
+    loop {
+        if NURTURE_STOP.load(Ordering::Relaxed) {
+            break;
+        }
+        let Some(task) = claim_next_nurture() else {
+            break;
+        };
+        run_nurture_task(task).await;
+    }
+    NURTURE_WORKER.store(false, Ordering::Release);
+    if nurture_has_queued() && !NURTURE_STOP.load(Ordering::Relaxed) {
+        ensure_nurture_worker();
     }
 }
 
@@ -1869,6 +1940,7 @@ pub async fn ruyi_nurture_start(
     reposts: u32,
     follows: u32,
     delay_secs: u32,
+    minutes: u32,
 ) -> Result<NurtureStatus, String> {
     let mode = match mode.as_str() {
         "browse" | "interact" => mode,
@@ -1885,8 +1957,8 @@ pub async fn ruyi_nurture_start(
     if ids.is_empty() {
         return Err("请先选择推特账号".into());
     }
-    if ids.len() > 4 {
-        return Err("一次最多养 4 个账号，会按顺序一个一个来".into());
+    if ids.len() > 20 {
+        return Err("一次最多加入 20 个养号任务".into());
     }
     let handles = clean_handles(&handles)?;
     if mode == "interact" && likes == 0 && reposts == 0 && follows == 0 {
@@ -1897,48 +1969,116 @@ pub async fn ruyi_nurture_start(
     let reposts = reposts.clamp(0, 8);
     let follows = follows.clamp(0, 15);
     let delay_secs = delay_secs.clamp(3, 20);
+    let minutes = minutes.clamp(1, 180);
     let feed = if feed == "following" { "following" } else { "for_you" };
-    if NURTURE.lock().ok().is_some_and(|job| job.running) {
-        return Err("已有养号任务在跑，先停止再开新的".into());
+    let mut blocked = Vec::new();
+    for account_id in &ids {
+        if nurture_blocks_open(account_id) {
+            blocked.push(account_label(account_id));
+        }
+    }
+    if !blocked.is_empty() {
+        return Err(format!("这些账号已在养号队列里：{}", blocked.join("、")));
     }
     let _ = fs::create_dir_all(electron_root().join("data"));
-    let _ = fs::remove_file(nurture_stop_path());
     NURTURE_STOP.store(false, Ordering::Relaxed);
-    let gen = NURTURE_GEN.fetch_add(1, Ordering::Relaxed) + 1;
-    if let Ok(mut job) = NURTURE.lock() {
-        job.running = true;
-        job.mode = mode.clone();
-        job.message = "养号已开始".into();
-        job.log.clear();
-        job.log.push("养号已开始".into());
+    let mut added = 0u32;
+    if let Ok(mut state) = NURTURE.lock() {
+        for account_id in ids {
+            let id = NURTURE_SEQ.fetch_add(1, Ordering::Relaxed);
+            let label = account_label(&account_id);
+            state.tasks.push(NurtureTask {
+                id,
+                account_id,
+                label,
+                mode: mode.clone(),
+                feed: feed.to_string(),
+                handles: handles.clone(),
+                rounds,
+                likes,
+                reposts,
+                follows,
+                delay_secs,
+                minutes,
+                status: "queued".into(),
+                deadline: 0.0,
+                message: format!("等待中，计划 {minutes} 分钟"),
+            });
+            added += 1;
+        }
+        let finished: Vec<usize> = state
+            .tasks
+            .iter()
+            .enumerate()
+            .filter(|(_, task)| !nurture_is_active(&task.status))
+            .map(|(index, _)| index)
+            .collect();
+        let overflow = state.tasks.len().saturating_sub(30);
+        for index in finished.into_iter().take(overflow).collect::<Vec<_>>().into_iter().rev() {
+            state.tasks.remove(index);
+        }
+        state.message = format!("已加入 {added} 个养号任务");
+        let message = state.message.clone();
+        state.log.push(message);
+        if state.log.len() > 40 {
+            let extra = state.log.len() - 40;
+            state.log.drain(0..extra);
+        }
     }
-    tokio::spawn(nurture_accounts(
-        gen,
-        mode,
-        ids,
-        handles,
-        feed.into(),
-        rounds,
-        likes,
-        reposts,
-        follows,
-        delay_secs,
-    ));
+    ensure_nurture_worker();
+    Ok(nurture_snapshot())
+}
+
+fn cancel_nurture_task(task_id: u64) -> bool {
+    let Ok(mut state) = NURTURE.lock() else {
+        return false;
+    };
+    let Some(task) = state.tasks.iter_mut().find(|task| task.id == task_id) else {
+        return false;
+    };
+    if !nurture_is_active(&task.status) {
+        return false;
+    }
+    let running = task.status == "running";
+    let label = task.label.clone();
+    task.status = "cancelled".into();
+    task.message = "已取消".into();
+    state.message = format!("{label} 已取消");
+    let message = state.message.clone();
+    state.log.push(message);
+    running
+}
+
+#[tauri::command]
+pub async fn ruyi_nurture_cancel(task_id: u64) -> Result<NurtureStatus, String> {
+    if cancel_nurture_task(task_id) {
+        let _ = fs::create_dir_all(electron_root().join("data"));
+        let _ = fs::write(nurture_stop_path(), b"stop");
+    }
     Ok(nurture_snapshot())
 }
 
 #[tauri::command]
 pub async fn ruyi_nurture_stop() -> Result<NurtureStatus, String> {
     NURTURE_STOP.store(true, Ordering::Relaxed);
-    let _ = NURTURE_GEN.fetch_add(1, Ordering::Relaxed);
     let _ = fs::create_dir_all(electron_root().join("data"));
     let _ = fs::write(nurture_stop_path(), b"stop");
-    tokio::time::sleep(Duration::from_millis(600)).await;
-    kill_nurture_child();
-    if let Ok(mut job) = NURTURE.lock() {
-        job.running = false;
-        job.message = "已停止".into();
-        job.log.push("已停止".into());
+    if let Ok(mut state) = NURTURE.lock() {
+        let mut count = 0u32;
+        for task in &mut state.tasks {
+            if nurture_is_active(&task.status) {
+                task.status = "cancelled".into();
+                task.message = "已取消".into();
+                count += 1;
+            }
+        }
+        state.message = if count == 0 {
+            "没有正在养号的任务".into()
+        } else {
+            format!("已取消全部 {count} 个养号任务")
+        };
+        let message = state.message.clone();
+        state.log.push(message);
     }
     Ok(nurture_snapshot())
 }

@@ -152,6 +152,7 @@ pub fn run() {
             ruyi::ruyi_node_ip,
             ruyi::ruyi_exit_ip,
             ruyi::ruyi_nurture_start,
+            ruyi::ruyi_nurture_cancel,
             ruyi::ruyi_nurture_stop,
             ruyi::ruyi_nurture_status,
         ])

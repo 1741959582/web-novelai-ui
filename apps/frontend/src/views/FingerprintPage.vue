@@ -5,9 +5,11 @@ import {
   ruyiClashNodes,
   ruyiEnsure,
   ruyiExitIp,
+  ruyiNurtureCancel,
   ruyiNurtureStart,
   ruyiNurtureStatus,
   ruyiNurtureStop,
+  type NurtureTaskStatus,
   ruyiNodeIp,
   ruyiPixivCreate,
   ruyiPixivDelete,
@@ -67,8 +69,10 @@ let pollTimer = 0;
 let liveTimer = 0;
 let nurtureTimer = 0;
 const nurtureOpen = ref(false);
-const nurtureRunning = ref(false);
-const nurtureLog = ref<string[]>([]);
+const queueOpen = ref(false);
+const queueHost = ref<HTMLElement | null>(null);
+const nurtureTasks = ref<NurtureTaskStatus[]>([]);
+const nurtureMessage = ref("");
 const nurtureIds = ref<string[]>([]);
 const nurtureForm = reactive({
   mode: "browse" as "browse" | "interact",
@@ -78,6 +82,7 @@ const nurtureForm = reactive({
   reposts: 1,
   follows: 2,
   delaySecs: 5,
+  minutes: 10,
   handles: "",
 });
 const frameUrls = ref<Record<string, string>>({});
@@ -418,6 +423,11 @@ async function submitEdit() {
 
 async function openBrowser(row: TwitterAccount) {
   menuId.value = "";
+  if (site.value === "x" && nurtureLocked(row.account_id)) {
+    note.value = "这个账号正在养号，完成或取消后才能打开";
+    queueOpen.value = true;
+    return;
+  }
   busyId.value = row.account_id;
   try {
     const opened = await (site.value === "pixiv" ? ruyiPixivOpen : ruyiTwitterOpen)(row.account_id);
@@ -460,26 +470,53 @@ async function confirmDelete() {
   }
 }
 
+function nurtureLocked(accountId: string) {
+  return nurtureTasks.value.some((task) => task.accountId === accountId && (task.status === "queued" || task.status === "running"));
+}
+
+function nurtureStatusText(status: string) {
+  if (status === "running") return "养号中";
+  if (status === "queued") return "等待中";
+  if (status === "done") return "已完成";
+  if (status === "cancelled") return "已取消";
+  if (status === "failed") return "失败";
+  return status;
+}
+
+function formatRemain(task: NurtureTaskStatus) {
+  if (task.status === "queued") return `计划 ${task.minutes} 分钟`;
+  if (task.status !== "running") return task.message || nurtureStatusText(task.status);
+  const total = Math.max(0, task.remainingSecs);
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return `剩余 ${minutes} 分 ${String(seconds).padStart(2, "0")} 秒`;
+}
+
+const nurtureActiveTasks = computed(() => nurtureTasks.value.filter((task) => task.status === "queued" || task.status === "running"));
+const nurtureActiveCount = computed(() => nurtureActiveTasks.value.length);
+
+function onQueueOutside(event: PointerEvent) {
+  if (!queueOpen.value) return;
+  const host = queueHost.value;
+  if (host && event.target instanceof Node && host.contains(event.target)) return;
+  queueOpen.value = false;
+}
+
 async function pollNurture() {
   try {
     const status = await ruyiNurtureStatus();
-    nurtureRunning.value = status.running;
-    nurtureLog.value = status.log;
-    if (status.message) note.value = status.message;
+    nurtureTasks.value = status.tasks || [];
+    nurtureMessage.value = status.message || "";
   } catch (error) {
     note.value = errorText(error);
   }
 }
 
 function openNurture() {
-  const loggedIn = accounts.value.filter((row) => row.state === "logged_in").map((row) => row.account_id);
-  nurtureIds.value = (loggedIn.length ? loggedIn : accounts.value.map((row) => row.account_id)).slice(0, 4);
+  const loggedIn = accounts.value.filter((row) => row.state === "logged_in" && !nurtureLocked(row.account_id)).map((row) => row.account_id);
+  nurtureIds.value = loggedIn.slice(0, 20);
   nurtureOpen.value = true;
   void pollNurture();
-  if (nurtureTimer) window.clearInterval(nurtureTimer);
-  nurtureTimer = window.setInterval(() => {
-    if (nurtureOpen.value || nurtureRunning.value) void pollNurture();
-  }, 1000);
 }
 
 function toggleNurtureAccount(id: string) {
@@ -487,8 +524,8 @@ function toggleNurtureAccount(id: string) {
     nurtureIds.value = nurtureIds.value.filter((item) => item !== id);
     return;
   }
-  if (nurtureIds.value.length >= 4) {
-    note.value = "一次最多选 4 个账号";
+  if (nurtureIds.value.length >= 20) {
+    note.value = "一次最多选 20 个账号";
     return;
   }
   nurtureIds.value = [...nurtureIds.value, id];
@@ -506,10 +543,24 @@ async function startNurture() {
       reposts: Number(nurtureForm.reposts) || 0,
       follows: Number(nurtureForm.follows) || 0,
       delaySecs: Number(nurtureForm.delaySecs) || 5,
+      minutes: Number(nurtureForm.minutes) || 10,
     });
-    nurtureRunning.value = status.running;
-    nurtureLog.value = status.log;
-    note.value = status.message || "养号已开始";
+    nurtureTasks.value = status.tasks || [];
+    nurtureMessage.value = status.message || "";
+    note.value = status.message || "养号任务已加入队列";
+    nurtureOpen.value = false;
+    queueOpen.value = true;
+  } catch (error) {
+    note.value = errorText(error);
+  }
+}
+
+async function cancelNurtureTask(taskId: number) {
+  try {
+    const status = await ruyiNurtureCancel(taskId);
+    nurtureTasks.value = status.tasks || [];
+    nurtureMessage.value = status.message || "";
+    note.value = status.message || "已取消这个养号任务";
   } catch (error) {
     note.value = errorText(error);
   }
@@ -518,15 +569,16 @@ async function startNurture() {
 async function stopNurture() {
   try {
     const status = await ruyiNurtureStop();
-    nurtureRunning.value = status.running;
-    nurtureLog.value = status.log;
-    note.value = status.message || "已停止";
+    nurtureTasks.value = status.tasks || [];
+    nurtureMessage.value = status.message || "";
+    note.value = status.message || "已取消全部养号任务";
   } catch (error) {
     note.value = errorText(error);
   }
 }
 
 onMounted(async () => {
+  document.addEventListener("pointerdown", onQueueOutside);
   try {
     status.value = await ruyiStatus();
     if (!status.value.running) status.value = await ruyiEnsure();
@@ -537,6 +589,10 @@ onMounted(async () => {
   pollTimer = window.setInterval(() => {
     void loadAccounts(true);
   }, 3000);
+  void pollNurture();
+  nurtureTimer = window.setInterval(() => {
+    void pollNurture();
+  }, 1000);
   liveTimer = window.setInterval(() => {
     const now = Date.now();
     for (const [id, at] of liveAt) {
@@ -546,10 +602,10 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  document.removeEventListener("pointerdown", onQueueOutside);
   if (pollTimer) window.clearInterval(pollTimer);
   if (liveTimer) window.clearInterval(liveTimer);
   if (nurtureTimer) window.clearInterval(nurtureTimer);
-  if (nurtureRunning.value) void ruyiNurtureStop();
   for (const id of [...streamTasks.keys()]) stopStream(id);
 });
 </script>
@@ -585,6 +641,33 @@ onUnmounted(() => {
           <span>预览布局</span>
           <button type="button" :class="{ on: orientation === 0 }" @click="orientation = 0">横屏</button>
           <button type="button" :class="{ on: orientation === 1 }" @click="orientation = 1">竖屏</button>
+        </div>
+        <div ref="queueHost" class="queue-host">
+          <button class="btn queue-trigger" type="button" @click="queueOpen = !queueOpen">
+            <i :class="{ on: nurtureActiveCount }" />
+            任务队列
+            <b v-if="!queueOpen && nurtureActiveCount">{{ nurtureActiveCount > 99 ? "99+" : nurtureActiveCount }}</b>
+          </button>
+          <div v-if="queueOpen" class="queue-bubble">
+            <div class="queue-head">
+              <span>运行中的任务 ({{ nurtureActiveCount }})</span>
+              <button v-if="nurtureActiveCount" class="btn danger tiny" type="button" @click="stopNurture">全部取消</button>
+            </div>
+            <div class="queue-body">
+              <p v-if="!nurtureActiveTasks.length" class="queue-empty">当前没有运行中的任务</p>
+              <article v-for="task in nurtureActiveTasks" :key="task.id" class="queue-item">
+                <div>
+                  <strong>
+                    <template v-if="task.status === 'running'">正在</template>
+                    {{ task.label || task.accountId }}
+                    <em :class="task.status">{{ nurtureStatusText(task.status) }}</em>
+                  </strong>
+                  <span>{{ formatRemain(task) }}</span>
+                </div>
+                <button class="link-cancel" type="button" @click="cancelNurtureTask(task.id)">取消</button>
+              </article>
+            </div>
+          </div>
         </div>
       </div>
       <p v-if="clashMessage" class="hint proxy-hint">{{ clashMessage }}。不选节点就用本机 IP，选了以后每次打开都走这个节点。</p>
@@ -624,8 +707,8 @@ onUnmounted(() => {
             <em :class="row.state">{{ stateLabel(row.state, row.status) }}</em>
           </div>
           <div class="actions">
-            <button class="btn primary" type="button" :disabled="!!busyId" @click="openBrowser(row)">
-              {{ row.state === "logged_in" ? "打开" : "登录" }}
+            <button class="btn primary" type="button" :disabled="!!busyId || (site === 'x' && nurtureLocked(row.account_id))" @click="openBrowser(row)">
+              {{ site === "x" && nurtureLocked(row.account_id) ? "养号中" : (row.state === "logged_in" ? "打开" : "登录") }}
             </button>
             <button class="btn more" type="button" @click.stop="menuId = menuId === row.account_id ? '' : row.account_id">···</button>
             <div v-if="menuId === row.account_id" class="menu">
@@ -692,10 +775,11 @@ onUnmounted(() => {
           <label v-for="row in accounts" :key="row.account_id" class="check">
             <input
               type="checkbox"
+              :disabled="nurtureLocked(row.account_id)"
               :checked="nurtureIds.includes(row.account_id)"
               @change="toggleNurtureAccount(row.account_id)"
             />
-            <span>{{ row.label || row.username || row.account_id }}</span>
+            <span>{{ row.label || row.username || row.account_id }}{{ nurtureLocked(row.account_id) ? "（养号中）" : "" }}</span>
           </label>
         </div>
         <label v-if="nurtureForm.mode === 'browse'">
@@ -706,7 +790,11 @@ onUnmounted(() => {
           </select>
         </label>
         <label>
-          {{ nurtureForm.mode === "browse" ? "浏览轮数" : "每个目标滚动轮数" }}
+          养号时间（分钟）
+          <input v-model.number="nurtureForm.minutes" type="number" min="1" max="180" />
+        </label>
+        <label v-if="nurtureForm.mode === 'interact'">
+          每个目标滚动轮数
           <input v-model.number="nurtureForm.rounds" type="number" min="1" max="40" />
         </label>
         <div v-if="nurtureForm.mode === 'interact'" class="counts">
@@ -722,12 +810,10 @@ onUnmounted(() => {
           动作间隔（秒）
           <input v-model.number="nurtureForm.delaySecs" type="number" min="3" max="20" />
         </label>
-        <p class="hint">浏览会滚动时间线，并偶尔点开帖子再返回。互动会点赞、转发；填了用户名时还会去对方主页关注。多个账号按顺序一个一个养。账号需要已经登录。</p>
-        <pre v-if="nurtureLog.length" class="log">{{ nurtureLog.join("\n") }}</pre>
+        <p class="hint">开始后会进入任务队列，按顺序一个一个养。养号中的浏览器不能再打开，完成或取消后才能打开。可以在队列里单独取消，也可以全部取消。</p>
         <div class="dialog-actions">
           <button class="btn" type="button" @click="nurtureOpen = false">关闭</button>
-          <button v-if="nurtureRunning" class="btn danger" type="button" @click="stopNurture">停止</button>
-          <button class="btn primary" type="submit" :disabled="nurtureRunning">开始</button>
+          <button class="btn primary" type="submit">加入队列</button>
         </div>
       </form>
     </div>
@@ -759,6 +845,28 @@ onUnmounted(() => {
 .ip-line { display: flex; align-items: center; gap: 8px; color: var(--heading); font-size: 12px; }
 .ip-line button { border: 0; background: transparent; color: var(--heading); padding: 0; text-decoration: underline; }
 .tools { flex-wrap: wrap; }
+.queue-host { position: relative; z-index: 8; flex-shrink: 0; }
+.queue-trigger { position: relative; display: inline-flex; align-items: center; gap: 6px; border-color: #2563eb; color: #60a5fa; }
+.queue-trigger:hover { border-color: #3b82f6; color: #93c5fd; background: #172554; }
+.queue-trigger i { width: 12px; height: 12px; border-radius: 99px; border: 2px solid currentColor; border-right-color: transparent; opacity: 0.35; }
+.queue-trigger i.on { opacity: 1; animation: queue-spin 0.8s linear infinite; }
+.queue-trigger b { position: absolute; top: -7px; right: -7px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 99px; background: #ef4444; color: white; font-size: 11px; line-height: 16px; text-align: center; }
+.queue-bubble { position: absolute; top: calc(100% + 10px); right: 0; width: 380px; max-height: 460px; display: flex; flex-direction: column; overflow: hidden; border-radius: 8px; background: #18181b; border: 1px solid #3f3f46; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45); }
+.queue-bubble::before { content: ""; position: absolute; top: -6px; right: 36px; width: 10px; height: 10px; background: #18181b; border-left: 1px solid #3f3f46; border-top: 1px solid #3f3f46; transform: rotate(45deg); }
+.queue-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 16px; border-bottom: 1px solid #3f3f46; color: #e4e4e7; font-size: 13px; }
+.queue-head .tiny { padding: 4px 8px; font-size: 12px; }
+.queue-body { max-height: 400px; overflow: auto; padding: 8px 10px 12px; }
+.queue-empty { margin: 28px 0; text-align: center; color: #a1a1aa; font-size: 13px; }
+.queue-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 8px; border-bottom: 1px solid #27272a; }
+.queue-item:last-child { border-bottom: 0; }
+.queue-item div { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.queue-item strong { display: flex; align-items: center; gap: 6px; min-width: 0; color: #f4f4f5; font-size: 14px; }
+.queue-item strong em { flex-shrink: 0; padding: 0 6px; border-radius: 4px; background: #27272a; color: #a1a1aa; font-size: 11px; }
+.queue-item strong em.running { background: #172554; color: #93c5fd; }
+.queue-item span { color: #a1a1aa; font-size: 12px; }
+.link-cancel { border: 0; background: transparent; color: #f87171; padding: 4px 6px; }
+.link-cancel:hover { color: #fca5a5; }
+@keyframes queue-spin { to { transform: rotate(360deg); } }
 label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--muted); }
 input, select, textarea { min-width: 180px; background: var(--bg0); border: 1px solid var(--bg3); border-radius: 8px; padding: 8px 10px; }
 .orient span { color: var(--muted); font-size: 13px; }

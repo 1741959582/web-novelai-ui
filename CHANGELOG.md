@@ -2,6 +2,13 @@
 
 从新到旧。安装包在 [最新发行版](https://github.com/caiweida/web-novelai-ui/releases/latest)。已安装的程序启动后会读到新版本，顶栏可以点「立即更新」。
 
+## [1.0.3](https://github.com/caiweida/web-novelai-ui/releases/tag/v1.0.3)
+
+- 养号改成任务队列。每个账号一条任务，气泡里能看到剩余时间，可以单独取消，也可以全部取消。排队或养号中的浏览器不能再打开，完成或取消后才能打开。
+- 养号会滚动时间线、打开帖子并随机点赞转发，到设定的分钟数就停止。敏感内容会先点「显示」，浏览量和账号提示会自动关掉。
+- 推特和 Pixiv 可以同时打开，不再挤在同一个窗口里。
+- 脚本包更新到 0.1.38。设置里检查脚本包即可热更新。
+
 ## [1.0.2](https://github.com/caiweida/web-novelai-ui/releases/tag/v1.0.2)
 
 - 指纹浏览器可以登录并保存推特和 Pixiv 账号。推特可以养号，Pixiv 目前只有登录和保存指纹。
