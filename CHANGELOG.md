@@ -2,6 +2,13 @@
 
 从新到旧。安装包在 [最新发行版](https://github.com/caiweida/web-novelai-ui/releases/latest)。已安装的程序启动后会读到新版本，顶栏可以点「立即更新」。
 
+## [1.0.5](https://github.com/caiweida/web-novelai-ui/releases/tag/v1.0.5)
+
+- V5 可以加参考插条，拖动和缩放角色图，底色可选白或黑。
+- Pixiv 账号可以看点赞记录、关注记录和每日数据，并在这个账号的指纹浏览器里打开帖子。
+- 代理可以在自由猫和 Clash Verge 之间切换。养号可以改去广场。
+- 脚本包更新到 0.1.39。设置里检查脚本包即可热更新。
+
 ## [1.0.4](https://github.com/caiweida/web-novelai-ui/releases/tag/v1.0.4)
 
 - 指纹浏览器的代理节点可以改选自由猫里的固定节点。不选就走本机直连，选中后浏览器走自由猫的本地端口。
