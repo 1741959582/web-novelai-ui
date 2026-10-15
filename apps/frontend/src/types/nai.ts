@@ -211,6 +211,38 @@ export function newVibeImage(previewUrl: string, base64: string): VibeImage {
   };
 }
 
+export interface InsetReference {
+  id: string;
+  previewUrl: string;
+  base64: string;
+  enabled: boolean;
+  ratioId: string;
+  canvasWidth: number;
+  canvasHeight: number;
+  background: "white" | "black";
+  crop: boolean;
+  scale: number;
+  offsetX: number;
+  offsetY: number;
+}
+
+export function newInsetReference(previewUrl: string, base64: string): InsetReference {
+  return {
+    id: crypto.randomUUID(),
+    previewUrl,
+    base64,
+    enabled: true,
+    ratioId: "3:2",
+    canvasWidth: 1216,
+    canvasHeight: 832,
+    background: "white",
+    crop: true,
+    scale: 1,
+    offsetX: 0,
+    offsetY: 0,
+  };
+}
+
 export function newPreciseReference(previewUrl: string, base64: string): PreciseReference {
   return {
     id: crypto.randomUUID(),

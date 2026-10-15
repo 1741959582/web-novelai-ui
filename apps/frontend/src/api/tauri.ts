@@ -23,6 +23,7 @@ export type GenerateApiRequest = GenerateParams & {
   vibeImages?: Array<Pick<VibeImage, "base64" | "infoExtracted" | "strength">>;
   preciseReferences?: Array<Pick<PreciseReference, "base64" | "type" | "strength" | "fidelity">>;
   normalizeVibe?: boolean;
+  resultCrop?: { x: number; y: number; width: number; height: number };
 };
 
 export function settingsGet() {
@@ -891,8 +892,48 @@ export function ruyiPixivRefresh(accountId: string) {
   return invoke<Record<string, unknown>>("ruyi_pixiv_refresh", { accountId });
 }
 
+export interface PixivLike {
+  id: string;
+  kind: string;
+  userName: string;
+  userIcon: string;
+  title: string;
+  cover: string;
+  url: string;
+  at: string;
+  text: string;
+  count?: number;
+}
+
+export interface PixivDay {
+  date: string;
+  views: number;
+  likes: number;
+  comments: number;
+  bookmarks: number;
+  followers: number;
+}
+
+export function ruyiPixivLikes(accountId: string, mode: "cache" | "latest" | "more" = "latest") {
+  return invoke<{ ok: boolean; items: PixivLike[]; follows: PixivLike[]; note?: string; hasMore?: boolean }>("ruyi_pixiv_likes", { accountId, mode });
+}
+
+export function ruyiPixivStats(accountId: string, start: string, end: string) {
+  return invoke<{ ok: boolean; days: PixivDay[]; followers: number; note: string }>("ruyi_pixiv_stats", { accountId, start, end });
+}
+
+export function ruyiPixivOpenTab(accountId: string, url: string) {
+  return invoke<{ ok: boolean }>("ruyi_pixiv_open_tab", { accountId, url });
+}
+
 export function ruyiPixivOpen(accountId: string) {
   return invoke<{ proxy?: string }>("ruyi_pixiv_open", { accountId });
+}
+
+export interface ProxyChoice {
+  id: string;
+  name: string;
+  running: boolean;
 }
 
 export interface ClashNodes {
@@ -901,10 +942,16 @@ export interface ClashNodes {
   group: string;
   current: string;
   nodes: string[];
+  product: string;
+  choices: ProxyChoice[];
 }
 
 export function ruyiClashNodes() {
   return invoke<ClashNodes>("ruyi_clash_nodes");
+}
+
+export function ruyiProxyProductSet(product: string) {
+  return invoke<ClashNodes>("ruyi_proxy_product_set", { product });
 }
 
 export function ruyiProxyMap() {
@@ -936,14 +983,28 @@ export interface TwitterCreated {
   proxy: string;
 }
 
+export interface NurtureEvent {
+  action: string;
+  handle: string;
+  name: string;
+  text: string;
+  url: string;
+  at: number;
+}
+
 export interface NurtureTaskStatus {
   id: number;
   accountId: string;
   label: string;
   status: string;
+  mode: string;
   minutes: number;
+  likes: number;
+  reposts: number;
+  follows: number;
   remainingSecs: number;
   message: string;
+  events: NurtureEvent[];
 }
 
 export interface NurtureStatus {
@@ -954,7 +1015,7 @@ export interface NurtureStatus {
 }
 
 export function ruyiNurtureStart(payload: {
-  mode: "browse" | "interact";
+  mode: "browse" | "interact" | "plaza";
   accountIds: string[];
   handles: string;
   feed: "for_you" | "following";

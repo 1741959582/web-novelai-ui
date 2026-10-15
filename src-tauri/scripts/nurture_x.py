@@ -271,6 +271,11 @@ def main() -> int:
         page = FirefoxPage(options)
         if cfg.get("mode") == "interact":
             interact(page, cfg)
+        elif cfg.get("mode") == "plaza":
+            page.get("https://x.com/explore")
+            if pause(3, cfg["stop"]):
+                act_on_timeline(page, cfg, int(cfg["likes"]), int(cfg["reposts"]))
+                say("广场这一轮结束")
         else:
             browse(page, cfg)
         return 0

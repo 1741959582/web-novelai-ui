@@ -506,12 +506,22 @@ const TWITTER_TYPE: &str = "x";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ProxyChoice {
+    pub id: String,
+    pub name: String,
+    pub running: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ClashNodes {
     pub ok: bool,
     pub message: String,
     pub group: String,
     pub current: String,
     pub nodes: Vec<String>,
+    pub product: String,
+    pub choices: Vec<ProxyChoice>,
 }
 
 struct ClashEndpoint {
@@ -788,6 +798,8 @@ fn clash_nodes_from(value: &Value, product: &str) -> ClashNodes {
             group: String::new(),
             current: String::new(),
             nodes: Vec::new(),
+            product: product.to_string(),
+            choices: Vec::new(),
         };
     };
     let current = item.get("now").and_then(|value| value.as_str()).unwrap_or("").to_string();
@@ -812,36 +824,175 @@ fn clash_nodes_from(value: &Value, product: &str) -> ClashNodes {
         group,
         current,
         nodes,
+        product: product.to_string(),
+        choices: Vec::new(),
     }
 }
 
 struct ProxySource {
+    id: String,
     endpoint: ClashEndpoint,
     proxies: Value,
     product: String,
 }
 
-async fn load_proxy_source() -> Result<ProxySource, String> {
-    let freecat = freecat_endpoint();
-    if let Ok(proxies) = clash_get_proxies(&freecat).await {
-        let listed = clash_nodes_from(&proxies, "自由猫");
-        if listed.ok && is_freecat_group(&listed.group) {
-            return Ok(ProxySource {
-                endpoint: freecat,
-                proxies,
-                product: "自由猫".into(),
-            });
+fn proxy_product_path() -> PathBuf {
+    electron_root().join("data").join("proxy_product.json")
+}
+
+fn saved_proxy_product() -> String {
+    let value: Value = fs::read_to_string(proxy_product_path())
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or(Value::Null);
+    match value.get("product").and_then(|item| item.as_str()).unwrap_or("") {
+        "freecat" | "clash" => value["product"].as_str().unwrap_or("").to_string(),
+        _ => String::new(),
+    }
+}
+
+fn save_proxy_product(product: &str) -> Result<(), String> {
+    let path = proxy_product_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    fs::write(path, serde_json::to_string_pretty(&json!({ "product": product })).unwrap_or_else(|_| "{}".into()))
+        .map_err(|error| error.to_string())
+}
+
+fn controller_key(value: &str) -> String {
+    let value = value.trim().trim_start_matches("http://").trim_end_matches('/');
+    let (host, port) = value.rsplit_once(':').unwrap_or((value, ""));
+    let host = if host.eq_ignore_ascii_case("localhost") { "127.0.0.1" } else { host };
+    format!("{}:{}", host.to_ascii_lowercase(), port)
+}
+
+fn product_offline_message(product: &str) -> String {
+    if product == "clash" {
+        "Clash Verge 没有在运行。请先打开 Clash Verge。".into()
+    } else {
+        "自由猫没有在运行。请先打开桌面上的自由猫。".into()
+    }
+}
+
+fn freecat_controller_message() -> String {
+    "自由猫已经打开，但还没开启外部控制器。请在自由猫设置里打开「外部控制器」（端口 9090），然后点刷新。".into()
+}
+
+fn process_exists(image: &str) -> bool {
+    let output = match std::process::Command::new("tasklist")
+        .args(["/FI", &format!("IMAGENAME eq {image}"), "/NH"])
+        .output()
+    {
+        Ok(output) => output,
+        Err(_) => return false,
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .to_ascii_lowercase()
+        .contains(&image.to_ascii_lowercase())
+}
+
+fn tcp_open(port: u16) -> bool {
+    if port == 0 {
+        return false;
+    }
+    let address = format!("127.0.0.1:{port}");
+    let Ok(address) = address.parse() else {
+        return false;
+    };
+    std::net::TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_ok()
+}
+
+fn freecat_app_open(mixed_port: u16) -> bool {
+    process_exists("ziyoumao.exe") || tcp_open(mixed_port)
+}
+
+async fn probe_product(id: &str, name: &str, endpoint: ClashEndpoint) -> Option<ProxySource> {
+    let proxies = clash_get_proxies(&endpoint).await.ok()?;
+    let listed = clash_nodes_from(&proxies, name);
+    if !listed.ok {
+        return None;
+    }
+    Some(ProxySource {
+        id: id.to_string(),
+        endpoint,
+        proxies,
+        product: name.to_string(),
+    })
+}
+
+async fn available_sources() -> (Vec<ProxyChoice>, Vec<ProxySource>) {
+    let freecat_endpoint = freecat_endpoint();
+    let freecat_mixed_port = freecat_endpoint.mixed_port;
+    let clash_endpoint = clash_verge_endpoint();
+    let same = controller_key(&freecat_endpoint.controller) == controller_key(&clash_endpoint.controller);
+    let (freecat, clash) = tokio::join!(
+        probe_product("freecat", "自由猫", freecat_endpoint),
+        async {
+            if same {
+                None
+            } else {
+                probe_product("clash", "Clash Verge", clash_endpoint).await
+            }
         }
+    );
+    let freecat_running = freecat.is_some() || freecat_app_open(freecat_mixed_port);
+    let choices = vec![
+        ProxyChoice { id: "freecat".into(), name: "自由猫".into(), running: freecat_running },
+        ProxyChoice { id: "clash".into(), name: "Clash Verge".into(), running: clash.is_some() },
+    ];
+    let mut sources = Vec::new();
+    if let Some(source) = freecat {
+        sources.push(source);
     }
-    let clash = clash_verge_endpoint();
-    match clash_get_proxies(&clash).await {
-        Ok(proxies) => Ok(ProxySource {
-            endpoint: clash,
-            proxies,
-            product: "Clash Verge".into(),
-        }),
-        Err(_) => Err("自由猫没有在运行。请先打开桌面上的自由猫。".into()),
+    if let Some(source) = clash {
+        sources.push(source);
     }
+    (choices, sources)
+}
+
+fn nodes_for(saved: &str, choices: Vec<ProxyChoice>, sources: &[ProxySource]) -> ClashNodes {
+    if let Some(source) = sources.iter().find(|item| item.id == saved) {
+        let mut listed = clash_nodes_from(&source.proxies, &source.product);
+        listed.product = saved.to_string();
+        listed.choices = choices;
+        return listed;
+    }
+    let app_open = choices.iter().any(|item| item.id == saved && item.running);
+    let message = if saved.is_empty() {
+        "请选择用自由猫还是 Clash Verge".to_string()
+    } else if saved == "freecat" && app_open {
+        freecat_controller_message()
+    } else {
+        product_offline_message(saved)
+    };
+    ClashNodes {
+        ok: false,
+        message,
+        group: String::new(),
+        current: String::new(),
+        nodes: Vec::new(),
+        product: saved.to_string(),
+        choices,
+    }
+}
+
+async fn load_proxy_source() -> Result<ProxySource, String> {
+    let saved = saved_proxy_product();
+    if saved.is_empty() {
+        return Err("请先选择用自由猫还是 Clash Verge".into());
+    }
+    let (choices, sources) = available_sources().await;
+    if !choices.iter().any(|item| item.id == saved && item.running) {
+        return Err(product_offline_message(&saved));
+    }
+    sources.into_iter().find(|item| item.id == saved).ok_or_else(|| {
+        if saved == "freecat" {
+            freecat_controller_message()
+        } else {
+            product_offline_message(&saved)
+        }
+    })
 }
 
 async fn ensure_mixed_port(endpoint: &ClashEndpoint, freecat: bool) -> Result<u16, String> {
@@ -967,16 +1118,23 @@ async fn apply_account_proxy(account_id: &str) -> Result<String, String> {
 
 #[tauri::command]
 pub async fn ruyi_clash_nodes() -> ClashNodes {
-    match load_proxy_source().await {
-        Ok(source) => clash_nodes_from(&source.proxies, &source.product),
-        Err(message) => ClashNodes {
-            ok: false,
-            message,
-            group: String::new(),
-            current: String::new(),
-            nodes: Vec::new(),
-        },
+    let saved = saved_proxy_product();
+    let (choices, sources) = available_sources().await;
+    nodes_for(&saved, choices, &sources)
+}
+
+#[tauri::command]
+pub async fn ruyi_proxy_product_set(product: String) -> Result<ClashNodes, String> {
+    let product = match product.trim() {
+        "freecat" | "clash" => product.trim().to_string(),
+        _ => return Err("请选择自由猫或 Clash Verge".into()),
+    };
+    let (choices, sources) = available_sources().await;
+    if !choices.iter().any(|item| item.id == product && item.running) {
+        return Err(product_offline_message(&product));
     }
+    save_proxy_product(&product)?;
+    Ok(nodes_for(&product, choices, &sources))
 }
 
 #[tauri::command]
@@ -1177,6 +1335,7 @@ pub async fn ruyi_twitter_create(label: String, cookie: String, proxy_name: Stri
 }
 
 async fn open_twitter_account(account_id: &str) -> Result<Value, String> {
+    ensure_script().await?;
     open_typed_account(account_id, TWITTER_TYPE).await
 }
 
@@ -1274,6 +1433,70 @@ pub async fn ruyi_pixiv_open(account_id: String) -> Result<Value, String> {
         return Err("缺少账号编号".into());
     }
     open_typed_account(&account_id, PIXIV_TYPE).await
+}
+
+fn pixiv_api_error(value: &Value, fallback: &str) -> Result<(), String> {
+    if value.get("ok").and_then(|item| item.as_bool()) == Some(false) {
+        let message = value
+            .get("error")
+            .and_then(|item| item.as_str())
+            .unwrap_or(fallback);
+        return Err(message.to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn ruyi_pixiv_likes(account_id: String, mode: Option<String>) -> Result<Value, String> {
+    ensure_script().await?;
+    let account_id = account_id.trim().to_string();
+    if account_id.is_empty() {
+        return Err("缺少账号编号".into());
+    }
+    let mode = match mode.unwrap_or_else(|| "latest".to_string()).as_str() {
+        "cache" => "cache",
+        "more" => "more",
+        _ => "latest",
+    };
+    let value = post_json(
+        "/run/browser/pixiv/likes",
+        json!({ "account_id": account_id, "mode": mode }),
+    )
+    .await?;
+    pixiv_api_error(&value, "读取点赞失败")?;
+    Ok(value)
+}
+
+#[tauri::command]
+pub async fn ruyi_pixiv_stats(account_id: String, start: String, end: String) -> Result<Value, String> {
+    ensure_script().await?;
+    let account_id = account_id.trim().to_string();
+    if account_id.is_empty() {
+        return Err("缺少账号编号".into());
+    }
+    let value = post_json(
+        "/run/browser/pixiv/stats",
+        json!({ "account_id": account_id, "start": start.trim(), "end": end.trim() }),
+    )
+    .await?;
+    pixiv_api_error(&value, "读取每日数据失败")?;
+    Ok(value)
+}
+
+#[tauri::command]
+pub async fn ruyi_pixiv_open_tab(account_id: String, url: String) -> Result<Value, String> {
+    ensure_script().await?;
+    let account_id = account_id.trim().to_string();
+    if account_id.is_empty() {
+        return Err("缺少账号编号".into());
+    }
+    let value = post_json(
+        "/run/browser/pixiv/open-tab",
+        json!({ "account_id": account_id, "url": url.trim() }),
+    )
+    .await?;
+    pixiv_api_error(&value, "打开帖子失败")?;
+    Ok(value)
 }
 
 const SCRIPT_ASSET: &str = "ruyipage-server.exe";
@@ -1692,14 +1915,30 @@ pub async fn ruyi_firefox_download(app: AppHandle) -> Result<FirefoxBrowserStatu
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct NurtureEvent {
+    pub action: String,
+    pub handle: String,
+    pub name: String,
+    pub text: String,
+    pub url: String,
+    pub at: i64,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NurtureTaskStatus {
     pub id: u64,
     pub account_id: String,
     pub label: String,
     pub status: String,
+    pub mode: String,
     pub minutes: u32,
+    pub likes: u32,
+    pub reposts: u32,
+    pub follows: u32,
     pub remaining_secs: i64,
     pub message: String,
+    pub events: Vec<NurtureEvent>,
 }
 
 #[derive(Clone, Serialize)]
@@ -1728,6 +1967,7 @@ struct NurtureTask {
     status: String,
     deadline: f64,
     message: String,
+    events: Vec<NurtureEvent>,
 }
 
 struct NurtureState {
@@ -1781,9 +2021,14 @@ fn nurture_snapshot() -> NurtureStatus {
                 account_id: task.account_id.clone(),
                 label: task.label.clone(),
                 status: task.status.clone(),
+                mode: task.mode.clone(),
                 minutes: task.minutes,
+                likes: task.likes,
+                reposts: task.reposts,
+                follows: task.follows,
                 remaining_secs,
                 message: task.message.clone(),
+                events: task.events.clone(),
             }
         })
         .collect();
@@ -1805,10 +2050,49 @@ fn nurture_log(line: impl Into<String>) {
         return;
     }
     state.message = line.to_string();
+    if let Some(task) = state.tasks.iter_mut().find(|task| task.status == "running") {
+        task.message = line.to_string();
+    }
     state.log.push(line.to_string());
     if state.log.len() > 40 {
         let extra = state.log.len() - 40;
         state.log.drain(0..extra);
+    }
+}
+
+fn nurture_record_event(payload: &str) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+        return;
+    };
+    let text = |key: &str| {
+        value
+            .get(key)
+            .and_then(|item| item.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
+    let action = text("action");
+    if action.is_empty() {
+        return;
+    }
+    let event = NurtureEvent {
+        action,
+        handle: text("handle"),
+        name: text("name"),
+        text: text("text"),
+        url: text("url"),
+        at: chrono::Utc::now().timestamp(),
+    };
+    let Ok(mut state) = NURTURE.lock() else {
+        return;
+    };
+    if let Some(task) = state.tasks.iter_mut().find(|task| task.status == "running") {
+        task.events.push(event);
+        if task.events.len() > 500 {
+            let extra = task.events.len() - 500;
+            task.events.drain(0..extra);
+        }
     }
 }
 
@@ -1951,9 +2235,14 @@ fn read_new_nurture_log(offset: &mut u64) {
     let text = String::from_utf8_lossy(&file[start..]);
     for line in text.lines() {
         let line = line.trim();
-        if !line.is_empty() {
-            nurture_log(line);
+        if line.is_empty() {
+            continue;
         }
+        if let Some(payload) = line.strip_prefix("@@") {
+            nurture_record_event(payload);
+            continue;
+        }
+        nurture_log(line);
     }
 }
 
@@ -2106,8 +2395,8 @@ pub async fn ruyi_nurture_start(
     minutes: u32,
 ) -> Result<NurtureStatus, String> {
     let mode = match mode.as_str() {
-        "browse" | "interact" => mode,
-        _ => return Err("养号方式只能是浏览或互动".into()),
+        "browse" | "interact" | "plaza" => mode,
+        _ => return Err("养号方式只能是浏览、互动或广场".into()),
     };
     let mut ids = Vec::new();
     for account_id in account_ids {
@@ -2124,8 +2413,8 @@ pub async fn ruyi_nurture_start(
         return Err("一次最多加入 20 个养号任务".into());
     }
     let handles = clean_handles(&handles)?;
-    if mode == "interact" && likes == 0 && reposts == 0 && follows == 0 {
-        return Err("互动养号至少要有点赞、转发或关注中的一项".into());
+    if matches!(mode.as_str(), "interact" | "plaza") && likes == 0 && reposts == 0 && follows == 0 {
+        return Err("至少要有点赞、转发或关注中的一项".into());
     }
     let rounds = rounds.clamp(1, 40);
     let likes = likes.clamp(0, 15);
@@ -2150,6 +2439,7 @@ pub async fn ruyi_nurture_start(
         for account_id in ids {
             let id = NURTURE_SEQ.fetch_add(1, Ordering::Relaxed);
             let label = account_label(&account_id);
+            state.tasks.retain(|task| !(task.account_id == account_id && task.status == "failed"));
             state.tasks.push(NurtureTask {
                 id,
                 account_id,
@@ -2166,6 +2456,7 @@ pub async fn ruyi_nurture_start(
                 status: "queued".into(),
                 deadline: 0.0,
                 message: format!("等待中，计划 {minutes} 分钟"),
+                events: Vec::new(),
             });
             added += 1;
         }

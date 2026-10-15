@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, reactive } from "vue";
-import { supportsNAIPreciseReference, supportsNAIVibeTransfer, type MetadataReport } from "@/types/nai";
+import { isV5, supportsNAIPreciseReference, supportsNAIVibeTransfer, type MetadataReport } from "@/types/nai";
 import { useAppStore } from "@/stores/app";
 import NaiIcon from "@/components/NaiIcon.vue";
 
@@ -22,6 +22,7 @@ const hasMeta = computed(() =>
 );
 const vibeOk = computed(() => supportsNAIVibeTransfer(store.params.model));
 const preciseOk = computed(() => supportsNAIPreciseReference(store.params.model));
+const insetOk = computed(() => isV5(store.params.model));
 const opts = reactive({
   prompt: true,
   uc: true,
@@ -32,14 +33,18 @@ const opts = reactive({
   clean: true,
 });
 
-function useAs(kind: "i2i" | "vibe" | "precise") {
+function useAs(kind: "i2i" | "vibe" | "precise" | "inset") {
   if (kind === "vibe" && !vibeOk.value) return;
   if (kind === "precise" && !preciseOk.value) return;
+  if (kind === "inset" && !insetOk.value) return;
   if (kind === "i2i") store.i2iImage = props.preview;
   if (kind === "vibe") store.addVibeFromDataUrl(props.preview);
   if (kind === "precise") store.addPreciseFromDataUrl(props.preview);
-  store.status =
-    kind === "i2i" ? "已设为 Image2Image 参考图" : kind === "vibe" ? "已设为 Vibe Transfer 参考图" : "已设为 Precise Reference";
+  if (kind === "inset") store.useImageAs("inset", props.preview);
+  if (kind !== "inset") {
+    store.status =
+      kind === "i2i" ? "已设为 Image2Image 参考图" : kind === "vibe" ? "已设为 Vibe Transfer 参考图" : "已设为 Precise Reference";
+  }
   emit("close");
 }
 
@@ -68,6 +73,9 @@ function importMeta() {
         </button>
         <button type="button" class="cream" :disabled="!preciseOk" :title="preciseOk ? '' : 'Precise Reference 仅 V4.5'" @click="useAs('precise')">
           <NaiIcon name="precise" :size="16" /> Precise Reference
+        </button>
+        <button type="button" class="cream" :disabled="!insetOk" :title="insetOk ? '' : '参考插条只用于 NAI5'" @click="useAs('inset')">
+          <NaiIcon name="precise" :size="16" /> 参考插条
         </button>
       </div>
 

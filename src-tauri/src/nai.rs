@@ -50,6 +50,17 @@ pub struct GenerateRequest {
     pub vibe_images: Option<Vec<VibeImageIn>>,
     pub precise_references: Option<Vec<PreciseRefIn>>,
     pub normalize_vibe: Option<bool>,
+    #[serde(default)]
+    pub result_crop: Option<ResultCrop>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResultCrop {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -671,6 +682,18 @@ fn composite_inpaint_result(generated: &[u8], source_b64: &str, mask_b64: &str) 
         }
     }
     encode_rgba_png(&gen)
+}
+
+fn crop_png(bytes: &[u8], crop: &ResultCrop, request_w: u32, request_h: u32) -> Result<Vec<u8>, String> {
+    let img = decode_rgba(bytes)?;
+    let (width, height) = img.dimensions();
+    let sx = if request_w == 0 { 1.0 } else { width as f64 / request_w as f64 };
+    let sy = if request_h == 0 { 1.0 } else { height as f64 / request_h as f64 };
+    let x = ((crop.x as f64) * sx).round().clamp(0.0, width.saturating_sub(1) as f64) as u32;
+    let y = ((crop.y as f64) * sy).round().clamp(0.0, height.saturating_sub(1) as f64) as u32;
+    let cw = ((crop.width as f64) * sx).round().clamp(1.0, (width - x) as f64) as u32;
+    let ch = ((crop.height as f64) * sy).round().clamp(1.0, (height - y) as f64) as u32;
+    encode_rgba_png(&image::imageops::crop_imm(&img, x, y, cw, ch).to_image())
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -1580,6 +1603,14 @@ async fn post_generate(
                 .collect();
         }
     }
+    if let Some(crop) = &req.result_crop {
+        let request_w = snap64(req.width, 832);
+        let request_h = snap64(req.height, 1216);
+        images = images
+            .into_iter()
+            .map(|img| crop_png(&img, crop, request_w, request_h).unwrap_or(img))
+            .collect();
+    }
     if let Some(first) = images.first() {
         let preview = format!(
             "data:image/png;base64,{}",
@@ -1600,6 +1631,9 @@ async fn post_generate(
             "bin"
         };
         let path = save_image_bytes(&saved, &req.file_name_prefix, seed, ext)?;
+        let (saved_w, saved_h) = decode_rgba(&saved)
+            .map(|img| img.dimensions())
+            .unwrap_or((snap64(req.width, 832), snap64(req.height, 1216)));
         let item = HistoryItem {
             id: Uuid::new_v4().to_string(),
             path: path.to_string_lossy().into(),
@@ -1608,8 +1642,8 @@ async fn post_generate(
             prompt: merge_prompt(&[&req.style_prompt, &req.positive_prompt]),
             negative_prompt: req.negative_prompt.clone(),
             seed,
-            width: snap64(req.width, 832),
-            height: snap64(req.height, 1216),
+            width: saved_w,
+            height: saved_h,
             steps: req.steps,
             sampler: req.sampler.clone(),
             kind: if action == "img2img" { "i2i" } else { "txt2img" }.into(),
@@ -2051,6 +2085,7 @@ mod tests {
             vibe_images: None,
             precise_references: None,
             normalize_vibe: Some(true),
+            result_crop: None,
         }
     }
 

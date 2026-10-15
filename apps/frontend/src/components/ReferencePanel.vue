@@ -1,19 +1,33 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { fetchRemoteImage } from "@/api/tauri";
-import { MAX_PRECISE_REFS, MAX_VIBE_IMAGES, supportsNAIPreciseReference, supportsNAIVibeTransfer, type PreciseReferenceType } from "@/types/nai";
+import { MAX_PRECISE_REFS, MAX_VIBE_IMAGES, isV5, supportsNAIPreciseReference, supportsNAIVibeTransfer, type PreciseReferenceType } from "@/types/nai";
 import { useAppStore } from "@/stores/app";
 import NaiIcon from "@/components/NaiIcon.vue";
+import { INSET_RATIOS, measureInset, paintInset, type InsetMetrics } from "@/utils/referenceInset";
 
 const props = defineProps<{
-  onPick: (file: File, kind?: "i2i" | "vibe" | "precise") => void;
+  onPick: (file: File, kind?: "i2i" | "vibe" | "precise" | "inset") => void;
 }>();
 
 const store = useAppStore();
+if (store.insetReference && !store.insetReference.canvasWidth) {
+  store.updateInset({ ratioId: "3:2", canvasWidth: 1216, canvasHeight: 832 });
+}
 const vibeMenu = ref(false);
 const wantInpaint = ref(false);
 const vibeOk = computed(() => supportsNAIVibeTransfer(store.params.model));
 const preciseOk = computed(() => supportsNAIPreciseReference(store.params.model));
+const insetOk = computed(() => isV5(store.params.model));
+const insetPreview = ref<HTMLCanvasElement | null>(null);
+const insetMetrics = ref<InsetMetrics | null>(null);
+const insetSizes = computed(() => INSET_RATIOS.find((item) => item.id === store.insetReference?.ratioId)?.sizes ?? INSET_RATIOS[2].sizes);
+
+function switchToV5() {
+  store.params.model = store.params.model.includes("curated")
+    ? "nai-diffusion-5-curated"
+    : "nai-diffusion-5-full";
+}
 
 function switchToV45() {
   store.params.model = store.params.model.includes("curated")
@@ -26,7 +40,7 @@ const PRECISE_TYPES: { value: PreciseReferenceType; label: string }[] = [
   { value: "style", label: "Style" },
 ];
 
-function pick(kind: "i2i" | "vibe" | "precise") {
+function pick(kind: "i2i" | "vibe" | "precise" | "inset") {
   const input = document.createElement("input");
   input.type = "file";
   input.accept = "image/png,image/jpeg,image/webp";
@@ -47,7 +61,7 @@ function onCardDragLeave(ev: DragEvent) {
   (ev.currentTarget as HTMLElement).classList.remove("over");
 }
 
-function onCardDrop(kind: "i2i" | "vibe" | "precise", ev: DragEvent) {
+function onCardDrop(kind: "i2i" | "vibe" | "precise" | "inset", ev: DragEvent) {
   ev.preventDefault();
   ev.stopPropagation();
   (ev.currentTarget as HTMLElement).classList.remove("over");
@@ -70,9 +84,90 @@ function onCardDrop(kind: "i2i" | "vibe" | "precise", ev: DragEvent) {
   }
 }
 
-function useCurrent(kind: "i2i" | "vibe" | "precise") {
+function useCurrent(kind: "i2i" | "vibe" | "precise" | "inset") {
   store.useImageAs(kind, store.currentSourceImage());
 }
+
+let insetDrag: { x: number; y: number; ox: number; oy: number } | null = null;
+
+async function drawInsetPreview() {
+  const canvas = insetPreview.value;
+  const inset = store.insetReference;
+  if (!canvas || !inset) return;
+  const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const el = new Image();
+    el.onload = () => resolve(el);
+    el.onerror = () => reject(new Error("preview"));
+    el.src = inset.previewUrl;
+  }).catch(() => null);
+  if (!img || store.insetReference?.id !== inset.id) return;
+  const metrics = measureInset(img.naturalWidth, img.naturalHeight, inset);
+  insetMetrics.value = metrics;
+  const viewW = Math.max(160, canvas.clientWidth || 280);
+  const viewH = Math.max(72, Math.round(viewW * (metrics.height / metrics.width)));
+  canvas.width = viewW;
+  canvas.height = viewH;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.save();
+  ctx.scale(viewW / metrics.width, viewH / metrics.height);
+  paintInset(ctx, img, metrics, inset.background);
+  ctx.restore();
+  ctx.strokeStyle = "rgba(96, 165, 250, 0.95)";
+  ctx.lineWidth = 1;
+  const split = (metrics.insetWidth / metrics.width) * viewW;
+  ctx.beginPath();
+  ctx.moveTo(split, 0);
+  ctx.lineTo(split, viewH);
+  ctx.stroke();
+}
+
+function onInsetPointerDown(ev: PointerEvent) {
+  const inset = store.insetReference;
+  if (!inset) return;
+  insetDrag = { x: ev.clientX, y: ev.clientY, ox: inset.offsetX, oy: inset.offsetY };
+  (ev.currentTarget as HTMLElement).setPointerCapture(ev.pointerId);
+}
+
+function onInsetPointerMove(ev: PointerEvent) {
+  const canvas = insetPreview.value;
+  const metrics = insetMetrics.value;
+  if (!insetDrag || !canvas || !metrics) return;
+  const rect = canvas.getBoundingClientRect();
+  const dx = ((ev.clientX - insetDrag.x) / Math.max(1, rect.width)) * metrics.width;
+  const dy = ((ev.clientY - insetDrag.y) / Math.max(1, rect.height)) * metrics.height;
+  store.updateInset({
+    offsetX: Math.round(insetDrag.ox + dx),
+    offsetY: Math.round(insetDrag.oy + dy),
+  });
+}
+
+function onInsetPointerUp() {
+  insetDrag = null;
+}
+
+function onInsetWheel(ev: WheelEvent) {
+  const inset = store.insetReference;
+  if (!inset) return;
+  const next = inset.scale * (ev.deltaY > 0 ? 0.92 : 1.08);
+  store.updateInset({ scale: Math.min(2.5, Math.max(0.3, next)) });
+}
+
+watch(
+  () => [
+    store.insetReference?.previewUrl,
+    store.insetReference?.canvasWidth,
+    store.insetReference?.canvasHeight,
+    store.insetReference?.background,
+    store.insetReference?.scale,
+    store.insetReference?.offsetX,
+    store.insetReference?.offsetY,
+    insetPreview.value,
+  ],
+  () => {
+    void drawInsetPreview();
+  },
+);
 
 function setI2iTab(tab: "i2i" | "inpaint") {
   if (tab === "inpaint") {
@@ -352,6 +447,88 @@ function shortId(id: string) {
         </div>
       </article>
     </div>
+
+    <div class="card" data-ref-drop="inset" @dragover="onCardDragOver" @dragleave="onCardDragLeave" @drop="onCardDrop('inset', $event)">
+      <div class="head">
+        <div class="title">
+          <NaiIcon name="precise" :size="18" />
+          <strong>参考插条</strong>
+        </div>
+        <div class="acts">
+          <button class="icon-sq tiny" type="button" title="清除" :disabled="!store.insetReference" @click="store.clearInset()">
+            <NaiIcon name="x" :size="14" />
+          </button>
+          <button class="icon-sq tiny" type="button" title="用当前图" :disabled="!insetOk" @click="useCurrent('inset')">
+            <NaiIcon name="image" :size="14" />
+          </button>
+          <button class="icon-sq tiny" type="button" title="添加角色图" :disabled="!insetOk" @click="pick('inset')">
+            <NaiIcon name="clip" :size="14" />
+          </button>
+        </div>
+      </div>
+      <p v-if="!insetOk" class="banner">
+        参考插条只用于 NAI5。左边放角色，右边按提示词作画。
+        <button type="button" class="link" @click="switchToV5">切换到 NAI5</button>
+      </p>
+      <template v-else-if="store.insetReference">
+        <canvas
+          ref="insetPreview"
+          class="inset-view"
+          @pointerdown="onInsetPointerDown"
+          @pointermove="onInsetPointerMove"
+          @pointerup="onInsetPointerUp"
+          @pointercancel="onInsetPointerUp"
+          @wheel.prevent="onInsetWheel"
+        />
+        <p class="note">
+          插条 {{ insetMetrics?.insetWidth ?? "—" }}px · 画面 {{ insetMetrics?.drawPercent ?? "—" }}%。
+          拖动角色，滚轮缩放。生成时会加上 split screen，裁切后只留右边。
+        </p>
+        <div class="inset-row">
+          <button
+            v-for="ratio in INSET_RATIOS"
+            :key="ratio.id"
+            type="button"
+            :class="{ on: store.insetReference.ratioId === ratio.id }"
+            @click="store.updateInset({ ratioId: ratio.id, canvasWidth: ratio.sizes[0].width, canvasHeight: ratio.sizes[0].height, offsetX: 0, offsetY: 0 })"
+          >
+            {{ ratio.label }}
+          </button>
+        </div>
+        <div class="inset-row">
+          <button
+            v-for="size in insetSizes"
+            :key="`${size.width}x${size.height}`"
+            type="button"
+            :class="{ on: store.insetReference.canvasWidth === size.width && store.insetReference.canvasHeight === size.height }"
+            @click="store.updateInset({ canvasWidth: size.width, canvasHeight: size.height, offsetX: 0, offsetY: 0 })"
+          >
+            {{ size.width }}×{{ size.height }}{{ size.anlas ? " · Anlas" : "" }}
+          </button>
+        </div>
+        <div class="inset-row">
+          <button type="button" :class="{ on: store.insetReference.background === 'white' }" @click="store.updateInset({ background: 'white' })">白底</button>
+          <button type="button" :class="{ on: store.insetReference.background === 'black' }" @click="store.updateInset({ background: 'black' })">黑底</button>
+          <label class="check">
+            <input
+              type="checkbox"
+              :checked="store.insetReference.crop"
+              @change="store.updateInset({ crop: ($event.target as HTMLInputElement).checked })"
+            />
+            裁掉插条
+          </label>
+          <button
+            class="ghost"
+            :class="{ on: store.insetReference.enabled }"
+            type="button"
+            @click="store.updateInset({ enabled: !store.insetReference.enabled })"
+          >
+            <NaiIcon name="check" :size="14" />
+          </button>
+        </div>
+      </template>
+      <p v-else class="note">放一张全身角色。角色会贴满左边，右边按提示词重画，最后裁掉插条。</p>
+    </div>
   </section>
 </template>
 
@@ -529,6 +706,11 @@ function shortId(id: string) {
   font-size: 12px;
   line-height: 1.4;
 }
+.inset-view { width: 100%; margin-top: 10px; border-radius: 8px; background: #111; cursor: grab; touch-action: none; }
+.inset-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+.inset-row button { border: 1px solid var(--bg3); background: transparent; border-radius: 8px; padding: 4px 8px; }
+.inset-row button.on { background: var(--heading); color: var(--bg0); }
+.inset-row .check { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 12px; color: var(--muted); }
 .banner .link {
   background: none;
   border: 0;

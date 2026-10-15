@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
+import * as echarts from "echarts";
 import {
   ruyiAccounts,
   ruyiClashNodes,
@@ -13,11 +14,19 @@ import {
   ruyiNodeIp,
   ruyiPixivCreate,
   ruyiPixivDelete,
+  ruyiPixivLikes,
   ruyiPixivOpen,
+  ruyiPixivOpenTab,
   ruyiPixivRefresh,
+  ruyiPixivStats,
   ruyiPixivUpdate,
+  type PixivDay,
+  type PixivLike,
   ruyiProxyMap,
+  ruyiProxyProductSet,
   ruyiProxySet,
+  type ClashNodes,
+  type ProxyChoice,
   ruyiStatus,
   ruyiTwitterCreate,
   ruyiTwitterDelete,
@@ -59,6 +68,22 @@ const importIpBusy = ref(false);
 let importIpSeq = 0;
 const clashNodes = ref<string[]>([]);
 const clashMessage = ref("");
+const proxyProduct = ref("");
+const proxyChoices = ref<ProxyChoice[]>([
+  { id: "freecat", name: "自由猫", running: false },
+  { id: "clash", name: "Clash Verge", running: false },
+]);
+const proxySaving = ref(false);
+const proxyHint = computed(() => {
+  if (proxyProduct.value === "freecat") {
+    if (!clashNodes.value.length && clashMessage.value.includes("外部控制器")) return clashMessage.value;
+    return `${clashMessage.value}。下拉列表是自由猫的节点，不选就用本机 IP。自由猫只有一个出口，最后选中的节点会给正在使用它的窗口共用。`;
+  }
+  if (proxyProduct.value === "clash") {
+    return `${clashMessage.value}。下拉列表是 Clash Verge 的节点，不选就用本机 IP。切换节点会改掉 Clash Verge 当前的出口。`;
+  }
+  return "请选择用自由猫还是 Clash Verge。没打开的不能选。选好之后才读取那个工具的节点，不选节点就用本机 IP。";
+});
 const proxyMap = ref<Record<string, string>>({});
 const exitIps = ref<Record<string, string>>({});
 const editOpen = ref(false);
@@ -75,7 +100,7 @@ const nurtureTasks = ref<NurtureTaskStatus[]>([]);
 const nurtureMessage = ref("");
 const nurtureIds = ref<string[]>([]);
 const nurtureForm = reactive({
-  mode: "browse" as "browse" | "interact",
+  mode: "browse" as "browse" | "interact" | "plaza",
   feed: "for_you" as "for_you" | "following",
   rounds: 8,
   likes: 3,
@@ -286,7 +311,7 @@ async function loadAccounts(silent = false) {
 
 async function refreshAll() {
   status.value = await ruyiStatus();
-  await loadAccounts();
+  await Promise.all([loadAccounts(), loadClash()]);
   note.value = "列表已刷新";
 }
 
@@ -315,14 +340,33 @@ async function previewImportIp() {
   }
 }
 
+function applyClash(nodes: ClashNodes) {
+  clashNodes.value = nodes.ok ? nodes.nodes || [] : [];
+  clashMessage.value = nodes.message;
+  proxyProduct.value = nodes.product || "";
+  if (nodes.choices?.length) proxyChoices.value = nodes.choices;
+}
+
 async function loadClash() {
   try {
     const [nodes, saved] = await Promise.all([ruyiClashNodes(), ruyiProxyMap()]);
-    clashNodes.value = nodes.nodes || [];
-    clashMessage.value = nodes.message;
+    applyClash(nodes);
     proxyMap.value = saved || {};
   } catch (error) {
     clashMessage.value = errorText(error);
+  }
+}
+
+async function chooseProxy(product: string) {
+  if (proxySaving.value || proxyProduct.value === product) return;
+  proxySaving.value = true;
+  try {
+    applyClash(await ruyiProxyProductSet(product));
+    note.value = product === "clash" ? "已改用 Clash Verge" : "已改用自由猫";
+  } catch (error) {
+    note.value = errorText(error);
+  } finally {
+    proxySaving.value = false;
   }
 }
 
@@ -492,8 +536,41 @@ function formatRemain(task: NurtureTaskStatus) {
   return `剩余 ${minutes} 分 ${String(seconds).padStart(2, "0")} 秒`;
 }
 
-const nurtureActiveTasks = computed(() => nurtureTasks.value.filter((task) => task.status === "queued" || task.status === "running"));
+const nurtureActiveTasks = computed(() =>
+  nurtureTasks.value.filter((task) => task.status === "queued" || task.status === "running" || task.status === "failed"),
+);
 const nurtureActiveCount = computed(() => nurtureActiveTasks.value.length);
+const detailId = ref(0);
+const detailOpen = ref(false);
+const detailTask = computed(() => nurtureTasks.value.find((task) => task.id === detailId.value) || null);
+
+function openTaskDetail(id: number) {
+  detailId.value = id;
+  detailOpen.value = true;
+}
+
+function actionLabel(action: string) {
+  if (action === "like") return "点赞";
+  if (action === "repost") return "转发";
+  if (action === "follow") return "关注";
+  if (action === "open") return "打开";
+  return "记录";
+}
+
+function eventCount(task: NurtureTaskStatus, action: string) {
+  return (task.events || []).filter((event) => event.action === action).length;
+}
+
+function formatEventTime(at: number) {
+  const date = new Date(at * 1000);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function eventWho(event: NurtureTaskStatus["events"][number]) {
+  if (event.handle) return `@${event.handle}`;
+  return event.name || "一位用户";
+}
 
 function onQueueOutside(event: PointerEvent) {
   if (!queueOpen.value) return;
@@ -537,7 +614,7 @@ async function startNurture() {
       mode: nurtureForm.mode,
       accountIds: nurtureIds.value,
       handles: nurtureForm.handles,
-      feed: nurtureForm.mode === "interact" ? "following" : nurtureForm.feed,
+      feed: nurtureForm.mode === "interact" ? "following" : nurtureForm.mode === "plaza" ? "for_you" : nurtureForm.feed,
       rounds: Number(nurtureForm.rounds) || 8,
       likes: Number(nurtureForm.likes) || 0,
       reposts: Number(nurtureForm.reposts) || 0,
@@ -577,6 +654,264 @@ async function stopNurture() {
   }
 }
 
+const insightOpen = ref(false);
+const insightTab = ref<"likes" | "follows" | "stats">("likes");
+const insightAccount = ref<TwitterAccount | null>(null);
+const insightLikes = ref<PixivLike[]>([]);
+const insightFollows = ref<PixivLike[]>([]);
+const insightDays = ref<PixivDay[]>([]);
+const insightFollowers = ref(0);
+const insightNote = ref("");
+const insightError = ref("");
+const insightBusy = ref(false);
+const insightHasMore = ref(false);
+const insightLoadingOlder = ref(false);
+const insightStart = ref(dayOffset(-6));
+const insightEnd = ref(dayOffset(0));
+const chartHost = ref<HTMLDivElement | null>(null);
+const likeListEl = ref<HTMLDivElement | null>(null);
+const followListEl = ref<HTMLDivElement | null>(null);
+let insightRequest = 0;
+let insightChart: echarts.ECharts | null = null;
+
+function dayOffset(offset: number) {
+  const date = new Date();
+  date.setDate(date.getDate() + offset);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function formatPixivTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value || "";
+  const pad = (item: number) => String(item).padStart(2, "0");
+  return `${date.getMonth() + 1}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function insightDay(value: string) {
+  const time = Date.parse(value || "");
+  if (!Number.isNaN(time)) {
+    const date = new Date(time);
+    const pad = (item: number) => String(item).padStart(2, "0");
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  }
+  const match = String(value || "").match(/\d{4}-\d{2}-\d{2}/);
+  return match ? match[0] : "";
+}
+
+const rangedFollows = computed(() => {
+  const start = insightStart.value;
+  const end = insightEnd.value;
+  return insightFollows.value.filter((item) => {
+    const day = insightDay(item.at);
+    return !!day && day >= start && day <= end;
+  });
+});
+
+const followTotal = computed(() => rangedFollows.value.reduce((sum, item) => sum + (item.count || 1), 0));
+
+function paintInsightChart() {
+  if (insightTab.value !== "stats" || !chartHost.value) return;
+  if (!insightChart) insightChart = echarts.init(chartHost.value);
+  const followDays = new Map<string, number>();
+  for (const item of rangedFollows.value) {
+    const day = insightDay(item.at);
+    if (!day) continue;
+    followDays.set(day, (followDays.get(day) || 0) + (item.count || 1));
+  }
+  const start = insightStart.value;
+  const end = insightEnd.value;
+  const likeDays = new Map<string, number>();
+  for (const item of insightLikes.value) {
+    const day = insightDay(item.at);
+    if (!day || day < start || day > end) continue;
+    likeDays.set(day, (likeDays.get(day) || 0) + (item.count || 1));
+  }
+  const days = [...new Set([...insightDays.value.map((day) => day.date), ...followDays.keys(), ...likeDays.keys()])].sort();
+  if (!days.length) {
+    insightChart.clear();
+    return;
+  }
+  const byDate = new Map(insightDays.value.map((day) => [day.date, day]));
+  const series = [
+    { name: "浏览", data: days.map((day) => byDate.get(day)?.views ?? null) },
+    { name: "点赞", data: days.map((day) => likeDays.get(day) ?? byDate.get(day)?.likes ?? null) },
+    { name: "回复", data: days.map((day) => byDate.get(day)?.comments ?? null) },
+    { name: "收藏", data: days.map((day) => byDate.get(day)?.bookmarks ?? null) },
+    { name: "涨粉", data: days.map((day) => followDays.get(day) ?? null) },
+  ];
+  insightChart.setOption({
+    backgroundColor: "transparent",
+    tooltip: { trigger: "axis" },
+    legend: { top: 0, textStyle: { color: "#d4d4d8" } },
+    grid: { left: 48, right: 16, top: 48, bottom: 28 },
+    xAxis: { type: "category", data: days.map((day) => day.slice(5)), axisLabel: { color: "#a1a1aa" } },
+    yAxis: { type: "value", axisLabel: { color: "#a1a1aa" }, splitLine: { lineStyle: { color: "#3f3f46" } } },
+    series: series.map((item) => ({ name: item.name, type: "bar", data: item.data })),
+  }, true);
+  insightChart.resize();
+}
+
+function pixivTime(value: string) {
+  const time = Date.parse(value || "");
+  return Number.isNaN(time) ? 0 : time;
+}
+
+function sortPixivItems(items: PixivLike[]) {
+  return [...items].sort((left, right) => pixivTime(right.at) - pixivTime(left.at));
+}
+
+function mergePixivItems(current: PixivLike[], incoming: PixivLike[]) {
+  const byId = new Map<string, PixivLike>();
+  for (const item of current) byId.set(item.id || `${item.at}|${item.url}`, item);
+  for (const item of incoming) {
+    const key = item.id || `${item.at}|${item.url}`;
+    const previous = byId.get(key);
+    if (previous?.cover?.startsWith("data:") && !String(item.cover || "").startsWith("data:")) byId.set(key, { ...item, cover: previous.cover });
+    else byId.set(key, item);
+  }
+  return sortPixivItems([...byId.values()]);
+}
+
+function insightListElement() {
+  return insightTab.value === "follows" ? followListEl.value : likeListEl.value;
+}
+
+function visibleInsightId(box: HTMLDivElement | null) {
+  if (!box) return "";
+  const articles = box.querySelectorAll("article");
+  for (const article of articles) {
+    if (article instanceof HTMLElement && article.offsetTop + article.offsetHeight > box.scrollTop + 4) return article.dataset.id || "";
+  }
+  return "";
+}
+
+async function loadInsightLikes(mode: "cache" | "latest" | "more" = "latest") {
+  const account = insightAccount.value;
+  if (!account) return;
+  if (mode === "more" && (!insightHasMore.value || insightBusy.value)) return;
+  const accountId = account.account_id;
+  const request = ++insightRequest;
+  const anchor = mode === "more" ? visibleInsightId(insightListElement()) : "";
+  insightBusy.value = true;
+  insightLoadingOlder.value = mode === "more";
+  try {
+    const result = await ruyiPixivLikes(accountId, mode);
+    if (request !== insightRequest || insightAccount.value?.account_id !== accountId) return;
+    const likes = result.items || [];
+    const follows = result.follows || [];
+    if (mode === "cache" && !likes.length && !follows.length) {
+      insightHasMore.value = !!result.hasMore;
+      return;
+    }
+    if (mode === "cache") {
+      insightLikes.value = sortPixivItems(likes);
+      insightFollows.value = sortPixivItems(follows);
+    } else {
+      insightLikes.value = mergePixivItems(insightLikes.value, likes);
+      insightFollows.value = mergePixivItems(insightFollows.value, follows);
+    }
+    insightHasMore.value = !!result.hasMore;
+    insightNote.value = result.note || "";
+    insightError.value = "";
+    await nextTick();
+    const box = insightListElement();
+    if (!box || request !== insightRequest) return;
+    if (mode === "latest") {
+      box.scrollTop = 0;
+      return;
+    }
+    if (mode === "more" && anchor) {
+      const target = box.querySelector(`[data-id="${CSS.escape(anchor)}"]`);
+      if (target instanceof HTMLElement) box.scrollTop = target.offsetTop;
+    }
+  } catch (error) {
+    if (request !== insightRequest || insightAccount.value?.account_id !== accountId) return;
+    if (mode !== "cache") insightError.value = errorText(error);
+  } finally {
+    if (request === insightRequest) {
+      insightBusy.value = false;
+      insightLoadingOlder.value = false;
+    }
+  }
+}
+
+function onInsightScroll(event: Event) {
+  const el = event.target as HTMLElement;
+  if (el.scrollHeight - el.scrollTop - el.clientHeight > 140) return;
+  void loadInsightLikes("more");
+}
+
+async function loadInsightStats() {
+  const account = insightAccount.value;
+  if (!account) return;
+  const accountId = account.account_id;
+  const request = ++insightRequest;
+  insightBusy.value = true;
+  try {
+    const result = await ruyiPixivStats(accountId, insightStart.value, insightEnd.value);
+    if (request !== insightRequest || insightAccount.value?.account_id !== accountId) return;
+    insightDays.value = result.days || [];
+    insightFollowers.value = result.followers || 0;
+    insightNote.value = result.note || "";
+    insightError.value = "";
+    await nextTick();
+    paintInsightChart();
+  } catch (error) {
+    if (request !== insightRequest || insightAccount.value?.account_id !== accountId) return;
+    insightError.value = errorText(error);
+  } finally {
+    if (request === insightRequest) insightBusy.value = false;
+  }
+}
+
+function openInsight(row: TwitterAccount) {
+  insightRequest += 1;
+  insightAccount.value = row;
+  insightTab.value = "likes";
+  insightOpen.value = true;
+  insightLikes.value = [];
+  insightFollows.value = [];
+  insightDays.value = [];
+  insightFollowers.value = 0;
+  insightNote.value = "";
+  insightError.value = "";
+  insightHasMore.value = false;
+  menuId.value = "";
+  void (async () => {
+    await loadInsightLikes("cache");
+    if (insightAccount.value?.account_id === row.account_id && !insightLikes.value.length && !insightFollows.value.length) {
+      await loadInsightLikes("latest");
+    }
+  })();
+}
+
+function closeInsight() {
+  insightOpen.value = false;
+  insightChart?.dispose();
+  insightChart = null;
+}
+
+async function showInsightTab(tab: "likes" | "follows" | "stats") {
+  insightTab.value = tab;
+  if (tab === "stats") await loadInsightStats();
+}
+
+async function openLikedPost(url: string) {
+  const account = insightAccount.value;
+  if (!account || !url) return;
+  try {
+    await ruyiPixivOpenTab(account.account_id, url);
+    note.value = "已在这个账号的指纹浏览器里打开帖子";
+  } catch (error) {
+    insightError.value = errorText(error);
+  }
+}
+
+watch([insightDays, insightLikes, insightFollows, insightStart, insightEnd], () => {
+  void nextTick().then(paintInsightChart);
+});
+
 onMounted(async () => {
   document.addEventListener("pointerdown", onQueueOutside);
   try {
@@ -606,6 +941,7 @@ onUnmounted(() => {
   if (pollTimer) window.clearInterval(pollTimer);
   if (liveTimer) window.clearInterval(liveTimer);
   if (nurtureTimer) window.clearInterval(nurtureTimer);
+  insightChart?.dispose();
   for (const id of [...streamTasks.keys()]) stopStream(id);
 });
 </script>
@@ -650,7 +986,7 @@ onUnmounted(() => {
           </button>
           <div v-if="queueOpen" class="queue-bubble">
             <div class="queue-head">
-              <span>运行中的任务 ({{ nurtureActiveCount }})</span>
+              <span>任务 ({{ nurtureActiveCount }})</span>
               <button v-if="nurtureActiveCount" class="btn danger tiny" type="button" @click="stopNurture">全部取消</button>
             </div>
             <div class="queue-body">
@@ -662,15 +998,32 @@ onUnmounted(() => {
                     {{ task.label || task.accountId }}
                     <em :class="task.status">{{ nurtureStatusText(task.status) }}</em>
                   </strong>
-                  <span>{{ formatRemain(task) }}</span>
+                  <span :class="{ failed: task.status === 'failed' }">{{ task.status === "queued" ? formatRemain(task) : (task.message || formatRemain(task)) }}</span>
                 </div>
-                <button class="link-cancel" type="button" @click="cancelNurtureTask(task.id)">取消</button>
+                <div class="queue-actions">
+                  <button class="link-detail" type="button" @click.stop="openTaskDetail(task.id)">详情</button>
+                  <button v-if="task.status === 'queued' || task.status === 'running'" class="link-cancel" type="button" @click.stop="cancelNurtureTask(task.id)">取消</button>
+                </div>
               </article>
             </div>
           </div>
         </div>
       </div>
-      <p v-if="clashMessage" class="hint proxy-hint">{{ clashMessage }}。下拉列表是自由猫的固定节点，不选就用本机 IP。自由猫只有一个出口，最后选中的节点会给正在使用它的窗口共用。</p>
+      <div class="proxy-choice">
+        <span>代理工具</span>
+        <button
+          v-for="item in proxyChoices"
+          :key="item.id"
+          type="button"
+          :class="{ on: proxyProduct === item.id }"
+          :disabled="!item.running || proxySaving"
+          :title="item.running ? `使用${item.name}` : `${item.name} 未打开`"
+          @click="chooseProxy(item.id)"
+        >
+          {{ item.name }}{{ item.running ? "" : " · 未打开" }}
+        </button>
+      </div>
+      <p class="hint proxy-hint">{{ proxyHint }}</p>
 
       <div class="grid" :class="{ tall: orientation === 1 }">
         <p v-if="loading" class="empty">正在读取{{ site === "pixiv" ? " Pixiv " : "推特" }}账号</p>
@@ -707,6 +1060,7 @@ onUnmounted(() => {
             <em :class="row.state">{{ stateLabel(row.state, row.status) }}</em>
           </div>
           <div class="actions">
+            <button v-if="site === 'pixiv'" class="btn" type="button" @click="openInsight(row)">数据</button>
             <button class="btn primary" type="button" :disabled="!!busyId || (site === 'x' && nurtureLocked(row.account_id))" @click="openBrowser(row)">
               {{ site === "x" && nurtureLocked(row.account_id) ? "养号中" : (row.state === "logged_in" ? "打开" : "登录") }}
             </button>
@@ -745,6 +1099,100 @@ onUnmounted(() => {
       </form>
     </div>
 
+    <div v-if="detailOpen && detailTask" class="mask" @click.self="detailOpen = false">
+      <div class="dialog records">
+        <h3>{{ detailTask.label || detailTask.accountId }} 的任务详情</h3>
+        <p class="hint">{{ formatRemain(detailTask) }}。{{ detailTask.message }}</p>
+        <p class="queue-counts">
+          点赞 {{ eventCount(detailTask, "like") }}<template v-if="detailTask.likes"> / {{ detailTask.likes }}</template>
+          · 转发 {{ eventCount(detailTask, "repost") }}<template v-if="detailTask.reposts"> / {{ detailTask.reposts }}</template>
+          · 关注 {{ eventCount(detailTask, "follow") }}<template v-if="detailTask.follows"> / {{ detailTask.follows }}</template>
+          · 共 {{ (detailTask.events || []).length }} 条
+        </p>
+        <p v-if="!(detailTask.events || []).length" class="empty">还没有记录。点赞、转发或关注之后会出现在这里。</p>
+        <ul v-else class="record-list">
+          <li v-for="(event, index) in [...(detailTask.events || [])].slice().reverse()" :key="`${event.at}-${event.url}-${index}`">
+            <time>{{ formatEventTime(event.at) }}</time>
+            <b>{{ actionLabel(event.action) }}</b>
+            <div>
+              <strong>{{ eventWho(event) }}</strong>
+              <span v-if="event.text">{{ event.text }}</span>
+            </div>
+          </li>
+        </ul>
+        <div class="dialog-actions">
+          <button class="btn" type="button" @click="detailOpen = false">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="insightOpen && insightAccount" class="mask" @click.self="closeInsight">
+      <div class="dialog insight">
+        <h3>{{ insightAccount.label || insightAccount.username || "Pixiv" }} 的数据</h3>
+        <div class="seg">
+          <button type="button" :class="{ on: insightTab === 'likes' }" @click="showInsightTab('likes')">点赞记录</button>
+          <button type="button" :class="{ on: insightTab === 'follows' }" @click="showInsightTab('follows')">关注记录</button>
+          <button type="button" :class="{ on: insightTab === 'stats' }" @click="showInsightTab('stats')">每日数据</button>
+        </div>
+        <p v-if="insightError" class="hint failed">{{ insightError }}</p>
+        <div v-if="insightTab === 'likes'" ref="likeListEl" class="like-list" @scroll="onInsightScroll">
+          <p v-if="insightNote" class="hint">{{ insightNote }}</p>
+          <p v-if="insightBusy && !insightLikes.length" class="empty">正在读取最新点赞</p>
+          <p v-else-if="!insightLikes.length" class="empty">还没有点赞记录。点刷新读取最新通知。</p>
+          <article v-for="item in insightLikes" :key="item.id || item.at + item.url" :data-id="item.id">
+            <img v-if="item.cover" :src="item.cover" alt="" @error="item.cover = ''" />
+            <div v-else class="cover-fallback">图</div>
+            <div>
+              <strong>{{ item.userName }} <em>{{ item.kind }}</em></strong>
+              <span>{{ item.title || item.text || "未命名帖子" }}</span>
+              <time>{{ formatPixivTime(item.at) }}</time>
+            </div>
+            <button v-if="item.url" class="btn" type="button" @click="openLikedPost(item.url)">打开帖子</button>
+          </article>
+          <button v-if="insightHasMore" class="btn more" type="button" :disabled="insightBusy" @click="loadInsightLikes('more')">
+            {{ insightLoadingOlder ? "正在读取更早的记录…" : "更早的记录" }}
+          </button>
+        </div>
+        <div v-else-if="insightTab === 'follows'" ref="followListEl" class="like-list" @scroll="onInsightScroll">
+          <div class="range">
+            <label>开始<input v-model="insightStart" type="date" /></label>
+            <label>结束<input v-model="insightEnd" type="date" /></label>
+            <span>这几天新增关注 {{ followTotal }}</span>
+          </div>
+          <p v-if="insightBusy && !insightFollows.length" class="empty">正在读取最新关注</p>
+          <p v-else-if="!rangedFollows.length" class="empty">这个日期里还没有关注记录。点刷新，或把日期范围放宽。</p>
+          <article v-for="item in rangedFollows" :key="item.id || item.at + item.userName" :data-id="item.id">
+            <img v-if="item.cover" :src="item.cover" alt="" />
+            <div v-else class="cover-fallback">人</div>
+            <div>
+              <strong>{{ item.userName }} <em>{{ item.kind }}</em></strong>
+              <span>{{ item.title || item.text }}</span>
+              <time>{{ formatPixivTime(item.at) }}</time>
+            </div>
+            <button v-if="item.url" class="btn" type="button" @click="openLikedPost(item.url)">打开主页</button>
+          </article>
+          <button v-if="insightHasMore" class="btn more" type="button" :disabled="insightBusy" @click="loadInsightLikes('more')">
+            {{ insightLoadingOlder ? "正在读取更早的记录…" : "更早的记录" }}
+          </button>
+        </div>
+        <div v-else class="stats-pane">
+          <div class="range">
+            <label>开始<input v-model="insightStart" type="date" /></label>
+            <label>结束<input v-model="insightEnd" type="date" /></label>
+            <button class="btn" type="button" :disabled="insightBusy" @click="loadInsightStats">查询</button>
+            <span v-if="insightFollowers">当前粉丝 {{ insightFollowers }}</span>
+            <span>这几天新增关注 {{ followTotal }}</span>
+          </div>
+          <p v-if="insightNote" class="hint">{{ insightNote }}</p>
+          <div ref="chartHost" class="chart" />
+        </div>
+        <div class="dialog-actions">
+          <button class="btn" type="button" :disabled="insightBusy" @click="loadInsightLikes('latest')">{{ insightBusy ? "读取中…" : "刷新" }}</button>
+          <button class="btn" type="button" @click="closeInsight">关闭</button>
+        </div>
+      </div>
+    </div>
+
     <div v-if="editOpen" class="mask" @click.self="editOpen = false">
       <form class="dialog" @submit.prevent="submitEdit">
         <h3>编辑账号</h3>
@@ -770,6 +1218,7 @@ onUnmounted(() => {
         <div class="seg">
           <button type="button" :class="{ on: nurtureForm.mode === 'browse' }" @click="nurtureForm.mode = 'browse'">浏览</button>
           <button type="button" :class="{ on: nurtureForm.mode === 'interact' }" @click="nurtureForm.mode = 'interact'">点赞转发关注</button>
+          <button type="button" :class="{ on: nurtureForm.mode === 'plaza' }" @click="nurtureForm.mode = 'plaza'">广场</button>
         </div>
         <div class="checks">
           <label v-for="row in accounts" :key="row.account_id" class="check">
@@ -797,7 +1246,8 @@ onUnmounted(() => {
           每个目标滚动轮数
           <input v-model.number="nurtureForm.rounds" type="number" min="1" max="40" />
         </label>
-        <div v-if="nurtureForm.mode === 'interact'" class="counts">
+        <p v-if="nurtureForm.mode === 'plaza'" class="hint">打开 X 首页的「为你推荐」，按下面的次数随机点赞、转发和关注。次数用完后继续浏览，直到养号时间结束。</p>
+        <div v-if="nurtureForm.mode === 'interact' || nurtureForm.mode === 'plaza'" class="counts">
           <label>点赞<input v-model.number="nurtureForm.likes" type="number" min="0" max="15" /></label>
           <label>转发<input v-model.number="nurtureForm.reposts" type="number" min="0" max="8" /></label>
           <label>关注<input v-model.number="nurtureForm.follows" type="number" min="0" max="15" /></label>
@@ -838,8 +1288,13 @@ onUnmounted(() => {
 .bar { padding: 14px 16px; flex-wrap: wrap; }
 .panel { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .toolbar { justify-content: space-between; gap: 12px; padding: 14px 16px; flex-wrap: nowrap; border-bottom: 1px solid var(--bg3); }
-.toolbar:has(+ .proxy-hint) { border-bottom: 0; }
+.toolbar:has(+ .proxy-choice) { border-bottom: 0; }
 .orient { margin-left: auto; flex-shrink: 0; }
+.proxy-choice { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 0 16px 8px; }
+.proxy-choice span { color: var(--muted); font-size: 13px; }
+.proxy-choice button { border: 1px solid var(--bg3); background: transparent; border-radius: 8px; padding: 6px 10px; }
+.proxy-choice button.on { background: var(--heading); color: var(--bg0); border-color: var(--heading); }
+.proxy-choice button:disabled { opacity: 0.45; }
 .proxy-hint { margin: 0; padding: 0 16px 12px; border-bottom: 1px solid var(--bg3); }
 .text select { min-width: 0; max-width: 180px; padding: 4px 6px; }
 .ip-line { display: flex; align-items: center; gap: 8px; color: var(--heading); font-size: 12px; }
@@ -851,7 +1306,7 @@ onUnmounted(() => {
 .queue-trigger i { width: 12px; height: 12px; border-radius: 99px; border: 2px solid currentColor; border-right-color: transparent; opacity: 0.35; }
 .queue-trigger i.on { opacity: 1; animation: queue-spin 0.8s linear infinite; }
 .queue-trigger b { position: absolute; top: -7px; right: -7px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 99px; background: #ef4444; color: white; font-size: 11px; line-height: 16px; text-align: center; }
-.queue-bubble { position: absolute; top: calc(100% + 10px); right: 0; width: 380px; max-height: 460px; display: flex; flex-direction: column; overflow: hidden; border-radius: 8px; background: #18181b; border: 1px solid #3f3f46; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45); }
+.queue-bubble { position: absolute; top: calc(100% + 10px); right: 0; width: 440px; max-height: min(70vh, 640px); display: flex; flex-direction: column; overflow: hidden; border-radius: 8px; background: #18181b; border: 1px solid #3f3f46; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45); }
 .queue-bubble::before { content: ""; position: absolute; top: -6px; right: 36px; width: 10px; height: 10px; background: #18181b; border-left: 1px solid #3f3f46; border-top: 1px solid #3f3f46; transform: rotate(45deg); }
 .queue-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 16px; border-bottom: 1px solid #3f3f46; color: #e4e4e7; font-size: 13px; }
 .queue-head .tiny { padding: 4px 8px; font-size: 12px; }
@@ -863,7 +1318,20 @@ onUnmounted(() => {
 .queue-item strong { display: flex; align-items: center; gap: 6px; min-width: 0; color: #f4f4f5; font-size: 14px; }
 .queue-item strong em { flex-shrink: 0; padding: 0 6px; border-radius: 4px; background: #27272a; color: #a1a1aa; font-size: 11px; }
 .queue-item strong em.running { background: #172554; color: #93c5fd; }
-.queue-item span { color: #a1a1aa; font-size: 12px; }
+.queue-item span { color: #a1a1aa; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-item span.failed { color: #f87171; white-space: normal; }
+.queue-actions { display: flex; flex-shrink: 0; align-items: center; gap: 4px; }
+.queue-counts { margin: 0; color: var(--muted); font-size: 13px; }
+.dialog.records { width: min(640px, 100%); max-height: min(80vh, 720px); }
+.record-list { list-style: none; margin: 0; padding: 0; overflow: auto; min-height: 0; }
+.record-list li { display: grid; grid-template-columns: 72px 40px minmax(0, 1fr); gap: 8px; align-items: start; padding: 10px 0; border-bottom: 1px solid var(--bg3); }
+.record-list time { color: var(--muted); font-size: 12px; line-height: 20px; }
+.record-list b { color: var(--heading); font-size: 13px; line-height: 20px; }
+.record-list div { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.record-list strong { color: var(--text); font-size: 13px; }
+.record-list span { color: var(--muted); font-size: 12px; white-space: normal; }
+.link-detail { border: 0; background: transparent; color: #60a5fa; padding: 4px 6px; }
+.link-detail:hover { color: #93c5fd; }
 .link-cancel { border: 0; background: transparent; color: #f87171; padding: 4px 6px; }
 .link-cancel:hover { color: #fca5a5; }
 @keyframes queue-spin { to { transform: rotate(360deg); } }
@@ -906,6 +1374,21 @@ em.waiting_login { color: var(--heading); }
 .mask { position: fixed; inset: 0; z-index: 20; background: rgba(0,0,0,0.45); display: grid; place-items: center; padding: 20px; }
 .dialog { width: min(440px, 100%); display: flex; flex-direction: column; gap: 12px; padding: 18px; border-radius: 16px; background: var(--bg1); border: 1px solid var(--bg3); }
 .dialog.nurture { width: min(560px, 100%); max-height: min(86vh, 760px); overflow: auto; }
+.dialog.insight { width: min(860px, 100%); max-height: min(86vh, 820px); overflow: hidden; }
+.hint.failed { color: #f87171; }
+.like-list { min-height: 0; max-height: min(62vh, 640px); overflow: auto; display: flex; flex-direction: column; gap: 8px; }
+.like-list .btn.more { align-self: center; margin: 8px 0 4px; }
+.like-list article { display: grid; grid-template-columns: 72px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--bg3); }
+.like-list img, .cover-fallback { width: 72px; height: 72px; object-fit: cover; border-radius: 8px; background: var(--bg2); }
+.cover-fallback { display: grid; place-items: center; color: var(--muted); }
+.like-list strong { display: flex; gap: 8px; align-items: center; }
+.like-list em { color: var(--heading); font-style: normal; font-size: 12px; }
+.like-list span, .like-list time { display: block; color: var(--muted); font-size: 12px; }
+.stats-pane { min-height: 0; display: flex; flex-direction: column; gap: 8px; }
+.range { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; }
+.range label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 12px; }
+.range input { color: var(--text); background: var(--bg0); border: 1px solid var(--bg3); border-radius: 8px; padding: 6px 8px; }
+.chart { height: 320px; }
 .seg, .counts, .checks { display: flex; gap: 8px; flex-wrap: wrap; }
 .seg button, .check { border: 1px solid var(--bg3); background: transparent; border-radius: 8px; padding: 6px 10px; }
 .seg button.on { background: var(--heading); color: var(--bg0); border-color: var(--heading); }

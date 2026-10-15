@@ -45,6 +45,8 @@ import {
   maxCharacterPrompts,
   modelToNai,
   newCharacter,
+  isV5,
+  newInsetReference,
   newPreciseReference,
   newVibeImage,
   supportsNAIPreciseReference,
@@ -56,12 +58,14 @@ import {
   type HistoryGroup,
   type HistoryItem,
   type MetadataReport,
+  type InsetReference,
   type PreciseReference,
   type SessionRecord,
   type VibeImage,
 } from "@/types/nai";
 import { dataUrlToBuffer, inspectImageBuffer } from "@/utils/imageMeta";
 import { prepareOfficialInpaintAssets } from "@/utils/inpaintMask";
+import { prepareReferenceInset } from "@/utils/referenceInset";
 
 function stripDataUrl(value: string) {
   const idx = value.indexOf(",");
@@ -119,6 +123,7 @@ export const useAppStore = defineStore("app", () => {
   const i2iNoise = ref(0);
   const vibeImages = ref<VibeImage[]>([]);
   const preciseReferences = ref<PreciseReference[]>([]);
+  const insetReference = ref<InsetReference | null>(null);
   const normalizeVibe = ref(true);
   const batchCount = ref(1);
   const positionCustom = ref(false);
@@ -750,7 +755,16 @@ export const useAppStore = defineStore("app", () => {
     status.value = "已开始新会话";
   }
 
-  function useImageAs(kind: "i2i" | "vibe" | "precise", dataUrl: string) {
+  function updateInset(patch: Partial<InsetReference>) {
+    if (!insetReference.value) return;
+    insetReference.value = { ...insetReference.value, ...patch };
+  }
+
+  function clearInset() {
+    insetReference.value = null;
+  }
+
+  function useImageAs(kind: "i2i" | "vibe" | "precise" | "inset", dataUrl: string) {
     if (!dataUrl) {
       status.value = "当前没有可参考的图片";
       return false;
@@ -761,6 +775,11 @@ export const useAppStore = defineStore("app", () => {
       return true;
     }
     if (kind === "vibe") return addVibeFromDataUrl(dataUrl);
+    if (kind === "inset") {
+      insetReference.value = newInsetReference(dataUrl, stripDataUrl(dataUrl));
+      status.value = "已加入参考插条";
+      return true;
+    }
     return addPreciseFromDataUrl(dataUrl);
   }
 
@@ -794,7 +813,7 @@ export const useAppStore = defineStore("app", () => {
     return true;
   }
 
-  async function usePathAs(kind: "i2i" | "vibe" | "precise", path: string) {
+  async function usePathAs(kind: "i2i" | "vibe" | "precise" | "inset", path: string) {
     const url = await readImageDataUrl(path);
     return useImageAs(kind, url);
   }
@@ -807,22 +826,24 @@ export const useAppStore = defineStore("app", () => {
     if (busy.value) return empty;
     const source = i2iImage.value || (inpaintMask.value && paintMode.value ? previewUrl.value : "");
     const hasMask = Boolean(inpaintMask.value) && paintMode.value;
-    if (!options?.ignoreI2i && ((hasMask && source) || i2iImage.value)) kind = "img2img";
+    const insetOn = Boolean(isV5(params.value.model) && insetReference.value?.enabled && insetReference.value.previewUrl);
+    if (!insetOn && !options?.ignoreI2i && ((hasMask && source) || i2iImage.value)) kind = "img2img";
     const hasPrompt =
       params.value.positivePrompt.trim() ||
       params.value.stylePrompt.trim() ||
       characters.value.some((c) => c.prompt.trim()) ||
       vibeImages.value.some((v) => v.enabled) ||
-      preciseReferences.value.some((p) => p.enabled);
+      preciseReferences.value.some((p) => p.enabled) ||
+      insetOn;
     if (!hasPrompt && kind !== "img2img") {
       status.value = "请输入正面提示词、角色提示词，或加入参考图";
       return empty;
     }
-    if (kind === "img2img" && !source) {
+    if (!insetOn && kind === "img2img" && !source) {
       status.value = "请先加载 Image2Image 参考图，或把当前图设为参考";
       return empty;
     }
-    if (hasMask && !source) {
+    if (!insetOn && hasMask && !source) {
       status.value = "请先加载要涂抹重绘的原图";
       return empty;
     }
@@ -858,17 +879,42 @@ export const useAppStore = defineStore("app", () => {
     const collected: HistoryItem[] = [];
     try {
       for (let i = 0; i < n; i++) {
-        status.value = n > 1 ? `正在生成 ${i + 1}/${n}…` : "正在生成…";
+        status.value = n > 1 ? `正在生成 ${i + 1}/${n}…` : insetOn ? "正在用参考插条生成…" : "正在生成…";
+        let stylePrompt = params.value.stylePrompt;
+        let positivePrompt = params.value.positivePrompt;
+        if (insetOn) {
+          const haystack = `${stylePrompt}\n${positivePrompt}`.toLowerCase();
+          if (!haystack.includes("split screen")) {
+            stylePrompt = stylePrompt.trim() ? `${stylePrompt.trim()}, split screen` : "split screen";
+          }
+        }
         const request = {
           ...params.value,
+          stylePrompt,
+          positivePrompt,
           charCaptions: characters.value,
           ...extras,
         };
+        let mode = kind;
         let imageBase64 = kind === "img2img" ? stripDataUrl(source) : "";
         let maskBase64 = hasMask ? stripDataUrl(inpaintMask.value) : undefined;
         let width = params.value.width;
         let height = params.value.height;
-        if (hasMask && source) {
+        let resultCrop: { x: number; y: number; width: number; height: number } | undefined;
+        let strength = i2iStrength.value;
+        let noise = hasMask ? 0 : i2iNoise.value;
+        if (insetOn && insetReference.value) {
+          const inset = insetReference.value;
+          const assets = await prepareReferenceInset(inset.previewUrl, inset);
+          imageBase64 = assets.imageBase64;
+          maskBase64 = assets.maskBase64;
+          width = assets.width;
+          height = assets.height;
+          resultCrop = assets.crop;
+          mode = "img2img";
+          strength = 1;
+          noise = 0;
+        } else if (hasMask && source) {
           const assets = await prepareOfficialInpaintAssets(
             source,
             inpaintMask.value,
@@ -881,15 +927,16 @@ export const useAppStore = defineStore("app", () => {
           height = assets.height;
         }
         const res =
-          kind === "img2img"
+          mode === "img2img"
             ? await generateImg2img({
                 ...request,
                 width,
                 height,
                 imageBase64,
-                strength: i2iStrength.value,
-                noise: hasMask ? 0 : i2iNoise.value,
+                strength,
+                noise,
                 maskBase64,
+                resultCrop,
               })
             : await generateTxt2img(request);
         status.value = res.message;
@@ -1194,6 +1241,9 @@ export const useAppStore = defineStore("app", () => {
     i2iNoise,
     vibeImages,
     preciseReferences,
+    insetReference,
+    updateInset,
+    clearInset,
     normalizeVibe,
     batchCount,
     historyOpen,

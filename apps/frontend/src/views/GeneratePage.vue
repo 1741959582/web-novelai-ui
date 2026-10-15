@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { NAI_MODELS, NAI_SAMPLERS, NAI_UC_PRESETS, isV4Plus, maxCharacterPrompts, supportsNAIPreciseReference, supportsNAIVibeTransfer } from "@/types/nai";
+import { NAI_MODELS, NAI_SAMPLERS, NAI_UC_PRESETS, isV4Plus, isV5, maxCharacterPrompts, supportsNAIPreciseReference, supportsNAIVibeTransfer } from "@/types/nai";
 import { useAppStore } from "@/stores/app";
 import { fetchRemoteImage } from "@/api/tauri";
 import { quoteAnlas } from "@/utils/anlas";
@@ -66,12 +66,20 @@ const orientation = computed({
 });
 
 const inpaintOn = computed(() => store.paintMode && Boolean(store.inpaintMask));
+const insetOn = computed(() => Boolean(isV5(store.params.model) && store.insetReference?.enabled && store.insetReference.previewUrl));
+const insetSize = computed(() =>
+  insetOn.value && store.insetReference
+    ? { width: store.insetReference.canvasWidth, height: store.insetReference.canvasHeight }
+    : null,
+);
 const actionKind = computed(() =>
-  inpaintOn.value ? "infill" : store.i2iImage ? "img2img" : "generate",
+  insetSize.value ? "infill" : inpaintOn.value ? "infill" : store.i2iImage ? "img2img" : "generate",
 );
 const anlas = computed(() =>
   quoteAnlas({
-    params: store.params,
+    params: insetSize.value
+      ? { ...store.params, width: insetSize.value.width, height: insetSize.value.height }
+      : store.params,
     account: store.account,
     batchCount: store.batchCount,
     action: actionKind.value,
@@ -126,7 +134,7 @@ function onSeedInput(ev: Event) {
   store.params.seedMode = "fixed";
 }
 
-function applyRefFile(file: File, kind: "i2i" | "vibe" | "precise") {
+function applyRefFile(file: File, kind: "i2i" | "vibe" | "precise" | "inset" = "i2i") {
   void fileToDataUrl(file).then((url) => store.useImageAs(kind, url));
 }
 
@@ -206,7 +214,7 @@ function hasImageDrag(ev: DragEvent) {
   return types.includes("Files") || types.includes("text/uri-list") || types.includes("text/html") || types.includes("text/plain");
 }
 
-function onPickRef(file: File, kind?: "i2i" | "vibe" | "precise") {
+function onPickRef(file: File, kind?: "i2i" | "vibe" | "precise" | "inset") {
   if (kind) {
     applyRefFile(file, kind);
     return;
@@ -214,10 +222,10 @@ function onPickRef(file: File, kind?: "i2i" | "vibe" | "precise") {
   void store.openImportFromFile(file);
 }
 
-function dropKindFromTarget(target: EventTarget | null): "i2i" | "vibe" | "precise" | undefined {
+function dropKindFromTarget(target: EventTarget | null): "i2i" | "vibe" | "precise" | "inset" | undefined {
   const el = target instanceof Element ? target.closest("[data-ref-drop]") : null;
   const kind = el?.getAttribute("data-ref-drop");
-  if (kind === "i2i" || kind === "vibe" || kind === "precise") return kind;
+  if (kind === "i2i" || kind === "vibe" || kind === "precise" || kind === "inset") return kind;
 }
 
 function refKindAtPoint(x: number, y: number) {
@@ -280,7 +288,7 @@ function waitForTauriDrop(ms = 280) {
   });
 }
 
-async function importDropped(kind: "i2i" | "vibe" | "precise" | undefined, file?: File, url?: string, localPath?: string) {
+async function importDropped(kind: "i2i" | "vibe" | "precise" | "inset" | undefined, file?: File, url?: string, localPath?: string) {
   if (importing) return;
   importing = true;
   store.status = "正在导入图片…";
