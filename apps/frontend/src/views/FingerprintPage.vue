@@ -103,11 +103,10 @@ const nurtureForm = reactive({
   mode: "browse" as "browse" | "interact" | "plaza",
   feed: "for_you" as "for_you" | "following",
   rounds: 8,
-  likes: 3,
-  reposts: 1,
-  follows: 2,
   delaySecs: 5,
   minutes: 10,
+  parallel: 4,
+  headless: false,
   handles: "",
 });
 const frameUrls = ref<Record<string, string>>({});
@@ -616,11 +615,13 @@ async function startNurture() {
       handles: nurtureForm.handles,
       feed: nurtureForm.mode === "interact" ? "following" : nurtureForm.mode === "plaza" ? "for_you" : nurtureForm.feed,
       rounds: Number(nurtureForm.rounds) || 8,
-      likes: Number(nurtureForm.likes) || 0,
-      reposts: Number(nurtureForm.reposts) || 0,
-      follows: Number(nurtureForm.follows) || 0,
+      likes: 0,
+      reposts: 0,
+      follows: 0,
       delaySecs: Number(nurtureForm.delaySecs) || 5,
       minutes: Number(nurtureForm.minutes) || 10,
+      parallel: Number(nurtureForm.parallel) || 4,
+      headless: nurtureForm.headless,
     });
     nurtureTasks.value = status.tasks || [];
     nurtureMessage.value = status.message || "";
@@ -666,6 +667,9 @@ const insightError = ref("");
 const insightBusy = ref(false);
 const insightHasMore = ref(false);
 const insightLoadingOlder = ref(false);
+const pixivAlert = ref<Record<string, number>>({});
+let pixivAlertTimer = 0;
+let pixivAlertRunning = false;
 const insightStart = ref(dayOffset(-6));
 const insightEnd = ref(dayOffset(0));
 const chartHost = ref<HTMLDivElement | null>(null);
@@ -814,6 +818,7 @@ async function loadInsightLikes(mode: "cache" | "latest" | "more" = "latest") {
     insightHasMore.value = !!result.hasMore;
     insightNote.value = result.note || "";
     insightError.value = "";
+    if (mode === "latest") pixivAlert.value = { ...pixivAlert.value, [accountId]: 0 };
     await nextTick();
     const box = insightListElement();
     if (!box || request !== insightRequest) return;
@@ -833,6 +838,35 @@ async function loadInsightLikes(mode: "cache" | "latest" | "more" = "latest") {
       insightBusy.value = false;
       insightLoadingOlder.value = false;
     }
+  }
+}
+
+function onInsightPull(event: WheelEvent) {
+  const el = event.currentTarget as HTMLElement;
+  if (insightBusy.value || el.scrollTop > 8 || event.deltaY >= 0) return;
+  void loadInsightLikes("latest");
+}
+
+async function pollPixivAlerts() {
+  if (site.value !== "pixiv" || pixivAlertRunning) return;
+  const rows = visibleAccounts.value.slice(0, 8);
+  if (!rows.length) return;
+  pixivAlertRunning = true;
+  try {
+    const next = { ...pixivAlert.value };
+    for (const row of rows) {
+      if (insightOpen.value && insightAccount.value?.account_id === row.account_id && insightBusy.value) continue;
+      try {
+        const result = await ruyiPixivLikes(row.account_id, "peek");
+        if (result.stale) continue;
+        next[row.account_id] = result.unseen || 0;
+      } catch {
+        // 这一轮没连上就保留上次的小红点
+      }
+    }
+    pixivAlert.value = next;
+  } finally {
+    pixivAlertRunning = false;
   }
 }
 
@@ -877,12 +911,11 @@ function openInsight(row: TwitterAccount) {
   insightNote.value = "";
   insightError.value = "";
   insightHasMore.value = false;
+  pixivAlert.value = { ...pixivAlert.value, [row.account_id]: 0 };
   menuId.value = "";
   void (async () => {
     await loadInsightLikes("cache");
-    if (insightAccount.value?.account_id === row.account_id && !insightLikes.value.length && !insightFollows.value.length) {
-      await loadInsightLikes("latest");
-    }
+    if (insightAccount.value?.account_id === row.account_id) await loadInsightLikes("latest");
   })();
 }
 
@@ -928,6 +961,10 @@ onMounted(async () => {
   nurtureTimer = window.setInterval(() => {
     void pollNurture();
   }, 1000);
+  void pollPixivAlerts();
+  pixivAlertTimer = window.setInterval(() => {
+    void pollPixivAlerts();
+  }, 20000);
   liveTimer = window.setInterval(() => {
     const now = Date.now();
     for (const [id, at] of liveAt) {
@@ -941,6 +978,7 @@ onUnmounted(() => {
   if (pollTimer) window.clearInterval(pollTimer);
   if (liveTimer) window.clearInterval(liveTimer);
   if (nurtureTimer) window.clearInterval(nurtureTimer);
+  if (pixivAlertTimer) window.clearInterval(pixivAlertTimer);
   insightChart?.dispose();
   for (const id of [...streamTasks.keys()]) stopStream(id);
 });
@@ -1060,7 +1098,10 @@ onUnmounted(() => {
             <em :class="row.state">{{ stateLabel(row.state, row.status) }}</em>
           </div>
           <div class="actions">
-            <button v-if="site === 'pixiv'" class="btn" type="button" @click="openInsight(row)">数据</button>
+            <button v-if="site === 'pixiv'" class="btn alert-host" type="button" @click="openInsight(row)">
+              数据
+              <i v-if="pixivAlert[row.account_id]" class="alert-dot" />
+            </button>
             <button class="btn primary" type="button" :disabled="!!busyId || (site === 'x' && nurtureLocked(row.account_id))" @click="openBrowser(row)">
               {{ site === "x" && nurtureLocked(row.account_id) ? "养号中" : (row.state === "logged_in" ? "打开" : "登录") }}
             </button>
@@ -1104,9 +1145,9 @@ onUnmounted(() => {
         <h3>{{ detailTask.label || detailTask.accountId }} 的任务详情</h3>
         <p class="hint">{{ formatRemain(detailTask) }}。{{ detailTask.message }}</p>
         <p class="queue-counts">
-          点赞 {{ eventCount(detailTask, "like") }}<template v-if="detailTask.likes"> / {{ detailTask.likes }}</template>
-          · 转发 {{ eventCount(detailTask, "repost") }}<template v-if="detailTask.reposts"> / {{ detailTask.reposts }}</template>
-          · 关注 {{ eventCount(detailTask, "follow") }}<template v-if="detailTask.follows"> / {{ detailTask.follows }}</template>
+          点赞 {{ eventCount(detailTask, "like") }}
+          · 转发 {{ eventCount(detailTask, "repost") }}
+          · 关注 {{ eventCount(detailTask, "follow") }}
           · 共 {{ (detailTask.events || []).length }} 条
         </p>
         <p v-if="!(detailTask.events || []).length" class="empty">还没有记录。点赞、转发或关注之后会出现在这里。</p>
@@ -1135,7 +1176,7 @@ onUnmounted(() => {
           <button type="button" :class="{ on: insightTab === 'stats' }" @click="showInsightTab('stats')">每日数据</button>
         </div>
         <p v-if="insightError" class="hint failed">{{ insightError }}</p>
-        <div v-if="insightTab === 'likes'" ref="likeListEl" class="like-list" @scroll="onInsightScroll">
+        <div v-if="insightTab === 'likes'" ref="likeListEl" class="like-list" @scroll="onInsightScroll" @wheel="onInsightPull">
           <p v-if="insightNote" class="hint">{{ insightNote }}</p>
           <p v-if="insightBusy && !insightLikes.length" class="empty">正在读取最新点赞</p>
           <p v-else-if="!insightLikes.length" class="empty">还没有点赞记录。点刷新读取最新通知。</p>
@@ -1153,7 +1194,7 @@ onUnmounted(() => {
             {{ insightLoadingOlder ? "正在读取更早的记录…" : "更早的记录" }}
           </button>
         </div>
-        <div v-else-if="insightTab === 'follows'" ref="followListEl" class="like-list" @scroll="onInsightScroll">
+        <div v-else-if="insightTab === 'follows'" ref="followListEl" class="like-list" @scroll="onInsightScroll" @wheel="onInsightPull">
           <div class="range">
             <label>开始<input v-model="insightStart" type="date" /></label>
             <label>结束<input v-model="insightEnd" type="date" /></label>
@@ -1242,16 +1283,20 @@ onUnmounted(() => {
           养号时间（分钟）
           <input v-model.number="nurtureForm.minutes" type="number" min="1" max="180" />
         </label>
+        <label>
+          同时养号
+          <input v-model.number="nurtureForm.parallel" type="number" min="1" max="8" />
+        </label>
+        <label class="check">
+          <input v-model="nurtureForm.headless" type="checkbox" />
+          <span>无头浏览器</span>
+        </label>
         <label v-if="nurtureForm.mode === 'interact'">
           每个目标滚动轮数
           <input v-model.number="nurtureForm.rounds" type="number" min="1" max="40" />
         </label>
-        <p v-if="nurtureForm.mode === 'plaza'" class="hint">打开 X 首页的「为你推荐」，按下面的次数随机点赞、转发和关注。次数用完后继续浏览，直到养号时间结束。</p>
-        <div v-if="nurtureForm.mode === 'interact' || nurtureForm.mode === 'plaza'" class="counts">
-          <label>点赞<input v-model.number="nurtureForm.likes" type="number" min="0" max="15" /></label>
-          <label>转发<input v-model.number="nurtureForm.reposts" type="number" min="0" max="8" /></label>
-          <label>关注<input v-model.number="nurtureForm.follows" type="number" min="0" max="15" /></label>
-        </div>
+        <p v-if="nurtureForm.mode === 'interact'" class="hint">在设定的分钟里随机点赞、转发和关注，不用填次数。动作之间会按间隔停一下。</p>
+        <p v-if="nurtureForm.mode === 'plaza'" class="hint">打开 X 首页的「为你推荐」，在设定的分钟里随机点赞、转发和关注，不用填次数。</p>
         <label v-if="nurtureForm.mode === 'interact'">
           用户或帖子
           <textarea v-model="nurtureForm.handles" rows="4" placeholder="每行一个用户名，或一条 x.com 帖子链接。留空就处理正在关注的时间线。" />
@@ -1260,7 +1305,7 @@ onUnmounted(() => {
           动作间隔（秒）
           <input v-model.number="nurtureForm.delaySecs" type="number" min="3" max="20" />
         </label>
-        <p class="hint">开始后会进入任务队列，按顺序一个一个养。养号中的浏览器不能再打开，完成或取消后才能打开。可以在队列里单独取消，也可以全部取消。</p>
+        <p class="hint">开始后会进入任务队列。同时养号默认 4 个，最多 8 个，多出来的账号排队等空位。勾选无头浏览器后不弹出窗口，在后台养。养号中的浏览器不能再打开，完成或取消后才能打开。</p>
         <div class="dialog-actions">
           <button class="btn" type="button" @click="nurtureOpen = false">关闭</button>
           <button class="btn primary" type="submit">加入队列</button>
@@ -1364,6 +1409,8 @@ em.logged_in { color: var(--ok); }
 em.banned { color: var(--danger); }
 em.waiting_login { color: var(--heading); }
 .actions { position: relative; }
+.alert-host { position: relative; }
+.alert-dot { position: absolute; top: -3px; right: -3px; width: 8px; height: 8px; border-radius: 50%; background: #ef4444; box-shadow: 0 0 0 2px var(--bg1); }
 .actions .btn.primary { flex: 1; }
 .menu { position: absolute; right: 0; bottom: 42px; z-index: 3; min-width: 140px; padding: 6px; border-radius: 10px; background: var(--bg0); border: 1px solid var(--bg3); display: flex; flex-direction: column; }
 .menu button { text-align: left; background: transparent; border: 0; padding: 8px 10px; border-radius: 8px; }

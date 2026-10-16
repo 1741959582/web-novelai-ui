@@ -7,7 +7,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use zip::write::SimpleFileOptions;
@@ -64,6 +64,48 @@ pub fn stop_if_spawned() {
         }
         let _ = child.kill();
         let _ = child.wait();
+    }
+    kill_bundled_firefox();
+}
+
+fn kill_bundled_firefox() {
+    #[cfg(windows)]
+    {
+        let marker = firefox_exe(&electron_root())
+            .to_string_lossy()
+            .replace('/', "\\")
+            .to_ascii_lowercase();
+        if marker.trim().is_empty() {
+            return;
+        }
+        use std::os::windows::process::CommandExt;
+        let mut cmd = Command::new("powershell");
+        cmd.args([
+            "-NoProfile",
+            "-Command",
+            "[Console]::OutputEncoding=[Text.Encoding]::UTF8; Get-CimInstance Win32_Process -Filter \"Name='firefox.exe'\" | ForEach-Object { $_.ProcessId.ToString() + \"`t\" + $_.CommandLine }",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .creation_flags(0x0800_0000);
+        let Ok(output) = cmd.output() else {
+            return;
+        };
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let Some((pid, command)) = line.trim().split_once('\t') else {
+                continue;
+            };
+            let folded = command.replace('/', "\\").to_ascii_lowercase();
+            if !folded.contains(&marker) {
+                continue;
+            }
+            let _ = Command::new("taskkill")
+                .args(["/F", "/T", "/PID", pid])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .creation_flags(0x0800_0000)
+                .output();
+        }
     }
 }
 
@@ -213,7 +255,7 @@ fn ensure_started() -> Result<RuyiStatus, String> {
         .env("RUYIPAGE_ELECTRON_ROOT", &root)
         .env("RUYI_OPEN_PORT", port.to_string())
         .env("RUYIPAGE_SERVER_PORT", port.to_string())
-        .env("RUYI_MAX_LIVE_BROWSERS", "4")
+        .env("RUYI_MAX_LIVE_BROWSERS", "8")
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err));
     if firefox.is_file() {
@@ -1334,9 +1376,15 @@ pub async fn ruyi_twitter_create(label: String, cookie: String, proxy_name: Stri
     create_typed_account(TWITTER_TYPE, label, cookie, proxy_name).await
 }
 
-async fn open_twitter_account(account_id: &str) -> Result<Value, String> {
+async fn open_twitter_account(account_id: &str, headless: bool) -> Result<Value, String> {
     ensure_script().await?;
-    open_typed_account(account_id, TWITTER_TYPE).await
+    let proxy = apply_account_proxy(account_id).await?;
+    let opened = post_json(
+        "/run/browser/open",
+        json!({ "account_id": account_id, "type": TWITTER_TYPE, "headless": headless }),
+    )
+    .await?;
+    Ok(json!({ "opened": opened, "proxy": proxy }))
 }
 
 #[tauri::command]
@@ -1391,7 +1439,7 @@ pub async fn ruyi_twitter_open(account_id: String) -> Result<Value, String> {
     if nurture_blocks_open(&account_id) {
         return Err("这个账号正在养号，完成或取消后才能打开".into());
     }
-    open_twitter_account(&account_id).await
+    open_twitter_account(&account_id, false).await
 }
 
 const PIXIV_TYPE: &str = "pixiv";
@@ -1456,6 +1504,7 @@ pub async fn ruyi_pixiv_likes(account_id: String, mode: Option<String>) -> Resul
     let mode = match mode.unwrap_or_else(|| "latest".to_string()).as_str() {
         "cache" => "cache",
         "more" => "more",
+        "peek" => "peek",
         _ => "latest",
     };
     let value = post_json(
@@ -1964,6 +2013,7 @@ struct NurtureTask {
     follows: u32,
     delay_secs: u32,
     minutes: u32,
+    headless: bool,
     status: String,
     deadline: f64,
     message: String,
@@ -1977,7 +2027,8 @@ struct NurtureState {
 }
 
 static NURTURE_STOP: AtomicBool = AtomicBool::new(false);
-static NURTURE_WORKER: AtomicBool = AtomicBool::new(false);
+static NURTURE_WORKERS: AtomicU32 = AtomicU32::new(0);
+static NURTURE_PARALLEL: AtomicU32 = AtomicU32::new(4);
 static NURTURE_SEQ: AtomicU64 = AtomicU64::new(1);
 static NURTURE: Mutex<NurtureState> = Mutex::new(NurtureState {
     tasks: Vec::new(),
@@ -2040,7 +2091,7 @@ fn nurture_snapshot() -> NurtureStatus {
     }
 }
 
-fn nurture_log(line: impl Into<String>) {
+fn nurture_log(task_id: u64, line: impl Into<String>) {
     let Ok(mut state) = NURTURE.lock() else {
         return;
     };
@@ -2050,7 +2101,7 @@ fn nurture_log(line: impl Into<String>) {
         return;
     }
     state.message = line.to_string();
-    if let Some(task) = state.tasks.iter_mut().find(|task| task.status == "running") {
+    if let Some(task) = state.tasks.iter_mut().find(|task| task.id == task_id) {
         task.message = line.to_string();
     }
     state.log.push(line.to_string());
@@ -2060,7 +2111,7 @@ fn nurture_log(line: impl Into<String>) {
     }
 }
 
-fn nurture_record_event(payload: &str) {
+fn nurture_record_event(task_id: u64, payload: &str) {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
         return;
     };
@@ -2087,7 +2138,7 @@ fn nurture_record_event(payload: &str) {
     let Ok(mut state) = NURTURE.lock() else {
         return;
     };
-    if let Some(task) = state.tasks.iter_mut().find(|task| task.status == "running") {
+    if let Some(task) = state.tasks.iter_mut().find(|task| task.id == task_id) {
         task.events.push(event);
         if task.events.len() > 500 {
             let extra = task.events.len() - 500;
@@ -2120,12 +2171,24 @@ fn nurture_mark(id: u64, status: &str, message: impl Into<String>) {
     }
 }
 
-fn nurture_stop_path() -> PathBuf {
-    electron_root().join("data").join("nurture.stop")
+fn nurture_key(account_id: &str) -> String {
+    let key: String = account_id
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
+        .collect();
+    if key.is_empty() { "account".into() } else { key }
 }
 
-fn nurture_config_path() -> PathBuf {
-    electron_root().join("data").join("nurture-job.json")
+fn nurture_stop_path_for(account_id: &str) -> PathBuf {
+    electron_root().join("data").join(format!("nurture-{}.stop", nurture_key(account_id)))
+}
+
+fn nurture_config_path_for(account_id: &str) -> PathBuf {
+    electron_root().join("data").join(format!("nurture-job-{}.json", nurture_key(account_id)))
+}
+
+fn nurture_log_path_for(account_id: &str) -> PathBuf {
+    electron_root().join("data").join(format!("nurture-{}.log", nurture_key(account_id)))
 }
 
 fn account_label(account_id: &str) -> String {
@@ -2219,12 +2282,8 @@ fn clean_handles(raw: &str) -> Result<Vec<String>, String> {
     Ok(handles)
 }
 
-fn nurture_log_path() -> PathBuf {
-    electron_root().join("data").join("nurture.log")
-}
-
-fn read_new_nurture_log(offset: &mut u64) {
-    let Ok(file) = fs::read(&nurture_log_path()) else {
+fn read_new_nurture_log(task_id: u64, path: &Path, offset: &mut u64) {
+    let Ok(file) = fs::read(path) else {
         return;
     };
     if file.len() as u64 <= *offset {
@@ -2239,10 +2298,10 @@ fn read_new_nurture_log(offset: &mut u64) {
             continue;
         }
         if let Some(payload) = line.strip_prefix("@@") {
-            nurture_record_event(payload);
+            nurture_record_event(task_id, payload);
             continue;
         }
-        nurture_log(line);
+        nurture_log(task_id, line);
     }
 }
 
@@ -2265,27 +2324,48 @@ fn nurture_has_queued() -> bool {
         .is_some_and(|state| state.tasks.iter().any(|task| task.status == "queued"))
 }
 
-fn ensure_nurture_worker() {
-    if NURTURE_WORKER
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-        .is_ok()
-    {
-        tokio::spawn(nurture_worker());
+fn nurture_parallel() -> u32 {
+    NURTURE_PARALLEL.load(Ordering::Relaxed).clamp(1, 8)
+}
+
+fn ensure_nurture_workers() {
+    let want = nurture_parallel();
+    loop {
+        let current = NURTURE_WORKERS.load(Ordering::Relaxed);
+        if current >= want || !nurture_has_queued() || NURTURE_STOP.load(Ordering::Relaxed) {
+            return;
+        }
+        if NURTURE_WORKERS
+            .compare_exchange(current, current + 1, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            tokio::spawn(nurture_worker_once());
+        }
     }
 }
 
 async fn run_nurture_task(task: NurtureTask) {
+    let stop_path = nurture_stop_path_for(&task.account_id);
+    let config_path = nurture_config_path_for(&task.account_id);
+    let log_path = nurture_log_path_for(&task.account_id);
     if nurture_task_status(task.id) == "cancelled" || NURTURE_STOP.load(Ordering::Relaxed) {
         return;
     }
-    if !NURTURE_STOP.load(Ordering::Relaxed) {
-        let _ = fs::remove_file(nurture_stop_path());
-    }
-    nurture_log(format!("正在打开 {}，这次养号 {} 分钟", task.label, task.minutes));
-    if let Err(error) = open_twitter_account(&task.account_id).await {
+    let _ = fs::remove_file(&config_path);
+    let _ = fs::remove_file(&stop_path);
+    nurture_log(
+        task.id,
+        format!(
+            "正在{}打开 {}，这次养号 {} 分钟",
+            if task.headless { "用无头浏览器" } else { "" },
+            task.label,
+            task.minutes
+        ),
+    );
+    if let Err(error) = open_twitter_account(&task.account_id, task.headless).await {
         let message = format!("{} 打开失败：{error}", task.label);
         nurture_mark(task.id, "failed", message.clone());
-        nurture_log(message);
+        nurture_log(task.id, message);
         return;
     }
     let mut port = None;
@@ -2303,14 +2383,14 @@ async fn run_nurture_task(task: NurtureTask) {
         if nurture_task_status(task.id) == "running" && !NURTURE_STOP.load(Ordering::Relaxed) {
             let message = format!("{} 的指纹浏览器没有暴露调试端口", task.label);
             nurture_mark(task.id, "failed", message.clone());
-            nurture_log(message);
+            nurture_log(task.id, message);
         }
         return;
     };
     if chrono::Utc::now().timestamp() as f64 >= task.deadline || nurture_task_status(task.id) != "running" {
         if nurture_task_status(task.id) == "running" {
             nurture_mark(task.id, "done", "养号时间到了");
-            nurture_log(format!("{} 养号时间到了", task.label));
+            nurture_log(task.id, format!("{} 养号时间到了", task.label));
         }
         return;
     }
@@ -2327,17 +2407,17 @@ async fn run_nurture_task(task: NurtureTask) {
         "minutes": task.minutes,
         "deadline": task.deadline,
         "handles": task.handles,
-        "stop": nurture_stop_path(),
+        "stop": stop_path,
     });
-    if let Err(error) = fs::write(nurture_config_path(), cfg.to_string()) {
+    if let Err(error) = fs::write(&config_path, cfg.to_string()) {
         let message = format!("写养号配置失败：{error}");
         nurture_mark(task.id, "failed", message.clone());
-        nurture_log(message);
+        nurture_log(task.id, message);
         return;
     }
-    let _ = fs::write(nurture_log_path(), b"");
+    let _ = fs::write(&log_path, b"");
     nurture_mark(task.id, "running", format!("养号中，共 {} 分钟", task.minutes));
-    nurture_log(format!("{} 已开始养号", task.label));
+    nurture_log(task.id, format!("{} 已开始养号", task.label));
     let mut offset = 0u64;
     let mut quiet = 0u32;
     while chrono::Utc::now().timestamp() as f64 <= task.deadline {
@@ -2345,39 +2425,38 @@ async fn run_nurture_task(task: NurtureTask) {
             break;
         }
         let before = offset;
-        read_new_nurture_log(&mut offset);
+        read_new_nurture_log(task.id, &log_path, &mut offset);
         if offset == before {
             quiet += 1;
             if quiet == 25 {
-                nurture_log("窗口还没有开始滚动。请确认这个账号的指纹浏览器已经打开。");
+                nurture_log(task.id, format!("{} 的窗口还没有开始滚动。请确认这个账号的指纹浏览器已经打开。", task.label));
             }
         } else {
             quiet = 0;
         }
         tokio::time::sleep(Duration::from_millis(800)).await;
     }
-    read_new_nurture_log(&mut offset);
+    read_new_nurture_log(task.id, &log_path, &mut offset);
     let status = nurture_task_status(task.id);
     if status == "running" && chrono::Utc::now().timestamp() as f64 >= task.deadline {
-        let _ = fs::write(nurture_stop_path(), b"stop");
+        let _ = fs::write(&stop_path, b"stop");
         nurture_mark(task.id, "done", "养号时间到了");
-        nurture_log(format!("{} 养号时间到了", task.label));
+        nurture_log(task.id, format!("{} 养号时间到了", task.label));
     }
 }
 
-async fn nurture_worker() {
-    loop {
-        if NURTURE_STOP.load(Ordering::Relaxed) {
-            break;
-        }
-        let Some(task) = claim_next_nurture() else {
-            break;
-        };
+async fn nurture_worker_once() {
+    let task = if NURTURE_STOP.load(Ordering::Relaxed) {
+        None
+    } else {
+        claim_next_nurture()
+    };
+    if let Some(task) = task {
         run_nurture_task(task).await;
     }
-    NURTURE_WORKER.store(false, Ordering::Release);
+    NURTURE_WORKERS.fetch_sub(1, Ordering::Release);
     if nurture_has_queued() && !NURTURE_STOP.load(Ordering::Relaxed) {
-        ensure_nurture_worker();
+        ensure_nurture_workers();
     }
 }
 
@@ -2393,6 +2472,8 @@ pub async fn ruyi_nurture_start(
     follows: u32,
     delay_secs: u32,
     minutes: u32,
+    parallel: u32,
+    headless: bool,
 ) -> Result<NurtureStatus, String> {
     let mode = match mode.as_str() {
         "browse" | "interact" | "plaza" => mode,
@@ -2413,15 +2494,14 @@ pub async fn ruyi_nurture_start(
         return Err("一次最多加入 20 个养号任务".into());
     }
     let handles = clean_handles(&handles)?;
-    if matches!(mode.as_str(), "interact" | "plaza") && likes == 0 && reposts == 0 && follows == 0 {
-        return Err("至少要有点赞、转发或关注中的一项".into());
-    }
     let rounds = rounds.clamp(1, 40);
     let likes = likes.clamp(0, 15);
     let reposts = reposts.clamp(0, 8);
     let follows = follows.clamp(0, 15);
     let delay_secs = delay_secs.clamp(3, 20);
     let minutes = minutes.clamp(1, 180);
+    let parallel = parallel.clamp(1, 8);
+    NURTURE_PARALLEL.store(parallel, Ordering::Relaxed);
     let feed = if feed == "following" { "following" } else { "for_you" };
     let mut blocked = Vec::new();
     for account_id in &ids {
@@ -2453,6 +2533,7 @@ pub async fn ruyi_nurture_start(
                 follows,
                 delay_secs,
                 minutes,
+                headless,
                 status: "queued".into(),
                 deadline: 0.0,
                 message: format!("等待中，计划 {minutes} 分钟"),
@@ -2479,35 +2560,36 @@ pub async fn ruyi_nurture_start(
             state.log.drain(0..extra);
         }
     }
-    ensure_nurture_worker();
+    ensure_nurture_workers();
     Ok(nurture_snapshot())
 }
 
-fn cancel_nurture_task(task_id: u64) -> bool {
+fn cancel_nurture_task(task_id: u64) -> Option<String> {
     let Ok(mut state) = NURTURE.lock() else {
-        return false;
+        return None;
     };
     let Some(task) = state.tasks.iter_mut().find(|task| task.id == task_id) else {
-        return false;
+        return None;
     };
     if !nurture_is_active(&task.status) {
-        return false;
+        return None;
     }
     let running = task.status == "running";
+    let account_id = task.account_id.clone();
     let label = task.label.clone();
     task.status = "cancelled".into();
     task.message = "已取消".into();
     state.message = format!("{label} 已取消");
     let message = state.message.clone();
     state.log.push(message);
-    running
+    if running { Some(account_id) } else { None }
 }
 
 #[tauri::command]
 pub async fn ruyi_nurture_cancel(task_id: u64) -> Result<NurtureStatus, String> {
-    if cancel_nurture_task(task_id) {
+    if let Some(account_id) = cancel_nurture_task(task_id) {
         let _ = fs::create_dir_all(electron_root().join("data"));
-        let _ = fs::write(nurture_stop_path(), b"stop");
+        let _ = fs::write(nurture_stop_path_for(&account_id), b"stop");
     }
     Ok(nurture_snapshot())
 }
@@ -2516,11 +2598,13 @@ pub async fn ruyi_nurture_cancel(task_id: u64) -> Result<NurtureStatus, String> 
 pub async fn ruyi_nurture_stop() -> Result<NurtureStatus, String> {
     NURTURE_STOP.store(true, Ordering::Relaxed);
     let _ = fs::create_dir_all(electron_root().join("data"));
-    let _ = fs::write(nurture_stop_path(), b"stop");
     if let Ok(mut state) = NURTURE.lock() {
         let mut count = 0u32;
         for task in &mut state.tasks {
             if nurture_is_active(&task.status) {
+                if task.status == "running" {
+                    let _ = fs::write(nurture_stop_path_for(&task.account_id), b"stop");
+                }
                 task.status = "cancelled".into();
                 task.message = "已取消".into();
                 count += 1;

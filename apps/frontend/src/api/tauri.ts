@@ -914,8 +914,8 @@ export interface PixivDay {
   followers: number;
 }
 
-export function ruyiPixivLikes(accountId: string, mode: "cache" | "latest" | "more" = "latest") {
-  return invoke<{ ok: boolean; items: PixivLike[]; follows: PixivLike[]; note?: string; hasMore?: boolean }>("ruyi_pixiv_likes", { accountId, mode });
+export function ruyiPixivLikes(accountId: string, mode: "cache" | "latest" | "more" | "peek" = "latest") {
+  return invoke<{ ok: boolean; items: PixivLike[]; follows: PixivLike[]; note?: string; hasMore?: boolean; unseen?: number; stale?: boolean }>("ruyi_pixiv_likes", { accountId, mode });
 }
 
 export function ruyiPixivStats(accountId: string, start: string, end: string) {
@@ -1025,6 +1025,8 @@ export function ruyiNurtureStart(payload: {
   follows: number;
   delaySecs: number;
   minutes: number;
+  parallel: number;
+  headless: boolean;
 }) {
   return invoke<NurtureStatus>("ruyi_nurture_start", payload);
 }
