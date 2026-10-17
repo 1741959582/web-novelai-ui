@@ -2,6 +2,13 @@
 
 从新到旧。安装包在 [最新发行版](https://github.com/caiweida/web-novelai-ui/releases/latest)。已安装的程序启动后会读到新版本，顶栏可以点「立即更新」。
 
+## [1.0.6](https://github.com/caiweida/web-novelai-ui/releases/tag/v1.0.6)
+
+- 修复读取 Pixiv 点赞、关注和每日数据时出现 `SyntaxError: return not in function`。
+- Pixiv 有新通知时，「数据」按钮上会出现小红点。列表在顶部时向下滚动可以刷新。
+- 养号可以同时跑多个账号，也可以勾选无头浏览器。点赞、转发和关注按设定的分钟随机进行。
+- 脚本包更新到 0.1.41。设置里检查脚本包即可热更新。
+
 ## [1.0.5](https://github.com/caiweida/web-novelai-ui/releases/tag/v1.0.5)
 
 - V5 可以加参考插条，拖动和缩放角色图，底色可选白或黑。

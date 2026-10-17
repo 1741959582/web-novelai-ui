@@ -161,19 +161,50 @@ def ensure_home(page, feed: str, stop_path: str) -> bool:
     return pause(2, stop_path)
 
 
+def within_time(cfg: dict) -> bool:
+    if stopped(cfg["stop"]):
+        return False
+    deadline = float(cfg.get("deadline") or 0)
+    return deadline <= 0 or time.time() < deadline
+
+
+def roam(page, cfg: dict) -> None:
+    stop_path = cfg["stop"]
+    delay = float(cfg["delay"])
+    while within_time(cfg):
+        roll = random.random()
+        if roll < 0.45 and like_once(page):
+            say("已点赞")
+        elif roll < 0.7 and repost_once(page):
+            say("已转发")
+        elif roll < 0.82 and follow_once(page):
+            say("已关注")
+        scroll_once(page)
+        if not pause(delay * random.uniform(0.85, 1.35), stop_path):
+            return
+    say("这一轮结束")
+
+
 def browse(page, cfg: dict) -> None:
     stop_path = cfg["stop"]
     delay = float(cfg["delay"])
     if not ensure_home(page, cfg.get("feed") or "for_you", stop_path):
         return
+    deadline = float(cfg.get("deadline") or 0)
     rounds = int(cfg["rounds"])
-    say(f"开始浏览，共 {rounds} 轮")
-    for index in range(rounds):
+    say("开始浏览" if deadline > 0 else f"开始浏览，共 {rounds} 轮")
+    index = 0
+    while True:
         if stopped(stop_path):
             say("已停止")
             return
+        if deadline > 0 and time.time() >= deadline:
+            break
+        if deadline <= 0 and index >= rounds:
+            break
         scroll_once(page)
-        say(f"浏览 {index + 1}/{rounds}")
+        index += 1
+        say(f"浏览 {index}" if deadline > 0 else f"浏览 {index}/{rounds}")
         if index % 3 == 2 and open_visible_post(page):
             say("点开一条帖子看一会儿")
             if not pause(delay * 1.6, stop_path):
@@ -220,6 +251,32 @@ def interact(page, cfg: dict) -> None:
     reposts = int(cfg["reposts"])
     follows = int(cfg["follows"])
     handles = [item for item in cfg.get("handles") or [] if item]
+    if likes <= 0 and reposts <= 0 and follows <= 0:
+        say("开始互动，在设定的时间里随机点赞、转发和关注")
+        for raw in handles:
+            if not within_time(cfg):
+                break
+            target = str(raw).strip()
+            if "/status/" in target:
+                say(f"打开帖子 {target}")
+                page.get(target)
+            else:
+                name = target[1:] if target.startswith("@") else target
+                say(f"打开 @{name}")
+                page.get(f"https://x.com/{name}")
+            if not pause(3, stop_path):
+                return
+            if "/status/" not in target and follow_once(page):
+                say("已关注")
+                if not pause(delay, stop_path):
+                    return
+        if not within_time(cfg):
+            say("互动结束")
+            return
+        if not ensure_home(page, cfg.get("feed") or "following", stop_path):
+            return
+        roam(page, cfg)
+        return
     say(f"开始互动，点赞 {likes}，转发 {reposts}，关注 {follows}")
     if not handles:
         if follows:
@@ -274,8 +331,12 @@ def main() -> int:
         elif cfg.get("mode") == "plaza":
             page.get("https://x.com/explore")
             if pause(3, cfg["stop"]):
-                act_on_timeline(page, cfg, int(cfg["likes"]), int(cfg["reposts"]))
-                say("广场这一轮结束")
+                if int(cfg["likes"]) <= 0 and int(cfg["reposts"]) <= 0:
+                    say("开始逛广场")
+                    roam(page, cfg)
+                else:
+                    act_on_timeline(page, cfg, int(cfg["likes"]), int(cfg["reposts"]))
+                    say("广场这一轮结束")
         else:
             browse(page, cfg)
         return 0
