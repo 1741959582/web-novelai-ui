@@ -2,6 +2,12 @@
 
 从新到旧。安装包在 [最新发行版](https://github.com/caiweida/web-novelai-ui/releases/latest)。已安装的程序启动后会读到新版本，顶栏可以点「立即更新」。
 
+## [1.0.7](https://github.com/caiweida/web-novelai-ui/releases/tag/v1.0.7)
+
+- 养号勾选无头浏览器后，指纹浏览器不再弹出窗口。
+- 广场养号打开首页后马上开始滚动，不再停在加载页面。
+- 脚本包更新到 0.1.42。设置里检查脚本包即可热更新。
+
 ## [1.0.6](https://github.com/caiweida/web-novelai-ui/releases/tag/v1.0.6)
 
 - 修复读取 Pixiv 点赞、关注和每日数据时出现 `SyntaxError: return not in function`。
