@@ -521,23 +521,35 @@ pub async fn translate_tag_into_library(name: String) -> Result<TagLookup, Strin
     if has_han(&source) && !source.chars().any(|ch| ch.is_ascii_alphabetic()) {
         return Err("已经是中文".into());
     }
-    let translated = match google_to_zh(&source).await {
-        Ok(text) if usable_zh(&source, &text) => text,
-        _ => {
-            let pair = if source.chars().any(|ch| ('\u{ac00}'..='\u{d7af}').contains(&ch)) {
-                "ko|zh-CN"
-            } else if source.chars().any(|ch| {
-                ('\u{3040}'..='\u{30ff}').contains(&ch) || ('\u{ff66}'..='\u{ff9d}').contains(&ch)
-            }) {
-                "ja|zh-CN"
-            } else {
-                "en|zh-CN"
-            };
-            crate::nai::translate_text(source.clone(), Some(pair.into()))
-                .await
-                .map_err(|_| "没有译出中文".to_string())?
+    let mut phrases = vec![source.clone()];
+    let spaced = source.replace('_', " ");
+    if spaced != source {
+        phrases.push(spaced);
+    }
+    let mut translated = String::new();
+    for phrase in &phrases {
+        if let Ok(text) = google_to_zh(phrase).await {
+            if usable_zh(&source, &text) {
+                translated = text;
+                break;
+            }
         }
-    };
+    }
+    if translated.is_empty() {
+        let pair = if source.chars().any(|ch| ('\u{ac00}'..='\u{d7af}').contains(&ch)) {
+            "ko|zh-CN"
+        } else if source.chars().any(|ch| {
+            ('\u{3040}'..='\u{30ff}').contains(&ch) || ('\u{ff66}'..='\u{ff9d}').contains(&ch)
+        }) {
+            "ja|zh-CN"
+        } else {
+            "en|zh-CN"
+        };
+        let query = phrases.last().cloned().unwrap_or_else(|| source.clone());
+        translated = crate::nai::translate_text(query, Some(pair.into()))
+            .await
+            .map_err(|_| "没有译出中文".to_string())?;
+    }
     if !usable_zh(&source, &translated) {
         return Err("没有译出中文".into());
     }

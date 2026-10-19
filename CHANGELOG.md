@@ -2,6 +2,13 @@
 
 从新到旧。安装包在 [最新发行版](https://github.com/caiweida/web-novelai-ui/releases/latest)。已安装的程序启动后会读到新版本，顶栏可以点「立即更新」。
 
+## [1.0.8](https://github.com/caiweida/web-novelai-ui/releases/tag/v1.0.8)
+
+- 带下划线的标签会拆开再翻译，一次点很多「译」也不会挤在一起失败。
+- 无头养号的实时预览能出画面。从别的页面切回来，正在养的号会重新连上 LIVE。
+- 四个号正在养时，仍可以打开没在养的推特或 Pixiv。
+- 脚本包更新到 0.1.43。设置里检查脚本包即可热更新。
+
 ## [1.0.7](https://github.com/caiweida/web-novelai-ui/releases/tag/v1.0.7)
 
 - 养号勾选无头浏览器后，指纹浏览器不再弹出窗口。

@@ -66,7 +66,19 @@ function remember(next: Record<string, string>, name: string, value: string) {
   if (query && query !== name.trim()) next[tagKey(query)] = text;
 }
 
+let translateQueue: Promise<void> = Promise.resolve();
+
 async function translateOne(name: string) {
+  const source = queryOf(name);
+  const key = tagKey(source);
+  if (!source || translating.value.has(key)) return;
+  translateQueue = translateQueue.then(async () => {
+    await translateOneNow(name);
+    await new Promise((resolve) => window.setTimeout(resolve, 350));
+  });
+}
+
+async function translateOneNow(name: string) {
   const source = queryOf(name);
   const key = tagKey(source);
   if (!source || translating.value.has(key)) return;

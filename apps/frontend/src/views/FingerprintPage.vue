@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onActivated, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import * as echarts from "echarts";
 import {
   ruyiAccounts,
@@ -36,6 +36,8 @@ import {
   type FingerprintAccount,
   type RuyiStatus,
 } from "@/api/tauri";
+
+defineOptions({ name: "FingerprintPage" });
 
 type RunState = "logged_in" | "waiting_login" | "logged_out" | "banned";
 
@@ -971,6 +973,18 @@ onMounted(async () => {
       if (now - at > 1500) markLive(id, false);
     }
   }, 500);
+});
+
+function resumeStreams() {
+  for (const row of accounts.value) {
+    if (!row.browser_open) continue;
+    const at = liveAt.get(row.account_id) || 0;
+    if (!streamTasks.has(row.account_id) || Date.now() - at > 2000) void startStream(row.account_id);
+  }
+}
+
+onActivated(() => {
+  resumeStreams();
 });
 
 onUnmounted(() => {

@@ -17,7 +17,11 @@ onMounted(() => {
 
 <template>
   <AppShell>
-    <RouterView />
+    <RouterView v-slot="{ Component }">
+      <KeepAlive include="FingerprintPage">
+        <component :is="Component" />
+      </KeepAlive>
+    </RouterView>
   </AppShell>
   <OnboardingWizard v-if="store.ready && !store.settings.hasOnboarded" />
   <SessionRestore v-else-if="store.showSessionDialog" />
