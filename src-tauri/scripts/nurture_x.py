@@ -37,6 +37,36 @@ def run_js(page, script: str):
     return page.run_js(script, as_expr=True, timeout=20)
 
 
+def click_for_you(page) -> None:
+    run_js(
+        page,
+        """
+        (() => {
+          const tabs = Array.from(document.querySelectorAll('[role="tab"], a[role="tab"]'));
+          const tab = tabs.find((el) => /For you|For You|为你推荐/.test(el.innerText || el.textContent || ''));
+          if (!tab) return false;
+          tab.click();
+          return true;
+        })()
+        """,
+    )
+
+
+def wait_for_posts(page, stop_path: str) -> bool:
+    for _ in range(12):
+        if stopped(stop_path):
+            return False
+        count = run_js(page, "(() => document.querySelectorAll('article').length)()")
+        try:
+            if int(count or 0) > 0:
+                return True
+        except (TypeError, ValueError):
+            pass
+        if not pause(1.2, stop_path):
+            return False
+    return True
+
+
 def click_feed(page, feed: str) -> None:
     if feed != "following":
         return
@@ -59,10 +89,16 @@ def scroll_once(page) -> None:
         page,
         """
         (() => {
-          const step = 520 + Math.floor(Math.random() * 480);
+          const step = 620 + Math.floor(Math.random() * 520);
+          const nodes = [document.scrollingElement, document.documentElement, document.body];
+          const main = document.querySelector('[data-testid="primaryColumn"]');
+          if (main) nodes.push(main);
+          document.querySelectorAll('main, [role="region"]').forEach((el) => nodes.push(el));
+          for (const el of nodes) {
+            if (!el || el.scrollHeight <= el.clientHeight + 40) continue;
+            el.scrollTop += step;
+          }
           window.scrollBy(0, step);
-          const col = document.scrollingElement || document.documentElement;
-          if (col) col.scrollTop += step;
           return true;
         })()
         """,
@@ -329,14 +365,17 @@ def main() -> int:
         if cfg.get("mode") == "interact":
             interact(page, cfg)
         elif cfg.get("mode") == "plaza":
-            page.get("https://x.com/explore")
-            if pause(3, cfg["stop"]):
-                if int(cfg["likes"]) <= 0 and int(cfg["reposts"]) <= 0:
-                    say("开始逛广场")
-                    roam(page, cfg)
-                else:
-                    act_on_timeline(page, cfg, int(cfg["likes"]), int(cfg["reposts"]))
-                    say("广场这一轮结束")
+            say("打开首页的为你推荐")
+            page.get("https://x.com/home")
+            if not pause(3, cfg["stop"]):
+                return 0
+            click_for_you(page)
+            if not pause(2, cfg["stop"]):
+                return 0
+            if not wait_for_posts(page, cfg["stop"]):
+                return 0
+            say("开始逛广场")
+            roam(page, cfg)
         else:
             browse(page, cfg)
         return 0
@@ -348,12 +387,6 @@ def main() -> int:
         else:
             say(f"养号中断：{text}")
         return 1
-    finally:
-        if page is not None:
-            try:
-                page.quit(timeout=3, force=False)
-            except Exception:
-                pass
 
 
 if __name__ == "__main__":
