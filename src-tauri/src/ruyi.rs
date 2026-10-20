@@ -2,13 +2,14 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
@@ -2026,6 +2027,7 @@ struct NurtureState {
     message: String,
 }
 
+static NURTURE_CHILDREN: LazyLock<Mutex<HashMap<String, Child>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static NURTURE_STOP: AtomicBool = AtomicBool::new(false);
 static NURTURE_WORKERS: AtomicU32 = AtomicU32::new(0);
 static NURTURE_PARALLEL: AtomicU32 = AtomicU32::new(4);
@@ -2344,6 +2346,118 @@ fn ensure_nurture_workers() {
     }
 }
 
+fn find_python() -> Result<(&'static str, Vec<&'static str>), String> {
+    for (program, prefix) in [("py", vec!["-3"]), ("python", Vec::new())] {
+        let mut cmd = Command::new(program);
+        cmd.args(&prefix)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000);
+        }
+        if cmd.status().map(|status| status.success()).unwrap_or(false) {
+            return Ok((program, prefix));
+        }
+    }
+    Err("没有找到 Python。养号需要本机 Python 才能操作已经打开的指纹浏览器。".into())
+}
+
+fn ruyipage_python_root() -> Result<PathBuf, String> {
+    let bundled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../ruyipage");
+    if bundled.join("ruyipage").join("__init__.py").is_file() {
+        return Ok(bundled);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            for candidate in [dir.join("ruyipage"), dir.join("resources").join("ruyipage")] {
+                if candidate.join("ruyipage").join("__init__.py").is_file() {
+                    return Ok(candidate);
+                }
+            }
+        }
+    }
+    Err("没有找到 ruyipage，暂时不能操作指纹浏览器。".into())
+}
+
+fn nurture_script_path() -> Result<PathBuf, String> {
+    let bundled = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts")
+        .join("nurture_x.py");
+    if bundled.is_file() {
+        return Ok(bundled);
+    }
+    let dest = electron_root().join("data").join("nurture_x.py");
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    fs::write(&dest, include_str!("../scripts/nurture_x.py")).map_err(|error| error.to_string())?;
+    Ok(dest)
+}
+
+fn stop_nurture_child(account_id: &str) {
+    let Some(mut child) = NURTURE_CHILDREN.lock().ok().and_then(|mut slot| slot.remove(account_id)) else {
+        return;
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn close_firefox_for_account(account_id: &str) {
+    let needle = account_id.to_ascii_lowercase();
+    if needle.is_empty() {
+        return;
+    }
+    let command = format!(
+        "Get-CimInstance Win32_Process -Filter \"Name='firefox.exe'\" | Where-Object {{ $_.CommandLine -and $_.CommandLine.ToLower().Contains('{needle}') }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}"
+    );
+    let mut cmd = Command::new("powershell");
+    cmd.args(["-NoProfile", "-Command", &command])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let _ = cmd.status();
+}
+
+fn start_nurture_python(account_id: &str, cfg_path: &Path, log_path: &Path) -> Result<(), String> {
+    stop_nurture_child(account_id);
+    let (program, prefix) = find_python()?;
+    let script = nurture_script_path()?;
+    let root = ruyipage_python_root()?;
+    let log = File::options()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .map_err(|error| format!("打开养号日志失败：{error}"))?;
+    let log_err = log.try_clone().map_err(|error| format!("打开养号日志失败：{error}"))?;
+    let mut cmd = Command::new(program);
+    cmd.args(&prefix)
+        .arg("-u")
+        .arg(&script)
+        .arg(cfg_path)
+        .env("RUYIPAGE_ROOT", &root)
+        .env("PYTHONIOENCODING", "utf-8")
+        .env("PYTHONUNBUFFERED", "1")
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_err));
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let child = cmd.spawn().map_err(|error| format!("启动养号脚本失败：{error}"))?;
+    if let Ok(mut slot) = NURTURE_CHILDREN.lock() {
+        slot.insert(account_id.to_string(), child);
+    }
+    Ok(())
+}
+
 async fn run_nurture_task(task: NurtureTask) {
     let stop_path = nurture_stop_path_for(&task.account_id);
     let config_path = nurture_config_path_for(&task.account_id);
@@ -2362,6 +2476,10 @@ async fn run_nurture_task(task: NurtureTask) {
             task.minutes
         ),
     );
+    if task.headless {
+        close_firefox_for_account(&task.account_id);
+        tokio::time::sleep(Duration::from_millis(800)).await;
+    }
     if let Err(error) = open_twitter_account(&task.account_id, task.headless).await {
         let message = format!("{} 打开失败：{error}", task.label);
         nurture_mark(task.id, "failed", message.clone());
@@ -2416,6 +2534,11 @@ async fn run_nurture_task(task: NurtureTask) {
         return;
     }
     let _ = fs::write(&log_path, b"");
+    if let Err(error) = start_nurture_python(&task.account_id, &config_path, &log_path) {
+        nurture_mark(task.id, "failed", error.clone());
+        nurture_log(task.id, error);
+        return;
+    }
     nurture_mark(task.id, "running", format!("养号中，共 {} 分钟", task.minutes));
     nurture_log(task.id, format!("{} 已开始养号", task.label));
     let mut offset = 0u64;
@@ -2434,6 +2557,17 @@ async fn run_nurture_task(task: NurtureTask) {
         } else {
             quiet = 0;
         }
+        let exited = NURTURE_CHILDREN.lock().ok().and_then(|mut slot| {
+            slot.get_mut(&task.account_id)
+                .and_then(|child| child.try_wait().ok().flatten().map(|status| status.code()))
+        });
+        if let Some(code) = exited {
+            if let Ok(mut slot) = NURTURE_CHILDREN.lock() {
+                slot.remove(&task.account_id);
+            }
+            nurture_log(task.id, format!("{} 的养号脚本已结束（退出码 {}）", task.label, code.unwrap_or(-1)));
+            break;
+        }
         tokio::time::sleep(Duration::from_millis(800)).await;
     }
     read_new_nurture_log(task.id, &log_path, &mut offset);
@@ -2443,6 +2577,7 @@ async fn run_nurture_task(task: NurtureTask) {
         nurture_mark(task.id, "done", "养号时间到了");
         nurture_log(task.id, format!("{} 养号时间到了", task.label));
     }
+    stop_nurture_child(&task.account_id);
 }
 
 async fn nurture_worker_once() {
@@ -2590,6 +2725,7 @@ pub async fn ruyi_nurture_cancel(task_id: u64) -> Result<NurtureStatus, String> 
     if let Some(account_id) = cancel_nurture_task(task_id) {
         let _ = fs::create_dir_all(electron_root().join("data"));
         let _ = fs::write(nurture_stop_path_for(&account_id), b"stop");
+        stop_nurture_child(&account_id);
     }
     Ok(nurture_snapshot())
 }
@@ -2604,6 +2740,7 @@ pub async fn ruyi_nurture_stop() -> Result<NurtureStatus, String> {
             if nurture_is_active(&task.status) {
                 if task.status == "running" {
                     let _ = fs::write(nurture_stop_path_for(&task.account_id), b"stop");
+                    stop_nurture_child(&task.account_id);
                 }
                 task.status = "cancelled".into();
                 task.message = "已取消".into();

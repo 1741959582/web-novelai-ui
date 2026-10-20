@@ -6,13 +6,13 @@
 
 **[GitHub 最新发行版](https://github.com/caiweida/web-novelai-ui/releases/latest)**
 
-以下直链对应 **[v1.0.8](https://github.com/caiweida/web-novelai-ui/releases/tag/v1.0.8)**；后续版本请使用上面的「最新发行版」。
+以下直链对应 **[v1.0.9](https://github.com/caiweida/web-novelai-ui/releases/tag/v1.0.9)**；后续版本请使用上面的「最新发行版」。
 
 | 平台 | 选择安装包 | 使用说明 |
 | --- | --- | --- |
-| Windows x64 · 安装版 | [Setup.exe](https://github.com/caiweida/web-novelai-ui/releases/download/v1.0.8/NAI-Studio-Web-UI-Setup-1.0.8.exe) | 长期使用建议选这个；安装向导、开始菜单快捷方式 |
-| Windows x64 · 便携版 | [便携版.zip](https://github.com/caiweida/web-novelai-ui/releases/download/v1.0.8/NAI-Studio-Web-UI-1.0.8-portable.zip) | 解压后双击 `web-novelai-ui.exe`；更新时下载新包替换整个文件夹 |
-| 脚本包 | [ruyipage-server.exe](https://github.com/caiweida/web-novelai-ui/releases/download/v1.0.8/ruyipage-server.exe) | 指纹浏览器脚本。设置里可检查热更新；本机没有时直接从这里下载到 `electron` |
+| Windows x64 · 安装版 | [Setup.exe](https://github.com/caiweida/web-novelai-ui/releases/download/v1.0.9/NAI-Studio-Web-UI-Setup-1.0.9.exe) | 长期使用建议选这个；安装向导、开始菜单快捷方式 |
+| Windows x64 · 便携版 | [便携版.zip](https://github.com/caiweida/web-novelai-ui/releases/download/v1.0.9/NAI-Studio-Web-UI-1.0.9-portable.zip) | 解压后双击 `web-novelai-ui.exe`；更新时下载新包替换整个文件夹 |
+| 脚本包 | [ruyipage-server.exe](https://github.com/caiweida/web-novelai-ui/releases/download/v1.0.9/ruyipage-server.exe) | 指纹浏览器脚本。设置里可检查热更新；本机没有时直接从这里下载到 `electron` |
 
 需要 Windows 10 及以上。系统没有 WebView2 时，安装版会提示安装。第一次打开按向导填写 NovelAI Token。设置和生成的图片保存在本机，不在安装包旁边。启动后会读取 GitHub Release，有新版本时顶栏可以一键下载安装包。
 

@@ -2,6 +2,12 @@
 
 从新到旧。安装包在 [最新发行版](https://github.com/caiweida/web-novelai-ui/releases/latest)。已安装的程序启动后会读到新版本，顶栏可以点「立即更新」。
 
+## [1.0.9](https://github.com/caiweida/web-novelai-ui/releases/tag/v1.0.9)
+
+- 养号会真正启动操作脚本。广场打开首页「为你推荐」后开始滚动，并随机点赞、转发和关注。
+- 勾选无头浏览器时，先关掉这个账号已经弹出的窗口，再按无头方式重新打开。
+- 脚本包是 0.1.41，里面同时有无头启动和 Pixiv 通知修复。设置里检查脚本包即可热更新。
+
 ## [1.0.8](https://github.com/caiweida/web-novelai-ui/releases/tag/v1.0.8)
 
 - 带下划线的标签会拆开再翻译，一次点很多「译」也不会挤在一起失败。
