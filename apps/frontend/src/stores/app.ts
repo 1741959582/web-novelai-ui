@@ -95,6 +95,7 @@ export const useAppStore = defineStore("app", () => {
     reapiToken: "",
     localClTaggerEnabled: false,
     localClTaggerThreshold: 0.55,
+    stealthMode: false,
   });
   const account = ref<AccountSummary>({
     hasToken: false,

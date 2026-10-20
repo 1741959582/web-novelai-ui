@@ -107,6 +107,7 @@ export interface AppSettings {
   reapiToken: string;
   localClTaggerEnabled: boolean;
   localClTaggerThreshold: number;
+  stealthMode: boolean;
 }
 
 export interface OpusGenerationUsage {
@@ -372,6 +373,7 @@ export const TABS = [
   { id: "tagmarket", path: "/tagmarket", label: "标签超市" },
   { id: "video", path: "/video", label: "视频" },
   { id: "tavern", path: "/tavern", label: "酒馆" },
+  { id: "deepseek", path: "/deepseek", label: "DeepSeek" },
   { id: "records", path: "/records", label: "记录" },
   { id: "settings", path: "/settings", label: "设置" },
 ] as const;

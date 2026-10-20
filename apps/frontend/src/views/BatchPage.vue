@@ -18,6 +18,7 @@ const openId = ref("");
 const nameInput = ref<HTMLInputElement | null>(null);
 const added = ref(0);
 const picked = ref<string[]>([]);
+const shown = ref<Record<string, boolean>>({});
 const findText = ref("");
 const replaceText = ref("");
 const charTab = ref<Record<string, "prompt" | "uc">>({});
@@ -210,7 +211,7 @@ async function start() {
 
     <div v-if="store.running || app.busy" class="live">
       <div class="live-img">
-        <img v-if="livePreview" :src="livePreview" alt="" />
+        <img v-if="livePreview && !app.settings.stealthMode" :src="livePreview" alt="" />
         <div v-else class="wait">正在生成 {{ store.done.length + 1 }}/{{ store.jobs.length }}…</div>
       </div>
       <div class="live-meta">
@@ -339,7 +340,8 @@ async function start() {
             @change="togglePick(job.id)"
           />
           <button class="job-main" type="button" @click="toggle(job)">
-            <img v-if="job.previewUrl" :src="job.previewUrl" alt="" />
+            <img v-if="job.previewUrl && (!app.settings.stealthMode || shown[job.id])" :src="job.previewUrl" alt="" />
+            <span v-else-if="job.previewUrl && app.settings.stealthMode" class="ph show" @click.stop="shown[job.id] = true">显示</span>
             <span v-else class="ph">{{ i + 1 }}</span>
             <div class="job-text">
               <strong>{{ label(job) }}</strong>
@@ -680,6 +682,7 @@ label { display: grid; gap: 6px; font-size: 12px; color: var(--muted); }
   background: var(--bg0);
 }
 .ph { display: grid; place-items: center; color: var(--muted); font-weight: 700; }
+.ph.show { cursor: pointer; font-size: 12px; font-weight: 600; }
 .job-text { min-width: 0; display: grid; gap: 2px; }
 .job-text small { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .job-text .err { color: var(--danger); }

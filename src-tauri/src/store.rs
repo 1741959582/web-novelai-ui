@@ -30,6 +30,9 @@ pub struct AppSettings {
     pub local_cl_tagger_enabled: bool,
     #[serde(default = "default_cl_threshold")]
     pub local_cl_tagger_threshold: f64,
+    /// 摸鱼：进页不展示图，生成结果收起，点一下才显示。
+    #[serde(default)]
+    pub stealth_mode: bool,
 }
 
 fn default_true() -> bool {
@@ -75,6 +78,7 @@ impl Default for AppSettings {
             reapi_token: String::new(),
             local_cl_tagger_enabled: false,
             local_cl_tagger_threshold: 0.55,
+            stealth_mode: false,
         }
     }
 }

@@ -1,7 +1,9 @@
 <script setup lang="ts">
+import { ref } from "vue";
 import { useAppStore } from "@/stores/app";
 
 const store = useAppStore();
+const revealed = ref<Record<string, boolean>>({});
 
 const samples = [
   { id: "a", title: "Forest path", src: "/starter/a.png", prompt: "1girl, walking a forest path with a large white wolf, flowers, sunlight, cinematic lighting" },
@@ -17,6 +19,14 @@ function usePrompt(prompt: string) {
   const first = store.characters[0];
   if (first) store.updateCharacter(first.id, { prompt });
   store.status = "已复制示例提示词";
+}
+
+function onTile(id: string, prompt: string) {
+  if (store.settings.stealthMode && !revealed.value[id]) {
+    revealed.value = { ...revealed.value, [id]: true };
+    return;
+  }
+  usePrompt(prompt);
 }
 </script>
 
@@ -37,15 +47,17 @@ function usePrompt(prompt: string) {
       <span class="dia d1" />
       <span class="dia d2" />
     </div>
-    <div class="masonry">
+    <div class="masonry" :class="{ stealth: store.settings.stealthMode }">
       <button
         v-for="s in samples"
         :key="s.id"
         class="tile"
+        :class="{ hidden: store.settings.stealthMode && !revealed[s.id] }"
         type="button"
-        @click="usePrompt(s.prompt)"
+        @click="onTile(s.id, s.prompt)"
       >
-        <img :src="s.src" :alt="s.title" />
+        <img v-if="!store.settings.stealthMode || revealed[s.id]" :src="s.src" :alt="s.title" />
+        <span v-else>{{ s.title }} · 点击显示</span>
       </button>
     </div>
   </div>
@@ -114,6 +126,19 @@ function usePrompt(prompt: string) {
   display: block;
   width: 100%;
   height: auto;
+}
+.masonry.stealth {
+  columns: 1;
+  max-width: 320px;
+  margin: 0 auto;
+}
+.tile.hidden {
+  height: 44px;
+  display: grid;
+  place-items: center;
+  color: rgba(255, 255, 255, 0.72);
+  background: #1b1e38;
+  font-size: 13px;
 }
 @media (max-width: 900px) {
   .masonry { columns: 2; }

@@ -178,9 +178,13 @@ export function tavernExportFile(fileName: string, base64Data: string) {
   return invoke<string | null>("tavern_export_file", { fileName, base64Data });
 }
 
+export type LlmContent =
+  | string
+  | Array<{ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }>;
+
 export interface LlmMessage {
   role: "system" | "user" | "assistant";
-  content: string;
+  content: LlmContent;
 }
 
 export interface LlmRequest {

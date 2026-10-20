@@ -3,12 +3,14 @@ import { onMounted, onUnmounted, ref } from "vue";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { censorDownload, censorOpenDir, censorStatus, danbooruStatus, downloadDanbooru, openOutputDir, pickOutputDir, ruyiFirefoxDownload, ruyiFirefoxStatus, ruyiScriptCheck, ruyiScriptDownload, ruyiScriptStatus, type CensorEngineInfo, type FirefoxBrowserStatus, type ScriptPackageStatus } from "@/api/tauri";
 import { useAppStore } from "@/stores/app";
+import { useDeepseekStore } from "@/stores/deepseekChat";
 import ClTaggerPanel from "@/components/ClTaggerPanel.vue";
 import NaiIcon from "@/components/NaiIcon.vue";
 
-type Tab = "api" | "storage" | "tags" | "tagger" | "censor" | "script" | "firefox" | "perf" | "about";
+type Tab = "api" | "storage" | "tags" | "tagger" | "censor" | "script" | "firefox" | "perf" | "stealth" | "deepseek" | "about";
 
 const store = useAppStore();
+const deepseek = useDeepseekStore();
 const tab = ref<Tab>("api");
 const tokenDraft = ref("");
 const reapiDraft = ref("");
@@ -257,6 +259,14 @@ async function save() {
         <NaiIcon name="sparkle" :size="16" />
         <span>性能</span>
       </button>
+      <button type="button" :class="{ on: tab === 'stealth' }" @click="tab = 'stealth'">
+        <NaiIcon name="sparkle" :size="16" />
+        <span>摸鱼模式</span>
+      </button>
+      <button type="button" :class="{ on: tab === 'deepseek' }" @click="tab = 'deepseek'; void deepseek.load()">
+        <NaiIcon name="sparkle" :size="16" />
+        <span>DeepSeek</span>
+      </button>
       <button type="button" :class="{ on: tab === 'about' }" @click="tab = 'about'">
         <NaiIcon name="globe" :size="16" />
         <span>关于与更新</span>
@@ -405,6 +415,21 @@ async function save() {
         </div>
       </div>
 
+      <div v-else-if="tab === 'stealth'" class="card">
+        <h2>摸鱼模式</h2>
+        <label class="check">
+          <input v-model="store.settings.stealthMode" type="checkbox" @change="store.saveSettings()" />
+          打开后进生图页不显示图片
+        </label>
+        <p class="hint">示例图收成「点击显示」。生成过程和大图浏览也先收起，点一下才看到图。历史和批量队列里的缩略图同样要点一下才出现。</p>
+      </div>
+
+      <div v-else-if="tab === 'deepseek'" class="card">
+        <h2>后续关键词</h2>
+        <p class="hint">历史里点「后续」时，会把那张图和下面这段词一起交给 DeepSeek。每次会在这段词上稍作增改，按画面写可以接着画的后续。</p>
+        <textarea v-model="deepseek.followKeyword" rows="8" placeholder="例如：1girl, same character, continue the scene" />
+      </div>
+
       <div v-else-if="tab === 'perf'" class="card">
         <h2>性能</h2>
         <label class="check">
@@ -490,6 +515,7 @@ async function save() {
   display: grid;
   gap: 10px;
 }
+.card textarea { width: 100%; min-height: 140px; padding: 8px; }
 .check { display: flex; gap: 8px; align-items: center; margin: 8px 0; }
 .actions { margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap; }
 .model {

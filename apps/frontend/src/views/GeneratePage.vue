@@ -35,8 +35,15 @@ const autoComplete = ref(loadAutoComplete());
 watch(
   () => store.previewUrl,
   (next, prev) => {
-    if (next && next !== prev) previewCollapsed.value = false;
+    if (next && next !== prev) previewCollapsed.value = store.settings.stealthMode;
   },
+);
+watch(
+  () => store.settings.stealthMode,
+  (on) => {
+    if (on && !store.positionEditorOpen) previewCollapsed.value = true;
+  },
+  { immediate: true },
 );
 const promptValue = computed({
   get: () => (promptTab.value === "prompt" ? store.params.positivePrompt : store.params.negativePrompt),
@@ -765,8 +772,8 @@ function resetAi() {
           <span class="knob" aria-hidden="true"><i /></span>
         </button>
       </div>
-      <div v-if="store.busy || store.streamReplaying" class="stream-stage" :class="{ live: store.genPreview }">
-        <img v-if="store.genPreview" :src="store.genPreview" alt="" />
+      <div v-if="store.busy || store.streamReplaying" class="stream-stage" :class="{ live: store.genPreview && !store.settings.stealthMode }">
+        <img v-if="store.genPreview && !store.settings.stealthMode" :src="store.genPreview" alt="" />
         <div v-else class="stream-wait">
           <i class="spin" />
           <strong>{{ store.genPhase === "waiting" ? "正在连接 NovelAI…" : store.genPhase === "saving" ? "正在保存…" : "Generating…" }}</strong>
@@ -777,7 +784,7 @@ function resetAi() {
           <div class="bar"><i :style="{ width: `${Math.max(3, Math.round(displayProgress * 100))}%` }" /></div>
         </div>
       </div>
-      <div v-else-if="previewCollapsed && (store.previewUrl || store.i2iImage)" class="preview-stage collapsed">
+      <div v-else-if="previewCollapsed && !store.positionEditorOpen && (store.previewUrl || store.i2iImage)" class="preview-stage collapsed">
         <button class="preview-open" type="button" @click="previewCollapsed = false">显示图片</button>
       </div>
       <div v-else-if="store.previewUrl || store.i2iImage || store.positionEditorOpen" class="preview-stage">

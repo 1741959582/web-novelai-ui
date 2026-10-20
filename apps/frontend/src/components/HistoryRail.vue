@@ -2,6 +2,7 @@
 import { computed, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useAppStore } from "@/stores/app";
+import { useDeepseekStore } from "@/stores/deepseekChat";
 import { useApngStore, type ApngTab } from "@/stores/apng";
 import { useBatchStore } from "@/stores/batch";
 import { readImageDataUrl, type SavedImage } from "@/api/tauri";
@@ -9,10 +10,12 @@ import NaiIcon from "@/components/NaiIcon.vue";
 import type { HistoryItem } from "@/types/nai";
 
 const store = useAppStore();
+const deepseek = useDeepseekStore();
 const apng = useApngStore();
 const batch = useBatchStore();
 const router = useRouter();
 const thumbs = ref<Record<string, string>>({});
+const revealed = ref<Record<string, boolean>>({});
 const newGroupName = ref("");
 const renameName = ref("");
 const renaming = ref(false);
@@ -57,11 +60,17 @@ async function loadThumbs() {
 }
 
 watch(
-  () => [store.historyOpen, items.value.map((h) => `${h.id}:${h.groupId || ""}:${h.path}`).join("|")] as const,
+  () => [store.historyOpen, store.settings.stealthMode, items.value.map((h) => `${h.id}:${h.groupId || ""}:${h.path}`).join("|")] as const,
   () => {
     const ids = new Set(items.value.map((item) => item.id));
     picked.value = picked.value.filter((id) => ids.has(id));
-    if (store.historyOpen) void loadThumbs();
+    if (!store.historyOpen) return;
+    if (store.settings.stealthMode) {
+      thumbs.value = {};
+      revealed.value = {};
+      return;
+    }
+    void loadThumbs();
   },
   { immediate: true },
 );
@@ -152,11 +161,32 @@ function selectVisible() {
   pickAnchor = picked.value[0] || "";
 }
 
+async function revealThumb(item: HistoryItem) {
+  revealed.value = { ...revealed.value, [item.id]: true };
+  await dataUrlFor(item);
+}
+
 async function dataUrlFor(item: HistoryItem) {
   if (thumbs.value[item.id]) return thumbs.value[item.id];
   const url = await readImageDataUrl(item.path);
   thumbs.value = { ...thumbs.value, [item.id]: url };
   return url;
+}
+
+async function sendFollow(item: HistoryItem) {
+  if (busyId.value === item.id) return;
+  busyId.value = item.id;
+  store.status = "正在把这张图交给 DeepSeek";
+  try {
+    const url = await dataUrlFor(item);
+    await router.push("/deepseek");
+    await deepseek.continueFromImage(url);
+    store.status = deepseek.error || "已按这张图写后续";
+  } catch (error) {
+    store.status = error instanceof Error ? error.message : String(error);
+  } finally {
+    busyId.value = "";
+  }
 }
 
 async function addApng(item: HistoryItem) {
@@ -353,8 +383,9 @@ async function deleteItem(item: HistoryItem) {
       </p>
       <div v-for="item in items" :key="item.id" class="item" :class="{ busy: busyId === item.id, picked: picked.includes(item.id) }">
         <div class="thumb-wrap">
-          <button class="thumb" type="button" title="预览；双击载入参数" @click="store.showHistory(item)" @dblclick="store.applyHistory(item)">
-            <img v-if="thumbs[item.id]" :src="thumbs[item.id]" alt="" />
+          <button class="thumb" type="button" title="预览；双击载入参数" @click="store.settings.stealthMode && !revealed[item.id] ? revealThumb(item) : store.showHistory(item)" @dblclick="store.applyHistory(item)">
+            <img v-if="thumbs[item.id] && (!store.settings.stealthMode || revealed[item.id])" :src="thumbs[item.id]" alt="" />
+            <span v-else-if="store.settings.stealthMode" class="thumb-hold">显示</span>
           </button>
           <button
             type="button"
@@ -386,6 +417,7 @@ async function deleteItem(item: HistoryItem) {
             </option>
           </select>
           <div class="acts">
+            <button class="import" type="button" :disabled="busyId === item.id" @click.stop="sendFollow(item)">后续</button>
             <button class="import" type="button" @click.stop="store.importFromHistory(item)">导入元数据</button>
             <button class="icon" type="button" title="添加到 APNG" @click.stop="addApng(item)">
               <NaiIcon name="layers" :size="12" />
@@ -543,6 +575,16 @@ header { display: flex; justify-content: space-between; align-items: center; mar
   background: transparent;
   width: 48px;
   height: 64px;
+}
+.thumb-hold {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 64px;
+  border-radius: 6px;
+  background: var(--bg0);
+  color: var(--muted);
+  font-size: 11px;
 }
 .tick {
   position: absolute;

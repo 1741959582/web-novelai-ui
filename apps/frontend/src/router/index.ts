@@ -17,6 +17,7 @@ export default createRouter({
     { path: "/tagmarket", name: "tagmarket", component: () => import("@/views/TagMarketPage.vue"), meta: { title: "标签超市" } },
     { path: "/video", name: "video", component: () => import("@/views/VideoPage.vue"), meta: { title: "视频" } },
     { path: "/tavern", name: "tavern", component: () => import("@/views/TavernPage.vue"), meta: { title: "酒馆 AI 生图" } },
+    { path: "/deepseek", name: "deepseek", component: () => import("@/views/DeepSeekPage.vue"), meta: { title: "DeepSeek" } },
     { path: "/records", name: "records", component: () => import("@/views/RecordsPage.vue") },
     { path: "/settings", name: "settings", component: () => import("@/views/SettingsPage.vue") },
   ],
