@@ -1,5 +1,6 @@
+use std::error::Error;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use serde_json::Value;
@@ -175,19 +176,62 @@ fn mime_for(ext: &str) -> String {
     .into()
 }
 
+fn error_text(error: &impl Error) -> String {
+    let mut parts = vec![error.to_string()];
+    let mut source = error.source();
+    for _ in 0..4 {
+        let Some(item) = source else { break };
+        parts.push(item.to_string());
+        source = item.source();
+    }
+    parts.join(" / ")
+}
+
+async fn pull_video(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, String> {
+    let response = client.get(url).send().await.map_err(|error| error_text(&error))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("HTTP {status}"));
+    }
+    let bytes = response.bytes().await.map_err(|error| error_text(&error))?;
+    if bytes.is_empty() {
+        return Err("文件是空的".into());
+    }
+    Ok(bytes.to_vec())
+}
+
+/// 系统代理（假 IP）连 BunnyCDN 会在 TLS 握手断开。代理失败后再直连一次。
+async fn download_video(url: &str) -> Result<Vec<u8>, String> {
+    let mut errors = Vec::new();
+    if let Ok(client) = http_client_timeout(600) {
+        match pull_video(&client, url).await {
+            Ok(bytes) => return Ok(bytes),
+            Err(error) => errors.push(format!("走代理失败：{error}")),
+        }
+    }
+    let direct = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(20))
+        .timeout(Duration::from_secs(600))
+        .no_proxy()
+        .user_agent("Mozilla/5.0")
+        .build()
+        .map_err(|error| error.to_string())?;
+    match pull_video(&direct, url).await {
+        Ok(bytes) => Ok(bytes),
+        Err(error) => {
+            errors.push(format!("直连失败：{error}"));
+            Err(format!("下载视频失败。{}", errors.join("；")))
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn reapi_save_video(url: String) -> Result<String, String> {
     let url = url.trim();
     if !url.starts_with("https://") && !url.starts_with("http://") {
         return Err("视频地址无效".into());
     }
-    let client = http_client_timeout(600)?;
-    let response = client.get(url).send().await.map_err(|error| error.to_string())?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(format!("下载视频失败：HTTP {status}"));
-    }
-    let bytes = response.bytes().await.map_err(|error| error.to_string())?;
+    let bytes = download_video(url).await?;
     let dir = default_output_dir().join("videos");
     std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map(|item| item.as_secs()).unwrap_or(0);

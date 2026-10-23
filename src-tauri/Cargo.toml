@@ -1,6 +1,6 @@
 [package]
 name = "web-novelai-ui"
-version = "1.0.9"
+version = "1.0.10"
 description = "Langbai NovelAI Studio Tauri host"
 authors = ["langbai"]
 edition = "2021"

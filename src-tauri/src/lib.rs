@@ -31,6 +31,7 @@ pub fn run() {
             store::settings_get,
             store::settings_save,
             store::history_list,
+            store::history_reorder,
             store::history_import_folder,
             store::history_delete,
             store::history_groups_list,

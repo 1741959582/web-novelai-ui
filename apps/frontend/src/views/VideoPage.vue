@@ -1,7 +1,19 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { pickImages, reapiPublishImage, reapiSaveVideo, reapiVideoSubmit, reapiVideoTask, type VideoTask } from "@/api/tauri";
+import { tavernRead, tavernWrite } from "@/api/tavern";
 import { useAppStore } from "@/stores/app";
+
+type VideoRecord = {
+  id: string;
+  prompt: string;
+  model: string;
+  url: string;
+  lastFrame: string;
+  path: string;
+  createdAt: number;
+};
 
 type Mode = "text" | "refs" | "frames";
 type Slot = { preview: string; source: string; name: string };
@@ -34,10 +46,14 @@ const urlDraft = ref("");
 const busy = ref(false);
 const note = ref("");
 const videoUrl = ref("");
+const remoteUrl = ref("");
 const lastFrameUrl = ref("");
 const savedPath = ref("");
+const history = ref<VideoRecord[]>([]);
+const activeId = ref("");
 let pollTimer = 0;
 let generation = 0;
+let writing = Promise.resolve();
 
 const modelInfo = computed(() => MODELS.find((item) => item.id === model.value) || MODELS[0]);
 const resolutions = computed(() => modelInfo.value.resolutions);
@@ -139,6 +155,7 @@ async function generate() {
   window.clearTimeout(pollTimer);
   busy.value = true;
   videoUrl.value = "";
+  remoteUrl.value = "";
   lastFrameUrl.value = "";
   savedPath.value = "";
   try {
@@ -165,8 +182,10 @@ async function watchTask(id: string, token: number) {
     if (token !== generation) return;
     const task = unwrap(await reapiVideoTask(id));
     if (task.status === "completed") {
-      videoUrl.value = task.output?.video_urls?.[0] || "";
+      remoteUrl.value = task.output?.video_urls?.[0] || "";
+      videoUrl.value = remoteUrl.value;
       lastFrameUrl.value = task.output?.last_frame_url || "";
+      if (remoteUrl.value) remember(remoteUrl.value, lastFrameUrl.value);
       note.value = videoUrl.value ? "视频已生成，链接大约保留 30 天" : "任务完成，但没有视频地址";
       return;
     }
@@ -181,11 +200,73 @@ async function watchTask(id: string, token: number) {
   throw new Error("等太久了，可以稍后用任务号再查");
 }
 
+function playbackSrc(item: VideoRecord) {
+  if (item.path) {
+    try {
+      return convertFileSrc(item.path);
+    } catch {
+      /* 本地文件打不开时退回线上地址 */
+    }
+  }
+  return item.url;
+}
+
+function persistHistory() {
+  const snapshot = history.value.slice(0, 40);
+  writing = writing.then(() => tavernWrite("video-history", snapshot)).catch(() => undefined);
+}
+
+function remember(url: string, lastFrame: string) {
+  const existing = history.value.find((item) => item.url === url);
+  if (existing) {
+    existing.lastFrame = lastFrame || existing.lastFrame;
+    existing.prompt = existing.prompt || prompt.value.trim();
+    activeId.value = existing.id;
+    persistHistory();
+    return;
+  }
+  const item: VideoRecord = {
+    id: `${Date.now()}`,
+    prompt: prompt.value.trim(),
+    model: modelInfo.value.label,
+    url,
+    lastFrame,
+    path: "",
+    createdAt: Date.now(),
+  };
+  history.value = [item, ...history.value].slice(0, 40);
+  activeId.value = item.id;
+  persistHistory();
+}
+
+function openRecord(item: VideoRecord) {
+  activeId.value = item.id;
+  remoteUrl.value = item.url;
+  videoUrl.value = playbackSrc(item);
+  lastFrameUrl.value = item.lastFrame;
+  savedPath.value = item.path;
+  if (item.prompt) prompt.value = item.prompt;
+}
+
+function formatTime(stamp: number) {
+  const date = new Date(stamp);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getMonth() + 1}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 async function saveVideo() {
-  if (!videoUrl.value) return;
+  const url = remoteUrl.value || (videoUrl.value.startsWith("http") ? videoUrl.value : "");
+  if (!url) return;
   busy.value = true;
   try {
-    savedPath.value = await reapiSaveVideo(videoUrl.value);
+    savedPath.value = await reapiSaveVideo(url);
+    const item = history.value.find((entry) => entry.id === activeId.value) || history.value.find((entry) => entry.url === url);
+    if (item) {
+      item.path = savedPath.value;
+      activeId.value = item.id;
+      persistHistory();
+    }
+    videoUrl.value = playbackSrc({ id: "", prompt: "", model: "", url, lastFrame: "", path: savedPath.value, createdAt: 0 });
     note.value = `已保存到 ${savedPath.value}`;
   } catch (error) {
     note.value = error instanceof Error ? error.message : String(error);
@@ -193,6 +274,15 @@ async function saveVideo() {
     busy.value = false;
   }
 }
+
+onMounted(async () => {
+  try {
+    const saved = await tavernRead<VideoRecord[]>("video-history");
+    if (Array.isArray(saved)) history.value = saved.filter((item) => item?.url).slice(0, 40);
+  } catch {
+    history.value = [];
+  }
+});
 
 function stop() {
   generation += 1;
@@ -278,20 +368,38 @@ onUnmounted(() => {
         <label class="chk"><input v-model="webSearch" type="checkbox" />联网检索</label>
         <label class="chk"><input v-model="contentFilter" type="checkbox" />内容过滤</label>
       </div>
-      <p class="hint">内容过滤默认关闭，请求带 content_filter: false，可以生成 NSFW。</p>
+      <p class="hint">「内容过滤」不要勾。不勾才会带 content_filter: false，走 reAPI 的宽松通道。Seedance 自己仍会审提示词和参考图，没过就会出现这句英文，这个开关关不掉它。</p>
       <div class="actions">
         <button type="button" class="primary" :disabled="busy" @click="generate">生成视频</button>
         <button v-if="busy" type="button" @click="stop">停止等待</button>
-        <button type="button" :disabled="busy || !videoUrl" @click="saveVideo">保存到本机</button>
+        <button type="button" :disabled="busy || !(remoteUrl || videoUrl.startsWith('http'))" @click="saveVideo">保存到本机</button>
       </div>
       <p class="note">{{ note }}</p>
     </section>
     <section class="stage">
       <video v-if="videoUrl" :src="videoUrl" controls autoplay loop />
       <img v-else-if="lastFrameUrl" :src="lastFrameUrl" alt="" />
-      <p v-else>生成完成后在这里播放。菜单里打开「视频」。</p>
+      <p v-else-if="!history.length">生成完成后在这里播放。以前生成的视频也会留在这里。</p>
       <img v-if="videoUrl && lastFrameUrl" class="frame" :src="lastFrameUrl" alt="尾帧" />
       <p v-if="savedPath" class="hint">{{ savedPath }}</p>
+      <div v-if="history.length" class="history">
+        <p class="hint">历史生成</p>
+        <button
+          v-for="item in history"
+          :key="item.id"
+          type="button"
+          class="hist"
+          :class="{ on: item.id === activeId }"
+          @click="openRecord(item)"
+        >
+          <img v-if="item.lastFrame" :src="item.lastFrame" alt="" />
+          <span v-else class="mark">视频</span>
+          <span class="meta">
+            <b>{{ item.prompt || "未命名" }}</b>
+            <i>{{ formatTime(item.createdAt) }} · {{ item.model }} · {{ item.path ? "已保存" : "仅链接" }}</i>
+          </span>
+        </button>
+      </div>
     </section>
   </div>
 </template>
@@ -352,6 +460,37 @@ textarea, .url input, select {
   padding: 16px;
   background: #0b0c18;
 }
-.stage video, .stage > img { max-width: 100%; max-height: calc(100% - 24px); border-radius: 8px; }
+.stage video, .stage > img { max-width: 100%; max-height: calc(100% - 180px); border-radius: 8px; }
 .frame { max-height: 120px; }
+.history { width: min(720px, 100%); display: flex; flex-direction: column; gap: 6px; }
+.hist {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  border-radius: 8px;
+  background: #15162a;
+  color: #fff;
+  padding: 6px;
+}
+.hist.on { outline: 1px solid var(--heading); }
+.hist img, .mark {
+  width: 72px;
+  height: 48px;
+  flex: none;
+  object-fit: cover;
+  border-radius: 6px;
+  background: #0b0c18;
+}
+.mark { display: grid; place-items: center; color: var(--muted); font-size: 12px; }
+.meta { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.meta b {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.meta i { font-style: normal; color: var(--muted); font-size: 12px; }
 </style>

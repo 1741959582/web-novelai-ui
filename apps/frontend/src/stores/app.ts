@@ -15,6 +15,7 @@ import {
   historyGroupsList,
   historyImportFolder,
   historyList,
+  historyReorder,
   historySetGroup,
   historyArrangeGroups,
   revealInFolder,
@@ -422,6 +423,20 @@ export const useAppStore = defineStore("app", () => {
     const result = await historyImportFolder(groupId);
     if (!result.cancelled) history.value = await historyList();
     return result;
+  }
+
+  async function reorderHistory(orderedIds: string[]) {
+    const rank = new Map(orderedIds.map((id, index) => [id, index]));
+    const next = history.value.filter((item) => rank.has(item.id)).sort((a, b) => (rank.get(a.id) ?? 0) - (rank.get(b.id) ?? 0));
+    let cursor = 0;
+    const previous = history.value;
+    history.value = history.value.map((item) => (rank.has(item.id) ? next[cursor++] : item));
+    try {
+      await historyReorder(orderedIds);
+    } catch (error) {
+      history.value = previous;
+      status.value = error instanceof Error ? error.message : "调整顺序失败";
+    }
   }
 
   async function setHistoryItemGroup(id: string, groupId: string) {
@@ -1292,6 +1307,7 @@ export const useAppStore = defineStore("app", () => {
     renameHistoryGroup,
     deleteHistoryGroup,
     importMetadataFolder,
+    reorderHistory,
     setHistoryItemGroup,
     arrangeHistoryGroups,
     copyHistoryImage,

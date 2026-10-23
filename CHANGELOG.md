@@ -2,6 +2,15 @@
 
 从新到旧。安装包在 [最新发行版](https://github.com/caiweida/web-novelai-ui/releases/latest)。已安装的程序启动后会读到新版本，顶栏可以点「立即更新」。
 
+## [1.0.10](https://github.com/caiweida/web-novelai-ui/releases/tag/v1.0.10)
+
+- 历史里的图可以拖动换顺序。勾选多张后一起拖，滚轮也能滚动列表。
+- DeepSeek 可以粘贴、拖入或选择图片，让模型看图回答。
+- Pixiv 每天的浏览、点赞、评论、收藏和涨粉会记在本机，第二天不会把前几天清掉。
+- 视频保存到本机时，代理握手失败会改走直连。生成记录留在播放器下面，点一条可以再看、再保存。
+- 关掉「内容过滤」只是走 reAPI 的宽松通道，Seedance 自己的审核仍可能拒绝提示词或参考图。
+- 脚本包更新到 0.1.44，里面带上 Pixiv 每日数据落盘。设置里检查脚本包即可热更新。
+
 ## [1.0.9](https://github.com/caiweida/web-novelai-ui/releases/tag/v1.0.9)
 
 - 养号会真正启动操作脚本。广场打开首页「为你推荐」后开始滚动，并随机点赞、转发和关注。

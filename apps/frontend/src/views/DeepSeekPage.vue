@@ -9,8 +9,10 @@ defineOptions({ name: "DeepSeekPage" });
 const app = useAppStore();
 const store = useDeepseekStore();
 const draft = ref("");
+const pendingImage = ref("");
 const scroller = ref<HTMLElement | null>(null);
 const box = ref<HTMLTextAreaElement | null>(null);
+const filePick = ref<HTMLInputElement | null>(null);
 
 onMounted(() => {
   void store.load();
@@ -54,13 +56,84 @@ function onKeydown(event: KeyboardEvent) {
   void submit();
 }
 
+function readFile(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error || new Error("图片读不出来"));
+    reader.readAsDataURL(file);
+  });
+}
+
+function shrinkImage(dataUrl: string) {
+  return new Promise<string>((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const max = 1600;
+      const scale = Math.min(1, max / Math.max(img.width, img.height, 1));
+      const width = Math.max(1, Math.round(img.width * scale));
+      const height = Math.max(1, Math.round(img.height * scale));
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        resolve(dataUrl);
+        return;
+      }
+      ctx.drawImage(img, 0, 0, width, height);
+      resolve(canvas.toDataURL("image/jpeg", 0.86));
+    };
+    img.onerror = () => reject(new Error("图片读不出来"));
+    img.src = dataUrl;
+  });
+}
+
+async function attachFile(file: File | null) {
+  if (!file) return;
+  if (!file.type.startsWith("image/")) {
+    store.error = "只能附上图片";
+    return;
+  }
+  try {
+    const raw = await readFile(file);
+    pendingImage.value = await shrinkImage(raw);
+    store.error = "";
+  } catch (error) {
+    store.error = error instanceof Error ? error.message : "图片读不出来";
+  }
+}
+
+function onPaste(event: ClipboardEvent) {
+  const file = [...(event.clipboardData?.items || [])].find((item) => item.type.startsWith("image/"))?.getAsFile();
+  if (!file) return;
+  event.preventDefault();
+  void attachFile(file);
+}
+
+function onDrop(event: DragEvent) {
+  const file = [...(event.dataTransfer?.files || [])].find((item) => item.type.startsWith("image/"));
+  if (!file) return;
+  event.preventDefault();
+  void attachFile(file);
+}
+
+function onPick(event: Event) {
+  const input = event.target;
+  if (!(input instanceof HTMLInputElement)) return;
+  void attachFile(input.files?.[0] || null);
+  input.value = "";
+}
+
 async function submit() {
   const text = draft.value;
-  if (!text.trim() || store.busy) return;
+  const image = pendingImage.value;
+  if ((!text.trim() && !image) || store.busy) return;
   draft.value = "";
+  pendingImage.value = "";
   await nextTick();
   if (box.value) box.value.style.height = "auto";
-  await store.send(text);
+  await store.send(text, image || undefined);
 }
 
 function modelLabel(id: string) {
@@ -188,28 +261,38 @@ function grow() {
 
       <div class="dock">
         <p v-if="store.error" class="err">{{ store.error }}</p>
-        <form class="composer" @submit.prevent="submit">
+        <form class="composer" @submit.prevent="submit" @dragover.prevent @drop="onDrop">
+          <div v-if="pendingImage" class="attach">
+            <img v-if="!app.settings.stealthMode" :src="pendingImage" alt="" />
+            <span v-else>已附上一张图</span>
+            <button type="button" title="去掉这张图" @click="pendingImage = ''">×</button>
+          </div>
           <textarea
             ref="box"
             v-model="draft"
             rows="1"
-            placeholder="给 DeepSeek 发送消息"
+            placeholder="给 DeepSeek 发送消息，可粘贴图片"
             @keydown="onKeydown"
+            @paste="onPaste"
             @input="grow"
           />
           <div class="bar">
-            <select v-model="store.model" class="model" aria-label="选择模型">
-              <option v-for="id in store.models" :key="id" :value="id">{{ modelLabel(id) }}</option>
-            </select>
+            <div class="tools">
+              <button class="pick" type="button" title="选择图片" @click="filePick?.click()">图片</button>
+              <input ref="filePick" type="file" accept="image/*" hidden @change="onPick" />
+              <select v-model="store.model" class="model" aria-label="选择模型">
+                <option v-for="id in store.models" :key="id" :value="id">{{ modelLabel(id) }}</option>
+              </select>
+            </div>
             <button v-if="store.busy" class="send stop" type="button" title="停止" @click="store.stop()">
               <i />
             </button>
-            <button v-else class="send" type="submit" :disabled="!draft.trim()" title="发送">
+            <button v-else class="send" type="submit" :disabled="!draft.trim() && !pendingImage" title="发送">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 19V6M6.5 11.5 12 6l5.5 5.5" /></svg>
             </button>
           </div>
         </form>
-        <p class="hint">记忆保存的是调教之后的回答。Enter 发送，Shift+Enter 换行。</p>
+        <p class="hint">可以 Ctrl+V 粘贴图片，或把图片拖进来。只发图时会让模型按画面回答。Enter 发送，Shift+Enter 换行。</p>
       </div>
     </section>
   </div>
@@ -415,6 +498,34 @@ function grow() {
   box-shadow: 0 8px 24px rgba(29, 33, 41, 0.06);
   padding: 12px 12px 8px;
 }
+.attach {
+  position: relative;
+  width: max-content;
+  max-width: 100%;
+  margin-bottom: 8px;
+}
+.attach img {
+  display: block;
+  height: 72px;
+  width: auto;
+  max-width: 180px;
+  object-fit: cover;
+  border-radius: 10px;
+}
+.attach span { display: inline-block; color: #4e5969; font-size: 13px; padding: 8px 4px; }
+.attach button {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: 50%;
+  background: #1d2129;
+  color: #fff;
+  line-height: 1;
+  padding: 0;
+}
 .composer textarea {
   width: 100%;
   border: 0;
@@ -427,6 +538,15 @@ function grow() {
   max-height: 180px;
 }
 .bar { display: flex; align-items: center; justify-content: space-between; margin-top: 6px; }
+.tools { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.pick {
+  border: 1px solid #e5e6eb;
+  background: #fff;
+  color: #1d2129;
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 13px;
+}
 .model {
   max-width: 240px;
   border: 1px solid #e5e6eb;

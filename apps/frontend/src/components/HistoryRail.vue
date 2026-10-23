@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useAppStore } from "@/stores/app";
 import { useDeepseekStore } from "@/stores/deepseekChat";
@@ -22,6 +22,17 @@ const renaming = ref(false);
 const arranging = ref(false);
 const busyId = ref("");
 const picked = ref<string[]>([]);
+const dragId = ref("");
+const overId = ref("");
+const overAfter = ref(false);
+const listEl = ref<HTMLElement | null>(null);
+let pointerId = -1;
+let pressId = "";
+let originX = 0;
+let originY = 0;
+let lastX = 0;
+let lastY = 0;
+let scrolling = false;
 const sending = ref(false);
 const importing = ref(false);
 let pickAnchor = "";
@@ -161,9 +172,119 @@ function selectVisible() {
   pickAnchor = picked.value[0] || "";
 }
 
-async function revealThumb(item: HistoryItem) {
+function canDrag(event: Event) {
+  const target = event.target;
+  return !(target instanceof Element && target.closest(".acts, .group-pick, .tick"));
+}
+
+function dragGroup(from: string) {
+  const visible = items.value.map((item) => item.id);
+  const selected = visible.filter((id) => picked.value.includes(id));
+  if (selected.includes(from) && selected.length > 1) return selected;
+  return [from];
+}
+
+function updateHover(x: number, y: number) {
+  const hit = document.elementFromPoint(x, y);
+  const row = hit instanceof Element ? hit.closest(".item") : null;
+  const targetId = row instanceof HTMLElement ? row.dataset.id || "" : "";
+  const moving = dragId.value ? dragGroup(dragId.value) : [];
+  if (!targetId || moving.includes(targetId) || !(row instanceof HTMLElement)) {
+    overId.value = "";
+    return;
+  }
+  const rect = row.getBoundingClientRect();
+  overAfter.value = y > rect.top + rect.height / 2;
+  overId.value = targetId;
+}
+
+function kickScroll() {
+  if (scrolling) return;
+  scrolling = true;
+  const step = () => {
+    if (!dragId.value) {
+      scrolling = false;
+      return;
+    }
+    const box = listEl.value;
+    if (box) {
+      const rect = box.getBoundingClientRect();
+      const edge = 56;
+      if (lastY < rect.top + edge) box.scrollTop -= Math.max(8, Math.ceil((rect.top + edge - lastY) / 3));
+      else if (lastY > rect.bottom - edge) box.scrollTop += Math.max(8, Math.ceil((lastY - (rect.bottom - edge)) / 3));
+      updateHover(lastX, lastY);
+    }
+    requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+
+function onPointerMove(event: PointerEvent) {
+  if (event.pointerId !== pointerId) return;
+  lastX = event.clientX;
+  lastY = event.clientY;
+  if (!dragId.value) {
+    const dx = event.clientX - originX;
+    const dy = event.clientY - originY;
+    if (dx * dx + dy * dy < 36) return;
+    dragId.value = pressId;
+    kickScroll();
+  }
+  event.preventDefault();
+  updateHover(lastX, lastY);
+}
+
+function swallowClick(event: MouseEvent) {
+  window.removeEventListener("click", swallowClick, true);
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function onPointerUp(event: PointerEvent) {
+  if (event.pointerId !== pointerId) return;
+  window.removeEventListener("pointermove", onPointerMove);
+  window.removeEventListener("pointerup", onPointerUp);
+  window.removeEventListener("pointercancel", onPointerUp);
+  const from = dragId.value;
+  const target = overId.value;
+  const after = overAfter.value;
+  dragId.value = "";
+  overId.value = "";
+  pointerId = -1;
+  pressId = "";
+  if (from) window.addEventListener("click", swallowClick, true);
+  if (!from || !target) return;
+  const moving = dragGroup(from);
+  if (moving.includes(target)) return;
+  const rest = items.value.map((item) => item.id).filter((item) => !moving.includes(item));
+  let toIndex = rest.indexOf(target);
+  if (toIndex < 0) return;
+  if (after) toIndex += 1;
+  rest.splice(toIndex, 0, ...moving);
+  void store.reorderHistory(rest);
+}
+
+function onPointerDown(id: string, event: PointerEvent) {
+  if (event.button !== 0 || !canDrag(event)) return;
+  pointerId = event.pointerId;
+  pressId = id;
+  originX = lastX = event.clientX;
+  originY = lastY = event.clientY;
+  window.addEventListener("pointermove", onPointerMove);
+  window.addEventListener("pointerup", onPointerUp);
+  window.addEventListener("pointercancel", onPointerUp);
+}
+
+onBeforeUnmount(() => {
+  window.removeEventListener("pointermove", onPointerMove);
+  window.removeEventListener("pointerup", onPointerUp);
+  window.removeEventListener("pointercancel", onPointerUp);
+  window.removeEventListener("click", swallowClick, true);
+});
+
+function revealThumb(item: HistoryItem) {
   revealed.value = { ...revealed.value, [item.id]: true };
-  await dataUrlFor(item);
+  void dataUrlFor(item);
 }
 
 async function dataUrlFor(item: HistoryItem) {
@@ -305,12 +426,12 @@ async function deleteItem(item: HistoryItem) {
 </script>
 
 <template>
-  <aside class="rail" :class="{ open: store.historyOpen }">
+  <aside class="rail" :class="{ open: store.historyOpen, sorting: !!dragId }">
     <button class="tab" type="button" title="History" @click="store.historyOpen = !store.historyOpen">
       History
       <NaiIcon name="history" :size="12" />
     </button>
-    <div v-show="store.historyOpen" class="body">
+    <div v-show="store.historyOpen" ref="listEl" class="body">
       <header>
         <strong>History</strong>
         <button class="ghost" type="button" @click="store.showSessionDialog = true">Sessions</button>
@@ -381,10 +502,23 @@ async function deleteItem(item: HistoryItem) {
       <p v-if="!items.length" class="hint">
         {{ store.history.length ? "这个分组里还没有图片。" : "生成后的图片会出现在这里。" }}
       </p>
-      <div v-for="item in items" :key="item.id" class="item" :class="{ busy: busyId === item.id, picked: picked.includes(item.id) }">
+      <div
+        v-for="item in items"
+        :key="item.id"
+        class="item"
+        :class="{
+          busy: busyId === item.id,
+          picked: picked.includes(item.id),
+          dragging: !!dragId && dragGroup(dragId).includes(item.id),
+          'over-before': overId === item.id && !overAfter,
+          'over-after': overId === item.id && overAfter,
+        }"
+        :data-id="item.id"
+        @pointerdown="onPointerDown(item.id, $event)"
+      >
         <div class="thumb-wrap">
-          <button class="thumb" type="button" title="预览；双击载入参数" @click="store.settings.stealthMode && !revealed[item.id] ? revealThumb(item) : store.showHistory(item)" @dblclick="store.applyHistory(item)">
-            <img v-if="thumbs[item.id] && (!store.settings.stealthMode || revealed[item.id])" :src="thumbs[item.id]" alt="" />
+          <button class="thumb" type="button" title="预览；双击载入参数。勾选多张后可一起拖动换顺序" @click="store.settings.stealthMode && !revealed[item.id] ? revealThumb(item) : store.showHistory(item)" @dblclick="store.applyHistory(item)">
+            <img v-if="thumbs[item.id] && (!store.settings.stealthMode || revealed[item.id])" :src="thumbs[item.id]" alt="" draggable="false" />
             <span v-else-if="store.settings.stealthMode" class="thumb-hold">显示</span>
           </button>
           <button
@@ -419,6 +553,7 @@ async function deleteItem(item: HistoryItem) {
           <div class="acts">
             <button class="import" type="button" :disabled="busyId === item.id" @click.stop="sendFollow(item)">后续</button>
             <button class="import" type="button" @click.stop="store.importFromHistory(item)">导入元数据</button>
+            <div class="icon-row">
             <button class="icon" type="button" title="添加到 APNG" @click.stop="addApng(item)">
               <NaiIcon name="layers" :size="12" />
             </button>
@@ -431,6 +566,7 @@ async function deleteItem(item: HistoryItem) {
             <button class="icon danger" type="button" title="删除图片" @click.stop="deleteItem(item)">
               <NaiIcon name="trash" :size="12" />
             </button>
+            </div>
           </div>
         </div>
       </div>
@@ -475,7 +611,9 @@ async function deleteItem(item: HistoryItem) {
   right: 0;
   bottom: 0;
   width: 300px;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   background: var(--bg1);
   border-left: 1px solid var(--bg3);
   padding: 14px 12px;
@@ -558,12 +696,20 @@ header { display: flex; justify-content: space-between; align-items: center; mar
   padding: 6px;
   margin-bottom: 6px;
 }
+.item { cursor: grab; }
+.rail.sorting, .rail.sorting .item { cursor: grabbing; user-select: none; }
+.acts button, .group-pick, .tick { cursor: pointer; }
 .item:hover,
 .item.busy { background: var(--bg3); }
+.item.dragging { opacity: 0.45; }
 .item.picked {
   background: rgba(245, 243, 194, 0.16);
   box-shadow: inset 0 0 0 2px #f5f3c2;
 }
+.item.over-before { box-shadow: inset 0 2px 0 #f5f3c2; }
+.item.over-after { box-shadow: inset 0 -2px 0 #f5f3c2; }
+.item.picked.over-before { box-shadow: inset 0 2px 0 #f5f3c2, inset 0 0 0 2px #f5f3c2; }
+.item.picked.over-after { box-shadow: inset 0 -2px 0 #f5f3c2, inset 0 0 0 2px #f5f3c2; }
 .thumb-wrap {
   position: relative;
   width: 48px;
@@ -622,20 +768,29 @@ header { display: flex; justify-content: space-between; align-items: center; mar
 .sub { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .group-pick { margin-top: 6px; font-size: 11px; }
 .acts {
-  display: flex;
-  align-items: center;
+  display: grid;
+  grid-template-columns: 1fr 1.4fr;
   gap: 4px;
   margin-top: 6px;
 }
+.icon-row {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 4px;
+}
 .import {
+  min-width: 0;
+  white-space: nowrap;
   background: #f5f3c2;
   color: #0e0f21;
   border: 0;
   border-radius: 4px;
-  padding: 3px 8px;
-  font-size: 11px;
+  padding: 4px 6px;
+  font-size: 12px;
   font-weight: 700;
+  line-height: 1.2;
 }
+.import:disabled { opacity: 0.55; }
 .icon {
   width: 22px;
   height: 22px;

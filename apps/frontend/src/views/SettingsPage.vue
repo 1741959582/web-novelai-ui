@@ -286,7 +286,7 @@ async function save() {
           <input v-model="reapiDraft" type="password" :placeholder="store.settings.reapiToken === 'configured' ? '已配置，输入新 Key 可覆盖' : 'rk_live_...'" />
         </div>
         <button class="btn" type="button" @click="saveReapi">保存 reAPI Key</button>
-        <p class="hint">视频生成用这个 Key 调 reapi.ai。内容过滤默认关闭，可以生成 NSFW。</p>
+        <p class="hint">视频生成用这个 Key 调 reapi.ai。内容过滤默认关闭，只是改走宽松通道，Seedance 自己的安全审核仍然会拒提示词或参考图。</p>
         <button class="btn primary" type="button" @click="verify">验证 Token / 刷新积分</button>
         <p class="hint">当前：{{ store.account.tierName }} · Anlas {{ store.account.anlasBalance ?? "—" }} · 到期 {{ store.account.expiresAt || "—" }}</p>
         <p class="hint">会话记录保存在本机数据目录，不依赖浏览器缓存。窗口以 WebView 无痕模式运行，站点 Cookie 不会跨启动残留。</p>

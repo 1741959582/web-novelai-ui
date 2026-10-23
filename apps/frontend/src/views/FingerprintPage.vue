@@ -744,16 +744,32 @@ function paintInsightChart() {
     { name: "点赞", data: days.map((day) => likeDays.get(day) ?? byDate.get(day)?.likes ?? null) },
     { name: "回复", data: days.map((day) => byDate.get(day)?.comments ?? null) },
     { name: "收藏", data: days.map((day) => byDate.get(day)?.bookmarks ?? null) },
-    { name: "涨粉", data: days.map((day) => followDays.get(day) ?? null) },
+    {
+      name: "涨粉",
+      data: days.map((day) => {
+        const recorded = byDate.get(day)?.followers;
+        if (recorded) return recorded;
+        return followDays.get(day) ?? null;
+      }),
+    },
   ];
   insightChart.setOption({
     backgroundColor: "transparent",
     tooltip: { trigger: "axis" },
     legend: { top: 0, textStyle: { color: "#d4d4d8" } },
-    grid: { left: 48, right: 16, top: 48, bottom: 28 },
+    grid: { left: 48, right: 64, top: 48, bottom: 28 },
     xAxis: { type: "category", data: days.map((day) => day.slice(5)), axisLabel: { color: "#a1a1aa" } },
-    yAxis: { type: "value", axisLabel: { color: "#a1a1aa" }, splitLine: { lineStyle: { color: "#3f3f46" } } },
-    series: series.map((item) => ({ name: item.name, type: "bar", data: item.data })),
+    yAxis: [
+      { type: "value", axisLabel: { color: "#a1a1aa" }, splitLine: { lineStyle: { color: "#3f3f46" } } },
+      { type: "value", name: "浏览", nameTextStyle: { color: "#a1a1aa" }, axisLabel: { color: "#a1a1aa" }, splitLine: { show: false } },
+    ],
+    series: series.map((item) => ({
+      name: item.name,
+      type: item.name === "浏览" ? "line" : "bar",
+      yAxisIndex: item.name === "浏览" ? 1 : 0,
+      smooth: item.name === "浏览",
+      data: item.data,
+    })),
   }, true);
   insightChart.resize();
 }

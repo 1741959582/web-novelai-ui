@@ -257,7 +257,8 @@ export const useDeepseekStore = defineStore("deepseek", () => {
   }
 
   async function send(text: string, image?: string) {
-    const content = text.trim();
+    const typed = text.trim();
+    const content = typed || (image ? "看这张图，按画面内容回答。" : "");
     if (!content || busy.value) return;
     if (!apiKey.value.trim()) {
       error.value = "先填写 DeepSeek API Key";
@@ -267,7 +268,7 @@ export const useDeepseekStore = defineStore("deepseek", () => {
     if (!chats.value.some((item) => item.id === chat.id)) chats.value.unshift(chat);
     activeId.value = chat.id;
     error.value = "";
-    if (chat.title === "新对话") chat.title = image ? "图片后续" : content.replace(/\s+/g, " ").slice(0, 18) || "新对话";
+    if (chat.title === "新对话") chat.title = typed.replace(/\s+/g, " ").slice(0, 18) || (image ? "看图" : "新对话");
     chat.updatedAt = Date.now();
     chat.messages.push({ id: uid(), role: "user", content, reasoning: "", image });
     const assistant: DsMessage = { id: uid(), role: "assistant", content: "", reasoning: "" };

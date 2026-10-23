@@ -46,6 +46,10 @@ export function historyList() {
   return invoke<HistoryItem[]>("history_list");
 }
 
+export function historyReorder(ids: string[]) {
+  return invoke<void>("history_reorder", { ids });
+}
+
 export interface HistoryFolderImport {
   imported: number;
   skipped: number;
@@ -912,6 +916,7 @@ export interface PixivDay {
   comments: number;
   bookmarks: number;
   followers: number;
+  followersTotal?: number;
 }
 
 export function ruyiPixivLikes(accountId: string, mode: "cache" | "latest" | "more" | "peek" = "latest") {

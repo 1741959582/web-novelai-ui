@@ -676,6 +676,32 @@ pub fn history_list() -> Vec<HistoryItem> {
     list_history()
 }
 
+/// 按传入的 id 顺序重排这些条目，其它条目留在原来的位置。
+#[tauri::command]
+pub fn history_reorder(ids: Vec<String>) -> Result<(), String> {
+    let mut data = load_file();
+    let mut queued = Vec::new();
+    for id in &ids {
+        if queued.iter().any(|item: &HistoryItem| &item.id == id) {
+            continue;
+        }
+        if let Some(item) = data.history.iter().find(|item| &item.id == id) {
+            queued.push(item.clone());
+        }
+    }
+    if queued.is_empty() {
+        return Ok(());
+    }
+    let mut cursor = 0usize;
+    for item in data.history.iter_mut() {
+        if ids.iter().any(|id| id == &item.id) && cursor < queued.len() {
+            *item = queued[cursor].clone();
+            cursor += 1;
+        }
+    }
+    save_file(&data)
+}
+
 #[tauri::command]
 pub async fn history_import_folder(app: AppHandle, group_id: Option<String>) -> Result<HistoryFolderImport, String> {
     let folder = app
