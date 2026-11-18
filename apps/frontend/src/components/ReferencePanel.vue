@@ -1,46 +1,42 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
+import { useRouter } from "vue-router";
 import { fetchRemoteImage } from "@/api/tauri";
-import { MAX_PRECISE_REFS, MAX_VIBE_IMAGES, isV5, supportsNAIPreciseReference, supportsNAIVibeTransfer, type PreciseReferenceType } from "@/types/nai";
+import { MAX_PRECISE_REFS, MAX_VIBE_IMAGES, supportsNAIPreciseReference, supportsNAIVibeTransfer, type PreciseReferenceType } from "@/types/nai";
 import { useAppStore } from "@/stores/app";
+import { useMaterialLibrary } from "@/stores/materialLibrary";
 import NaiIcon from "@/components/NaiIcon.vue";
-import { INSET_RATIOS, measureInset, paintInset, type InsetMetrics } from "@/utils/referenceInset";
 
 const props = defineProps<{
-  onPick: (file: File, kind?: "i2i" | "vibe" | "precise" | "inset") => void;
+  onPick: (file: File, kind?: "i2i" | "vibe" | "precise") => void;
 }>();
 
 const store = useAppStore();
-if (store.insetReference && !store.insetReference.canvasWidth) {
-  store.updateInset({ ratioId: "3:2", canvasWidth: 1216, canvasHeight: 832 });
-}
-const vibeMenu = ref(false);
+const library = useMaterialLibrary();
+const router = useRouter();
 const wantInpaint = ref(false);
+const i2iOpen = ref(true);
+const vibeOpen = ref(true);
+const preciseOpen = ref(true);
+const sketchOpen = ref(false);
+const sketchCanvas = ref<HTMLCanvasElement | null>(null);
 const vibeOk = computed(() => supportsNAIVibeTransfer(store.params.model));
 const preciseOk = computed(() => supportsNAIPreciseReference(store.params.model));
-const insetOk = computed(() => isV5(store.params.model));
-const insetPreview = ref<HTMLCanvasElement | null>(null);
-const insetMetrics = ref<InsetMetrics | null>(null);
-const insetSizes = computed(() => INSET_RATIOS.find((item) => item.id === store.insetReference?.ratioId)?.sizes ?? INSET_RATIOS[2].sizes);
-
-function switchToV5() {
-  store.params.model = store.params.model.includes("curated")
-    ? "nai-diffusion-5-curated"
-    : "nai-diffusion-5-full";
-}
+const vibeOn = computed(() => store.vibeImages.some((item) => item.enabled));
+const preciseOn = computed(() => store.preciseReferences.some((item) => item.enabled));
+const PRECISE_TYPES: { value: PreciseReferenceType; label: string }[] = [
+  { value: "character&style", label: "角色和风格" },
+  { value: "character", label: "角色" },
+  { value: "style", label: "风格" },
+];
 
 function switchToV45() {
   store.params.model = store.params.model.includes("curated")
     ? "nai-diffusion-4-5-curated"
     : "nai-diffusion-4-5-full";
 }
-const PRECISE_TYPES: { value: PreciseReferenceType; label: string }[] = [
-  { value: "character&style", label: "Character & Style" },
-  { value: "character", label: "Character" },
-  { value: "style", label: "Style" },
-];
 
-function pick(kind: "i2i" | "vibe" | "precise" | "inset") {
+function pick(kind: "i2i" | "vibe" | "precise") {
   const input = document.createElement("input");
   input.type = "file";
   input.accept = "image/png,image/jpeg,image/webp";
@@ -61,7 +57,7 @@ function onCardDragLeave(ev: DragEvent) {
   (ev.currentTarget as HTMLElement).classList.remove("over");
 }
 
-function onCardDrop(kind: "i2i" | "vibe" | "precise" | "inset", ev: DragEvent) {
+function onCardDrop(kind: "i2i" | "vibe" | "precise", ev: DragEvent) {
   ev.preventDefault();
   ev.stopPropagation();
   (ev.currentTarget as HTMLElement).classList.remove("over");
@@ -78,96 +74,15 @@ function onCardDrop(kind: "i2i" | "vibe" | "precise" | "inset", ev: DragEvent) {
     store.status = "正在下载外站图片…";
     void fetchRemoteImage(url)
       .then((preview) => store.useImageAs(kind, preview))
-      .catch((e) => {
-        store.status = e instanceof Error ? e.message : String(e);
+      .catch((error) => {
+        store.status = error instanceof Error ? error.message : String(error);
       });
   }
 }
 
-function useCurrent(kind: "i2i" | "vibe" | "precise" | "inset") {
+function useCurrent(kind: "i2i" | "vibe" | "precise") {
   store.useImageAs(kind, store.currentSourceImage());
 }
-
-let insetDrag: { x: number; y: number; ox: number; oy: number } | null = null;
-
-async function drawInsetPreview() {
-  const canvas = insetPreview.value;
-  const inset = store.insetReference;
-  if (!canvas || !inset) return;
-  const img = await new Promise<HTMLImageElement>((resolve, reject) => {
-    const el = new Image();
-    el.onload = () => resolve(el);
-    el.onerror = () => reject(new Error("preview"));
-    el.src = inset.previewUrl;
-  }).catch(() => null);
-  if (!img || store.insetReference?.id !== inset.id) return;
-  const metrics = measureInset(img.naturalWidth, img.naturalHeight, inset);
-  insetMetrics.value = metrics;
-  const viewW = Math.max(160, canvas.clientWidth || 280);
-  const viewH = Math.max(72, Math.round(viewW * (metrics.height / metrics.width)));
-  canvas.width = viewW;
-  canvas.height = viewH;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return;
-  ctx.save();
-  ctx.scale(viewW / metrics.width, viewH / metrics.height);
-  paintInset(ctx, img, metrics, inset.background);
-  ctx.restore();
-  ctx.strokeStyle = "rgba(96, 165, 250, 0.95)";
-  ctx.lineWidth = 1;
-  const split = (metrics.insetWidth / metrics.width) * viewW;
-  ctx.beginPath();
-  ctx.moveTo(split, 0);
-  ctx.lineTo(split, viewH);
-  ctx.stroke();
-}
-
-function onInsetPointerDown(ev: PointerEvent) {
-  const inset = store.insetReference;
-  if (!inset) return;
-  insetDrag = { x: ev.clientX, y: ev.clientY, ox: inset.offsetX, oy: inset.offsetY };
-  (ev.currentTarget as HTMLElement).setPointerCapture(ev.pointerId);
-}
-
-function onInsetPointerMove(ev: PointerEvent) {
-  const canvas = insetPreview.value;
-  const metrics = insetMetrics.value;
-  if (!insetDrag || !canvas || !metrics) return;
-  const rect = canvas.getBoundingClientRect();
-  const dx = ((ev.clientX - insetDrag.x) / Math.max(1, rect.width)) * metrics.width;
-  const dy = ((ev.clientY - insetDrag.y) / Math.max(1, rect.height)) * metrics.height;
-  store.updateInset({
-    offsetX: Math.round(insetDrag.ox + dx),
-    offsetY: Math.round(insetDrag.oy + dy),
-  });
-}
-
-function onInsetPointerUp() {
-  insetDrag = null;
-}
-
-function onInsetWheel(ev: WheelEvent) {
-  const inset = store.insetReference;
-  if (!inset) return;
-  const next = inset.scale * (ev.deltaY > 0 ? 0.92 : 1.08);
-  store.updateInset({ scale: Math.min(2.5, Math.max(0.3, next)) });
-}
-
-watch(
-  () => [
-    store.insetReference?.previewUrl,
-    store.insetReference?.canvasWidth,
-    store.insetReference?.canvasHeight,
-    store.insetReference?.background,
-    store.insetReference?.scale,
-    store.insetReference?.offsetX,
-    store.insetReference?.offsetY,
-    insetPreview.value,
-  ],
-  () => {
-    void drawInsetPreview();
-  },
-);
 
 function setI2iTab(tab: "i2i" | "inpaint") {
   if (tab === "inpaint") {
@@ -195,587 +110,442 @@ watch(
   },
 );
 
-function onEmptyI2iClick() {
-  if (store.currentSourceImage()) {
-    store.useImageAs("i2i", store.currentSourceImage());
-    if (store.paintMode) store.startInpaint();
-    return;
-  }
-  pick("i2i");
+let drawing = false;
+function sketchPoint(ev: PointerEvent) {
+  const canvas = sketchCanvas.value;
+  if (!canvas) return null;
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: ((ev.clientX - rect.left) / rect.width) * canvas.width,
+    y: ((ev.clientY - rect.top) / rect.height) * canvas.height,
+  };
 }
 
-function shortId(id: string) {
-  const clean = id.replace(/-/g, "");
-  return `${clean.slice(0, 6)}-${clean.slice(-6)}`;
+function drawSketch(ev: PointerEvent) {
+  if (!drawing) return;
+  const canvas = sketchCanvas.value;
+  const ctx = canvas?.getContext("2d");
+  const point = sketchPoint(ev);
+  if (!ctx || !point) return;
+  ctx.lineTo(point.x, point.y);
+  ctx.stroke();
+}
+
+function startSketch(ev: PointerEvent) {
+  const canvas = sketchCanvas.value;
+  const ctx = canvas?.getContext("2d");
+  const point = sketchPoint(ev);
+  if (!ctx || !point) return;
+  drawing = true;
+  canvas?.setPointerCapture(ev.pointerId);
+  ctx.beginPath();
+  ctx.moveTo(point.x, point.y);
+}
+
+function endSketch() {
+  drawing = false;
+}
+
+function prepareSketch() {
+  const canvas = sketchCanvas.value;
+  const ctx = canvas?.getContext("2d");
+  if (!canvas || !ctx) return;
+  ctx.fillStyle = "#f4f1e8";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.strokeStyle = "#1a1c2e";
+  ctx.lineWidth = 4;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+}
+
+function openSketch() {
+  sketchOpen.value = true;
+  void nextTick().then(prepareSketch);
+}
+
+function useSketch() {
+  const canvas = sketchCanvas.value;
+  if (!canvas) return;
+  store.useImageAs("i2i", canvas.toDataURL("image/png"));
+  sketchOpen.value = false;
+}
+
+function saveVibes() {
+  for (const vibe of store.vibeImages) {
+    library.addVibe({
+      name: "Vibe",
+      previewUrl: vibe.previewUrl,
+      infoExtracted: vibe.infoExtracted,
+      strength: vibe.strength,
+    });
+  }
+  store.status = library.error || "已保存到 Vibe 库";
+}
+
+function savePrecise() {
+  for (const item of store.preciseReferences) {
+    library.addPrecise({
+      name: "精准参考",
+      previewUrl: item.previewUrl,
+      type: item.type,
+      strength: item.strength,
+      fidelity: item.fidelity,
+    });
+  }
+  store.status = library.error || "已保存到精准参考库";
 }
 </script>
 
 <template>
-  <section class="block">
-    <h2>Reference Images</h2>
+  <section class="refs">
+    <h2>参考图</h2>
 
-    <div class="card i2i-card" data-ref-drop="i2i" @dragover="onCardDragOver" @dragleave="onCardDragLeave" @drop="onCardDrop('i2i', $event)">
-      <div v-if="!(store.paintMode && store.i2iImage)" class="i2i-tabs">
-        <button type="button" :class="{ on: !store.paintMode }" @click="setI2iTab('i2i')">
-          <NaiIcon name="i2i" :size="14" />
-          图生图底图 <em>(Image-to-Image)</em>
+    <div class="group" data-ref-drop="i2i" @dragover="onCardDragOver" @dragleave="onCardDragLeave" @drop="onCardDrop('i2i', $event)">
+      <div class="row" @click="i2iOpen = !i2iOpen">
+        <NaiIcon name="i2i" :size="18" />
+        <b>图生图</b>
+        <span>{{ store.i2iImage ? (store.paintMode ? "局部重绘" : `强度 ${store.i2iStrength.toFixed(2)}`) : "基于原图生成变体" }}</span>
+        <button v-if="!store.i2iImage" class="ghost" type="button" @click.stop="pick('i2i')">
+          <NaiIcon name="upload" :size="14" /> 上传
         </button>
-        <button type="button" :class="{ on: store.paintMode }" @click="setI2iTab('inpaint')">
-          <NaiIcon name="brush" :size="14" />
-          局部重绘
-          <span v-if="store.paintMode && store.inpaintMask" class="active">Active</span>
-        </button>
+        <NaiIcon class="chev" :class="{ open: i2iOpen }" name="down" :size="14" />
       </div>
-
-      <button v-if="!store.i2iImage" class="i2i-empty" type="button" @click="onEmptyI2iClick">
-        <NaiIcon name="upload" :size="22" />
-        <strong>{{ store.paintMode ? "局部重绘底图" : "图生图底图" }}</strong>
-        <span>点击上传底图，或拖入图片</span>
-      </button>
-
-      <template v-else-if="store.paintMode">
-        <div class="inpaint-card">
-          <button class="inpaint-thumb" type="button" title="编辑蒙版" @click="store.startInpaint()">
+      <div v-if="i2iOpen" class="body">
+        <div v-if="!store.i2iImage" class="drop" @click="pick('i2i')">
+          <span class="drop-hint"><NaiIcon name="upload" :size="15" /> 拖一张图进来，或者</span>
+          <span class="drop-acts" @click.stop>
+            <button type="button" @click="pick('i2i')"><NaiIcon name="upload" :size="13" /> 上传</button>
+            <button type="button" @click="router.push({ path: '/precise-library', query: { for: 'i2i' } })">
+              <NaiIcon name="folder" :size="13" /> 从精准参考库
+            </button>
+            <button type="button" @click="openSketch"><NaiIcon name="brush" :size="13" /> 画草图</button>
+          </span>
+        </div>
+        <template v-else>
+          <div class="shot">
             <img :src="store.i2iImage" alt="" />
-            <i
-              v-if="store.inpaintMask"
-              class="wash"
-              :style="{
-                WebkitMaskImage: `url(${store.inpaintMask})`,
-                maskImage: `url(${store.inpaintMask})`,
-              }"
-            />
-          </button>
-          <div class="inpaint-meta">
-            <button class="back" type="button" @click="setI2iTab('i2i')">
-              <NaiIcon name="up" :size="14" />
-              局部重绘
-            </button>
-            <div class="inpaint-acts">
-              <button type="button" title="编辑蒙版" @click="store.startInpaint()"><NaiIcon name="clip" :size="15" /></button>
-              <button type="button" title="更换底图" @click="pick('i2i')"><NaiIcon name="upload" :size="15" /></button>
-              <span class="grow" />
-              <button type="button" title="删除" @click="store.clearI2i()"><NaiIcon name="trash" :size="15" /></button>
+            <div>
+              <div class="shot-acts">
+                <button type="button" @click="pick('i2i')">更换</button>
+                <button type="button" @click="setI2iTab('inpaint')">局部重绘</button>
+                <button type="button" class="danger" @click="store.clearI2i()">删除</button>
+              </div>
+              <p v-if="store.paintMode && store.inpaintMask" class="note">蒙版已就绪，生成时只重绘涂过的地方。</p>
             </div>
           </div>
-        </div>
-        <label class="slide">
-          <span>影响强度</span><b>{{ store.i2iStrength.toFixed(2) }}</b>
-          <input v-model.number="store.i2iStrength" type="range" min="0" max="1" step="0.01" />
-        </label>
-      </template>
-
-      <template v-else>
-        <div class="i2i-row">
-          <img class="thumb" :src="store.i2iImage" alt="" @click="pick('i2i')" />
-          <div class="i2i-meta">
-            <strong>图生图底图</strong>
-            <span>点击上传底图</span>
-          </div>
-          <div class="i2i-acts">
-            <button type="button" @click="pick('i2i')">更换底图</button>
-            <button type="button" @click="store.startInpaint()">
-              <NaiIcon name="brush" :size="13" /> 局部重绘
-            </button>
-            <button class="x" type="button" title="清除底图" @click="store.clearI2i()"><NaiIcon name="close" :size="14" /></button>
-          </div>
-        </div>
-        <label class="slide">
-          <span>影响强度</span><b>{{ store.i2iStrength.toFixed(2) }}</b>
-          <input v-model.number="store.i2iStrength" type="range" min="0" max="1" step="0.01" />
-        </label>
-        <label class="slide">
-          <span>噪点强度 (Noise)</span><b>{{ store.i2iNoise.toFixed(2) }}</b>
-          <input v-model.number="store.i2iNoise" type="range" min="0" max="1" step="0.01" />
-        </label>
-      </template>
-    </div>
-
-    <div class="card" data-ref-drop="vibe" @dragover="onCardDragOver" @dragleave="onCardDragLeave" @drop="onCardDrop('vibe', $event)">
-      <div class="head">
-        <div class="title">
-          <NaiIcon name="vibe" :size="18" />
-          <strong>Vibe Transfer</strong>
-          <em>({{ store.vibeImages.length }}/{{ MAX_VIBE_IMAGES }})</em>
-        </div>
-        <div class="acts">
-          <div class="menu-wrap">
-            <button class="icon-sq tiny" type="button" title="More" @click="vibeMenu = !vibeMenu">
-              <NaiIcon name="dots" :size="14" />
-            </button>
-            <div v-if="vibeMenu" class="menu" @mouseleave="vibeMenu = false">
-              <button type="button" :disabled="!store.vibeImages.length" @click="store.vibeImages = []; vibeMenu = false">Clear all</button>
-            </div>
-          </div>
-          <button class="icon-sq tiny" type="button" title="用当前图" :disabled="!vibeOk" @click="useCurrent('vibe')">
-            <NaiIcon name="image" :size="14" />
-          </button>
-          <button
-            class="icon-sq tiny"
-            type="button"
-            title="Add vibe"
-            :class="{ off: !vibeOk || store.vibeImages.length >= MAX_VIBE_IMAGES }"
-            :disabled="!vibeOk || store.vibeImages.length >= MAX_VIBE_IMAGES"
-            @click="pick('vibe')"
-          >
-            <NaiIcon name="plus" :size="14" />
-          </button>
-        </div>
-      </div>
-      <p v-if="!vibeOk" class="banner">
-        V5 不支持氛围迁移
-        <button type="button" class="link" @click="switchToV45">切换到 V4.5</button>
-      </p>
-
-      <label class="check">
-        <input v-model="store.normalizeVibe" type="checkbox" />
-        Normalize Reference Strength Values
-      </label>
-
-      <article v-for="vibe in store.vibeImages" :key="vibe.id" class="ref" :class="{ off: !vibe.enabled }">
-        <div class="row">
-          <img :src="vibe.previewUrl" alt="" />
-          <div class="meta">
-            <span class="id">{{ shortId(vibe.id) }}</span>
-            <span class="cost"><NaiIcon name="anlas" :size="12" /> 2</span>
-          </div>
-        </div>
-        <label class="slide">
-          <span>Information Extracted</span><b>{{ vibe.infoExtracted.toFixed(1) }}</b>
-          <input
-            :value="vibe.infoExtracted"
-            type="range"
-            min="0"
-            max="1"
-            step="0.01"
-            @input="store.updateVibeImage(vibe.id, { infoExtracted: Number(($event.target as HTMLInputElement).value) })"
-          />
-        </label>
-        <label class="slide">
-          <span>Reference Strength</span><b>{{ vibe.strength.toFixed(1) }}</b>
-          <input
-            :value="vibe.strength"
-            type="range"
-            min="0"
-            max="1"
-            step="0.01"
-            @input="store.updateVibeImage(vibe.id, { strength: Number(($event.target as HTMLInputElement).value) })"
-          />
-        </label>
-        <div class="row-acts">
-          <button class="ghost" type="button" @click="store.removeVibeImage(vibe.id)"><NaiIcon name="trash" :size="14" /></button>
-          <button class="ghost" type="button" @click="store.removeVibeImage(vibe.id)"><NaiIcon name="x" :size="14" /></button>
-        </div>
-        <p class="note">Encoding required. This will cost 2 Anlas on the next generation.</p>
-      </article>
-    </div>
-
-    <div class="card" data-ref-drop="precise" @dragover="onCardDragOver" @dragleave="onCardDragLeave" @drop="onCardDrop('precise', $event)">
-      <div class="head">
-        <div class="title">
-          <NaiIcon name="precise" :size="18" />
-          <strong>Precise Reference</strong>
-        </div>
-        <div class="acts">
-          <button
-            class="icon-sq tiny"
-            type="button"
-            title="Clear"
-            :disabled="!store.preciseReferences.length"
-            @click="store.preciseReferences = []"
-          >
-            <NaiIcon name="crop" :size="14" />
-          </button>
-          <button class="icon-sq tiny" type="button" title="用当前图" :disabled="!preciseOk" @click="useCurrent('precise')">
-            <NaiIcon name="image" :size="14" />
-          </button>
-          <button
-            class="icon-sq tiny"
-            type="button"
-            title="Attach"
-            :class="{ off: !preciseOk || store.preciseReferences.length >= MAX_PRECISE_REFS }"
-            :disabled="!preciseOk || store.preciseReferences.length >= MAX_PRECISE_REFS"
-            @click="pick('precise')"
-          >
-            <NaiIcon name="clip" :size="14" />
-          </button>
-        </div>
-      </div>
-      <p v-if="!preciseOk" class="banner">
-        精准参考仅 V4.5 可用
-        <button type="button" class="link" @click="switchToV45">切换到 V4.5</button>
-      </p>
-
-      <article v-for="ref in store.preciseReferences" :key="ref.id" class="ref" :class="{ off: !ref.enabled }">
-        <div class="row">
-          <img :src="ref.previewUrl" alt="" />
-          <select
-            class="type"
-            :value="ref.type"
-            @change="store.updatePreciseReference(ref.id, { type: ($event.target as HTMLSelectElement).value as PreciseReferenceType })"
-          >
-            <option v-for="opt in PRECISE_TYPES" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
-          </select>
-        </div>
-        <label class="slide">
-          <span>Strength</span><b>{{ ref.strength.toFixed(0) }}</b>
-          <input
-            :value="ref.strength"
-            type="range"
-            min="0"
-            max="1"
-            step="0.01"
-            @input="store.updatePreciseReference(ref.id, { strength: Number(($event.target as HTMLInputElement).value) })"
-          />
-        </label>
-        <label class="slide">
-          <span>Fidelity</span><b>{{ ref.fidelity.toFixed(0) }}</b>
-          <input
-            :value="ref.fidelity"
-            type="range"
-            min="0"
-            max="1"
-            step="0.01"
-            @input="store.updatePreciseReference(ref.id, { fidelity: Number(($event.target as HTMLInputElement).value) })"
-          />
-        </label>
-        <div class="row-acts">
-          <button class="ghost" type="button" @click="store.removePreciseReference(ref.id)"><NaiIcon name="trash" :size="14" /></button>
-          <button class="ghost" :class="{ on: ref.enabled }" type="button" @click="store.updatePreciseReference(ref.id, { enabled: !ref.enabled })">
-            <NaiIcon name="check" :size="14" />
-          </button>
-        </div>
-      </article>
-    </div>
-
-    <div class="card" data-ref-drop="inset" @dragover="onCardDragOver" @dragleave="onCardDragLeave" @drop="onCardDrop('inset', $event)">
-      <div class="head">
-        <div class="title">
-          <NaiIcon name="precise" :size="18" />
-          <strong>参考插条</strong>
-        </div>
-        <div class="acts">
-          <button class="icon-sq tiny" type="button" title="清除" :disabled="!store.insetReference" @click="store.clearInset()">
-            <NaiIcon name="x" :size="14" />
-          </button>
-          <button class="icon-sq tiny" type="button" title="用当前图" :disabled="!insetOk" @click="useCurrent('inset')">
-            <NaiIcon name="image" :size="14" />
-          </button>
-          <button class="icon-sq tiny" type="button" title="添加角色图" :disabled="!insetOk" @click="pick('inset')">
-            <NaiIcon name="clip" :size="14" />
-          </button>
-        </div>
-      </div>
-      <p v-if="!insetOk" class="banner">
-        参考插条只用于 NAI5。左边放角色，右边按提示词作画。
-        <button type="button" class="link" @click="switchToV5">切换到 NAI5</button>
-      </p>
-      <template v-else-if="store.insetReference">
-        <canvas
-          ref="insetPreview"
-          class="inset-view"
-          @pointerdown="onInsetPointerDown"
-          @pointermove="onInsetPointerMove"
-          @pointerup="onInsetPointerUp"
-          @pointercancel="onInsetPointerUp"
-          @wheel.prevent="onInsetWheel"
-        />
-        <p class="note">
-          插条 {{ insetMetrics?.insetWidth ?? "—" }}px · 画面 {{ insetMetrics?.drawPercent ?? "—" }}%。
-          拖动角色，滚轮缩放。生成时会加上 split screen，裁切后只留右边。
-        </p>
-        <div class="inset-row">
-          <button
-            v-for="ratio in INSET_RATIOS"
-            :key="ratio.id"
-            type="button"
-            :class="{ on: store.insetReference.ratioId === ratio.id }"
-            @click="store.updateInset({ ratioId: ratio.id, canvasWidth: ratio.sizes[0].width, canvasHeight: ratio.sizes[0].height, offsetX: 0, offsetY: 0 })"
-          >
-            {{ ratio.label }}
-          </button>
-        </div>
-        <div class="inset-row">
-          <button
-            v-for="size in insetSizes"
-            :key="`${size.width}x${size.height}`"
-            type="button"
-            :class="{ on: store.insetReference.canvasWidth === size.width && store.insetReference.canvasHeight === size.height }"
-            @click="store.updateInset({ canvasWidth: size.width, canvasHeight: size.height, offsetX: 0, offsetY: 0 })"
-          >
-            {{ size.width }}×{{ size.height }}{{ size.anlas ? " · Anlas" : "" }}
-          </button>
-        </div>
-        <div class="inset-row">
-          <button type="button" :class="{ on: store.insetReference.background === 'white' }" @click="store.updateInset({ background: 'white' })">白底</button>
-          <button type="button" :class="{ on: store.insetReference.background === 'black' }" @click="store.updateInset({ background: 'black' })">黑底</button>
-          <label class="check">
-            <input
-              type="checkbox"
-              :checked="store.insetReference.crop"
-              @change="store.updateInset({ crop: ($event.target as HTMLInputElement).checked })"
-            />
-            裁掉插条
+          <label class="slide">
+            <span>影响强度</span><b>{{ store.i2iStrength.toFixed(2) }}</b>
+            <input v-model.number="store.i2iStrength" type="range" min="0" max="1" step="0.01" />
           </label>
-          <button
-            class="ghost"
-            :class="{ on: store.insetReference.enabled }"
-            type="button"
-            @click="store.updateInset({ enabled: !store.insetReference.enabled })"
-          >
-            <NaiIcon name="check" :size="14" />
-          </button>
+          <label class="slide">
+            <span>噪点</span><b>{{ store.i2iNoise.toFixed(2) }}</b>
+            <input v-model.number="store.i2iNoise" type="range" min="0" max="1" step="0.01" />
+          </label>
+        </template>
+      </div>
+    </div>
+
+    <div class="group" data-ref-drop="vibe" @dragover="onCardDragOver" @dragleave="onCardDragLeave" @drop="onCardDrop('vibe', $event)">
+      <div class="row" @click="vibeOpen = !vibeOpen">
+        <NaiIcon name="vibe" :size="18" />
+        <b>风格迁移</b>
+        <em v-if="store.vibeImages.length">{{ store.vibeImages.length }}/{{ MAX_VIBE_IMAGES }}</em>
+        <span :class="{ warn: preciseOn && vibeOn }">{{ preciseOn && vibeOn ? "和精准参考同时开启时，这次不发送风格" : "改变图像，保留视觉风格" }}</span>
+        <button
+          v-if="!store.vibeImages.length"
+          class="icon"
+          type="button"
+          title="添加"
+          :disabled="!vibeOk"
+          @click.stop="pick('vibe')"
+        >
+          <NaiIcon name="plus" :size="14" />
+        </button>
+        <NaiIcon class="chev" :class="{ open: vibeOpen }" name="down" :size="14" />
+      </div>
+      <div v-if="vibeOpen" class="body">
+        <p v-if="!vibeOk" class="banner">
+          V5 不支持氛围迁移
+          <button type="button" @click="switchToV45">切换到 V4.5</button>
+        </p>
+        <p v-else-if="preciseOn && vibeOn" class="banner">和精准参考同时开启时，这次不发送风格</p>
+        <div v-if="!store.vibeImages.length" class="drop">
+          <span class="drop-hint"><NaiIcon name="upload" :size="15" /> 拖图片或 .naiv4vibe 进来，或者</span>
+          <span class="drop-acts">
+            <button type="button" :disabled="!vibeOk" @click="pick('vibe')"><NaiIcon name="upload" :size="13" /> 从文件添加</button>
+            <button type="button" @click="router.push('/vibe-library')"><NaiIcon name="folder" :size="13" /> 从 Vibe 库添加</button>
+          </span>
         </div>
-      </template>
-      <p v-else class="note">放一张全身角色。角色会贴满左边，右边按提示词重画，最后裁掉插条。</p>
+        <template v-else>
+          <article v-for="vibe in store.vibeImages" :key="vibe.id" class="item" :class="{ off: !vibe.enabled }">
+            <img :src="vibe.previewUrl" alt="" />
+            <div class="item-main">
+              <label class="slide compact">
+                <span>参考强度</span><b>{{ vibe.strength.toFixed(2) }}</b>
+                <input
+                  :value="vibe.strength"
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.01"
+                  @input="store.updateVibeImage(vibe.id, { strength: Number(($event.target as HTMLInputElement).value) })"
+                />
+              </label>
+              <label class="slide compact">
+                <span>提取信息</span><b>{{ vibe.infoExtracted.toFixed(2) }}</b>
+                <input
+                  :value="vibe.infoExtracted"
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.01"
+                  @input="store.updateVibeImage(vibe.id, { infoExtracted: Number(($event.target as HTMLInputElement).value) })"
+                />
+              </label>
+            </div>
+            <div class="item-side">
+              <button type="button" :class="{ on: vibe.enabled }" title="启用" @click="store.updateVibeImage(vibe.id, { enabled: !vibe.enabled })">
+                <NaiIcon name="check" :size="14" />
+              </button>
+              <button type="button" title="删除" @click="store.removeVibeImage(vibe.id)"><NaiIcon name="close" :size="14" /></button>
+            </div>
+          </article>
+          <div class="foot">
+            <button type="button" :disabled="!vibeOk || store.vibeImages.length >= MAX_VIBE_IMAGES" @click="pick('vibe')">
+              <NaiIcon name="plus" :size="13" /> 添加
+            </button>
+            <button class="text" type="button" @click="saveVibes">保存到库</button>
+            <button class="text" type="button" :disabled="!vibeOk" @click="useCurrent('vibe')">用当前图</button>
+            <label class="check">
+              归一化
+              <input v-model="store.normalizeVibe" type="checkbox" />
+            </label>
+            <button class="icon" type="button" title="清空全部" @click="store.vibeImages = []"><NaiIcon name="trash" :size="14" /></button>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <div class="group" data-ref-drop="precise" @dragover="onCardDragOver" @dragleave="onCardDragLeave" @drop="onCardDrop('precise', $event)">
+      <div class="row" @click="preciseOpen = !preciseOpen">
+        <NaiIcon name="precise" :size="18" />
+        <b>精准参考</b>
+        <em v-if="store.preciseReferences.length">{{ store.preciseReferences.length }}</em>
+        <span>将生成绑定到角色或风格参考</span>
+        <button class="icon" type="button" title="保存到精准参考库" :disabled="!store.preciseReferences.length" @click.stop="savePrecise">
+          <NaiIcon name="folder" :size="14" />
+        </button>
+        <button class="icon" type="button" title="加入" :disabled="!preciseOk || store.preciseReferences.length >= MAX_PRECISE_REFS" @click.stop="pick('precise')">
+          <NaiIcon name="plus" :size="14" />
+        </button>
+        <NaiIcon class="chev" :class="{ open: preciseOpen }" name="down" :size="14" />
+      </div>
+      <div v-if="preciseOpen" class="body">
+        <p v-if="!preciseOk" class="banner">
+          精准参考仅 V4.5 可用
+          <button type="button" @click="switchToV45">切换到 V4.5</button>
+        </p>
+        <div v-if="!store.preciseReferences.length" class="drop">
+          <span class="drop-hint"><NaiIcon name="upload" :size="15" /> 拖角色或风格参考图进来，或者</span>
+          <span class="drop-acts">
+            <button type="button" :disabled="!preciseOk" @click="pick('precise')"><NaiIcon name="upload" :size="13" /> 从文件添加</button>
+            <button type="button" @click="router.push('/precise-library')"><NaiIcon name="folder" :size="13" /> 从精准参考库添加</button>
+          </span>
+        </div>
+        <template v-else>
+          <article v-for="item in store.preciseReferences" :key="item.id" class="item" :class="{ off: !item.enabled }">
+            <img class="tall" :src="item.previewUrl" alt="" />
+            <div class="item-main">
+              <select
+                :value="item.type"
+                @change="store.updatePreciseReference(item.id, { type: ($event.target as HTMLSelectElement).value as PreciseReferenceType })"
+              >
+                <option v-for="opt in PRECISE_TYPES" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+              </select>
+              <label class="slide compact">
+                <span>强度</span><b>{{ item.strength.toFixed(2) }}</b>
+                <input
+                  :value="item.strength"
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.01"
+                  @input="store.updatePreciseReference(item.id, { strength: Number(($event.target as HTMLInputElement).value) })"
+                />
+              </label>
+              <label class="slide compact">
+                <span>保真</span><b>{{ item.fidelity.toFixed(2) }}</b>
+                <input
+                  :value="item.fidelity"
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.01"
+                  @input="store.updatePreciseReference(item.id, { fidelity: Number(($event.target as HTMLInputElement).value) })"
+                />
+              </label>
+            </div>
+            <div class="item-side">
+              <button type="button" :class="{ on: item.enabled }" title="启用" @click="store.updatePreciseReference(item.id, { enabled: !item.enabled })">
+                <NaiIcon name="check" :size="14" />
+              </button>
+              <button type="button" title="删除" @click="store.removePreciseReference(item.id)"><NaiIcon name="close" :size="14" /></button>
+            </div>
+          </article>
+          <div class="foot">
+            <button class="text" type="button" :disabled="!preciseOk" @click="useCurrent('precise')">用当前图</button>
+            <span class="grow" />
+            <button class="icon" type="button" title="清空全部" @click="store.preciseReferences = []"><NaiIcon name="trash" :size="14" /></button>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <div v-if="sketchOpen" class="mask" @click.self="sketchOpen = false">
+      <div class="sketch">
+        <header>
+          <strong>画草图</strong>
+          <button type="button" @click="sketchOpen = false"><NaiIcon name="close" :size="14" /></button>
+        </header>
+        <canvas
+          ref="sketchCanvas"
+          width="768"
+          height="512"
+          @pointerdown="startSketch"
+          @pointermove="drawSketch"
+          @pointerup="endSketch"
+          @pointercancel="endSketch"
+        />
+        <div class="sketch-acts">
+          <button type="button" @click="prepareSketch">清空</button>
+          <button class="go" type="button" @click="useSketch">用作图生图</button>
+        </div>
+      </div>
     </div>
   </section>
 </template>
 
 <style scoped>
-.block h2 { font-size: 20px; margin: 0 0 10px; }
-.card { margin-bottom: 14px; border-radius: 10px; transition: box-shadow 0.15s ease, outline-color 0.15s ease; outline: 2px solid transparent; }
-.card.over { outline-color: var(--heading); box-shadow: 0 0 0 1px var(--heading); }
-.i2i-tabs {
+.refs {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  padding: 12px 12px 0;
+  background: rgba(255, 255, 255, 0.02);
+}
+.refs h2 { margin: 0 0 6px; font-size: 14px; font-family: inherit; letter-spacing: 0; font-weight: 650; color: #fff; }
+.group { border-top: 1px solid rgba(255, 255, 255, 0.08); }
+.group.over { background: rgba(245, 243, 194, 0.06); }
+.row {
+  height: 46px;
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 12px;
-}
-.i2i-tabs button {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  background: var(--bg2);
-  border: 1px solid var(--bg3);
-  color: rgba(255,255,255,0.78);
-  border-radius: 999px;
-  padding: 6px 10px;
-  font-size: 12px;
-}
-.i2i-tabs button em { font-style: normal; color: var(--muted); }
-.i2i-tabs button.on { color: var(--heading); border-color: var(--heading); }
-.i2i-tabs .active {
-  background: #2d8a4a;
-  color: #fff;
-  border-radius: 999px;
-  padding: 1px 6px;
-  font-size: 10px;
-}
-.i2i-empty {
-  width: 100%;
-  display: grid;
-  justify-items: center;
-  gap: 4px;
-  padding: 22px 12px;
-  border: 1px dashed var(--bg3);
-  border-radius: 10px;
-  background: var(--bg0);
-  color: var(--muted);
-}
-.i2i-empty strong { color: #fff; font-size: 13px; }
-.i2i-empty span { font-size: 12px; }
-.inpaint-card {
-  display: grid;
-  grid-template-columns: 72px 1fr;
-  gap: 10px 12px;
-  align-items: start;
-  margin-bottom: 8px;
-}
-.inpaint-thumb {
-  position: relative;
-  width: 72px;
-  height: 72px;
-  overflow: hidden;
-  padding: 0;
-  border: 0;
-  border-radius: 8px;
-  background: var(--bg0);
-}
-.inpaint-thumb img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
-.inpaint-thumb .wash,
-.preview-wash {
-  position: absolute;
-  inset: 0;
-  background: rgba(122, 108, 230, 0.46);
-  pointer-events: none;
-  -webkit-mask-size: 100% 100%;
-  mask-size: 100% 100%;
-  -webkit-mask-repeat: no-repeat;
-  mask-repeat: no-repeat;
-}
-.inpaint-meta { min-width: 0; display: grid; gap: 10px; }
-.back {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  background: none;
-  border: 0;
-  color: #fff;
-  padding: 0;
-  font-size: 14px;
-}
-.back :deep(.nai-icon) { transform: rotate(-90deg); }
-.inpaint-acts {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.inpaint-acts button {
-  background: none;
-  border: 0;
-  color: rgba(255,255,255,0.72);
-  padding: 2px;
-}
-.inpaint-acts .grow { flex: 1; }
-.i2i-row {
-  display: grid;
-  grid-template-columns: 52px 1fr auto;
   align-items: center;
   gap: 10px;
-  margin-bottom: 8px;
-}
-.thumb {
-  width: 52px;
-  height: 52px;
-  object-fit: cover;
-  border-radius: 8px;
-  background: var(--bg0);
+  padding: 0 2px 0 0;
+  color: rgba(255, 255, 255, 0.78);
   cursor: pointer;
 }
-.i2i-meta { min-width: 0; }
-.i2i-meta strong { display: block; font-size: 13px; }
-.i2i-meta span { color: var(--muted); font-size: 12px; }
-.i2i-acts { display: flex; align-items: center; gap: 6px; }
-.i2i-acts button {
+.row b { font-size: 13px; font-weight: 500; color: #fff; flex: none; }
+.row em {
+  flex: none;
+  height: 18px;
+  padding: 0 7px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  line-height: 18px;
+}
+.row span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12px; }
+.row span.warn { color: #e39b4a; }
+.ghost {
+  border: 0;
+  background: transparent;
+  color: #7eb6ff;
+  height: 28px;
+  padding: 0 4px;
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  font-size: 13px;
+  font-weight: 650;
+}
+.icon, .drop-acts button, .shot-acts button, .foot button, .item-side button, .sketch-acts button, .sketch header button {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.86);
+  border-radius: 6px;
+  height: 28px;
+  padding: 0 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 500;
+}
+.icon, .item-side button, .sketch header button { width: 28px; padding: 0; justify-content: center; color: rgba(255, 255, 255, 0.7); }
+.foot .text { border-color: transparent; background: transparent; color: rgba(255, 255, 255, 0.72); }
+.icon:disabled, .ghost:disabled, .drop-acts button:disabled, .foot button:disabled { opacity: 0.4; }
+.chev { color: rgba(255, 255, 255, 0.45); transition: transform 0.18s ease; }
+.chev.open { transform: rotate(180deg); }
+.body { display: flex; flex-direction: column; gap: 10px; padding: 2px 0 12px; }
+.drop {
+  width: 100%;
+  border: 1px dashed rgba(255, 255, 255, 0.18);
+  border-radius: 8px;
   background: transparent;
-  border: 0;
-  color: rgba(255,255,255,0.78);
-  padding: 4px;
-  font-size: 12px;
-  white-space: nowrap;
-}
-.i2i-acts button.on { color: var(--heading); }
-.i2i-acts .x { color: rgba(255,255,255,0.55); }
-.head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  min-width: 0;
-}
-.title {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  color: var(--heading);
-}
-.title strong {
-  overflow: hidden;
-  color: var(--heading);
-  font-size: 16px;
-  font-weight: 600;
-  line-height: 1.2;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-.title em {
-  flex: none;
   color: var(--muted);
-  font-style: normal;
-  font-weight: 600;
-  white-space: nowrap;
-}
-.acts { display: flex; flex: none; gap: 6px; align-items: center; }
-.banner {
+  padding: 14px 12px;
   display: flex;
+  flex-direction: column;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin: 8px 0 0;
-  color: #ffb4b4;
-  font-size: 12px;
-  line-height: 1.4;
+  gap: 10px;
 }
-.inset-view { width: 100%; margin-top: 10px; border-radius: 8px; background: #111; cursor: grab; touch-action: none; }
-.inset-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
-.inset-row button { border: 1px solid var(--bg3); background: transparent; border-radius: 8px; padding: 4px 8px; }
-.inset-row button.on { background: var(--heading); color: var(--bg0); }
-.inset-row .check { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 12px; color: var(--muted); }
-.banner .link {
-  background: none;
-  border: 0;
-  color: var(--heading);
-  padding: 0;
-  font-size: 12px;
-  font-weight: 600;
-  text-decoration: underline;
-  text-underline-offset: 2px;
-  white-space: nowrap;
-}
-.icon-sq {
-  width: 28px; height: 28px; display: grid; place-items: center;
-  background: var(--bg2); border: 1px solid var(--bg3); border-radius: 6px; color: #fff;
-}
-.icon-sq.on { color: var(--heading); border-color: var(--heading); }
-.icon-sq.off,
-.icon-sq:disabled { opacity: 0.4; }
-.preview { width: 100%; margin-top: 8px; border-radius: 6px; max-height: 160px; object-fit: contain; background: var(--bg0); }
-.check {
-  display: flex; align-items: center; gap: 8px;
-  margin: 10px 0 8px; font-size: 13px; color: #fff;
-}
-.check input { accent-color: var(--heading); width: 16px; height: 16px; }
-.ref { margin-top: 10px; padding-top: 8px; }
-.ref.off { opacity: 0.45; }
-.row { display: flex; align-items: center; gap: 10px; }
-.row img { width: 56px; height: 72px; object-fit: cover; border-radius: 6px; background: var(--bg0); }
-.meta { display: flex; align-items: center; justify-content: space-between; flex: 1; gap: 8px; }
-.id { font-size: 13px; color: #fff; }
-.cost {
-  display: inline-flex; align-items: center; gap: 4px;
-  background: var(--bg0); border-radius: 6px; padding: 4px 8px; font-size: 12px;
-}
-.type {
-  flex: 1;
-  background: var(--bg0);
-  border: 1px solid var(--bg3);
+.drop-hint { display: inline-flex; align-items: center; justify-content: center; gap: 6px; font-size: 12px; text-align: center; }
+.drop-acts { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; }
+.shot { display: flex; gap: 12px; align-items: flex-start; }
+.shot img { width: 96px; max-height: 140px; object-fit: cover; border-radius: 6px; background: #10111c; }
+.shot-acts { display: flex; flex-wrap: wrap; gap: 6px; }
+.shot-acts .danger { color: #ff8d8d; }
+.slide { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; color: #fff; font-size: 12px; }
+.slide.compact { gap: 0 8px; color: var(--muted); font-size: 11px; }
+.slide input { grid-column: 1 / -1; }
+.slide b { font-variant-numeric: tabular-nums; color: #fff; }
+.foot { display: flex; align-items: center; gap: 6px; }
+.foot .grow { flex: 1; }
+.check { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; color: var(--muted); font-size: 12px; }
+.check input { width: 14px; height: 14px; min-width: 0; }
+.banner {
+  margin: 0;
+  padding: 7px 10px;
   border-radius: 6px;
-  padding: 8px 10px;
+  background: rgba(227, 155, 74, 0.12);
+  color: #e39b4a;
+  font-size: 12px;
 }
-.slide { display: grid; grid-template-columns: 1fr auto; gap: 4px 8px; margin: 8px 0; font-size: 13px; color: rgba(255,255,255,0.8); }
-.slide input[type="range"] { grid-column: 1 / -1; width: 100%; }
-.slide b {
-  background: var(--bg0);
-  border-radius: 6px;
-  padding: 2px 8px;
-  min-width: 28px;
-  text-align: center;
-  font-variant-numeric: tabular-nums;
+.banner button { border: 0; background: transparent; color: var(--heading); padding: 0 0 0 6px; }
+.item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
 }
-.row-acts { display: flex; gap: 6px; }
-.ghost {
-  background: transparent; border: 0; color: rgba(255,255,255,0.7); padding: 2px; display: grid; place-items: center;
-}
-.ghost.on { color: var(--heading); }
-.note { margin: 6px 0 0; color: var(--muted); font-size: 12px; font-weight: 400; }
-.menu-wrap { position: relative; }
-.menu {
-  position: absolute; right: 0; top: 32px; z-index: 4;
-  background: var(--bg2); border: 1px solid var(--bg3); border-radius: 6px; min-width: 120px; padding: 4px;
-}
-.menu button {
-  width: 100%; text-align: left; background: none; border: 0; color: #fff; padding: 6px 8px; border-radius: 4px;
-}
-.menu button:hover { background: var(--bg3); }
-.menu button:disabled { opacity: 0.4; }
+.item.off { opacity: 0.55; }
+.item img { width: 44px; height: 44px; object-fit: cover; border-radius: 6px; flex: none; }
+.item img.tall { height: 58px; }
+.item-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.item-main select { height: 26px; padding: 0 8px; font-size: 12px; }
+.item-side { display: flex; flex-direction: column; gap: 2px; }
+.item-side button { width: 24px; height: 24px; border: 0; background: transparent; }
+.item-side button.on { color: #fff; }
+.note { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
+.mask { position: fixed; inset: 0; z-index: 50; background: rgba(0, 0, 0, 0.45); display: grid; place-items: center; padding: 20px; }
+.sketch { width: min(820px, 100%); padding: 12px; border-radius: 12px; background: #12141f; border: 1px solid rgba(255, 255, 255, 0.08); }
+.sketch header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.sketch header button { width: 28px; padding: 0; justify-content: center; }
+.sketch canvas { width: 100%; height: auto; border-radius: 8px; background: #f4f1e8; touch-action: none; cursor: crosshair; }
+.sketch-acts { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+.sketch-acts .go { background: var(--heading); color: #12141f; }
 </style>

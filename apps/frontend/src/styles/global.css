@@ -40,6 +40,7 @@ input, textarea, select {
   border-radius: 4px;
 }
 input::placeholder, textarea::placeholder { color: #ffffff77; }
+select option, select optgroup { color: #1a1c2e; background: #ffffff; }
 ::-webkit-scrollbar { width: 14px; height: 14px; }
 ::-webkit-scrollbar-thumb {
   background-color: var(--bg3);

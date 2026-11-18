@@ -46,7 +46,6 @@ import {
   maxCharacterPrompts,
   modelToNai,
   newCharacter,
-  isV5,
   newInsetReference,
   newPreciseReference,
   newVibeImage,
@@ -523,13 +522,21 @@ export const useAppStore = defineStore("app", () => {
     status.value = "已保存角色位置";
   }
 
-  function addCharacter() {
+  function addCharacter(prompt = "") {
     const max = maxCharacterPrompts(params.value.model);
     if (characters.value.length >= max) {
       status.value = `当前模型最多 ${max} 个角色提示`;
-      return;
+      return false;
     }
-    characters.value = [...characters.value, newCharacter(positionCustom.value)];
+    const created = newCharacter(positionCustom.value);
+    if (prompt) created.prompt = prompt;
+    characters.value = [...characters.value, created];
+    return true;
+  }
+
+  function clearCharacters() {
+    characters.value = [];
+    status.value = "已清空角色提示词";
   }
 
   function removeCharacter(id: string) {
@@ -614,8 +621,16 @@ export const useAppStore = defineStore("app", () => {
         enabled: true,
       }));
       if (incoming.length) {
-        characters.value = opts.append ? [...characters.value.filter((c) => c.prompt.trim()), ...incoming] : incoming;
-        positionCustom.value = incoming.some((c) => c.useCoords);
+        const max = maxCharacterPrompts(params.value.model);
+        const kept = [...characters.value];
+        const have = new Set(kept.map((item) => item.prompt.trim()).filter(Boolean));
+        const extra = incoming.filter((item) => {
+          const key = item.prompt.trim();
+          return Boolean(key) && !have.has(key);
+        });
+        const room = Math.max(0, max - kept.length);
+        characters.value = [...kept, ...extra.slice(0, room)];
+        if (incoming.some((item) => item.useCoords)) positionCustom.value = true;
       }
     }
     if (opts.seed && report.seed) {
@@ -842,7 +857,7 @@ export const useAppStore = defineStore("app", () => {
     if (busy.value) return empty;
     const source = i2iImage.value || (inpaintMask.value && paintMode.value ? previewUrl.value : "");
     const hasMask = Boolean(inpaintMask.value) && paintMode.value;
-    const insetOn = Boolean(isV5(params.value.model) && insetReference.value?.enabled && insetReference.value.previewUrl);
+    const insetOn = false;
     if (!insetOn && !options?.ignoreI2i && ((hasMask && source) || i2iImage.value)) kind = "img2img";
     const hasPrompt =
       params.value.positivePrompt.trim() ||
@@ -1316,6 +1331,7 @@ export const useAppStore = defineStore("app", () => {
     startPositionEditor,
     finishPositionEditor,
     addCharacter,
+    clearCharacters,
     removeCharacter,
     moveCharacter,
     updateCharacter,

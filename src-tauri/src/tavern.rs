@@ -144,12 +144,23 @@ struct LlmDelta {
     reasoning: String,
 }
 
+#[derive(Debug, Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmUsage {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub cache_read_tokens: u32,
+    pub cache_write_tokens: u32,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LlmResult {
     pub content: String,
     pub reasoning: String,
     pub finish_reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<LlmUsage>,
 }
 
 fn endpoint(base: &str, path: &str) -> Result<String, String> {
@@ -180,6 +191,37 @@ fn str_at<'a>(v: &'a Value, path: &[&str]) -> &'a str {
         };
     }
     cur.as_str().unwrap_or("")
+}
+
+fn u32_field(v: &Value, key: &str) -> u32 {
+    match v.get(key) {
+        Some(Value::Number(n)) => n.as_u64().or_else(|| n.as_f64().map(|f| f as u64)).unwrap_or(0) as u32,
+        _ => 0,
+    }
+}
+
+fn parse_usage(v: &Value) -> Option<LlmUsage> {
+    let usage = v.get("usage")?;
+    if !usage.is_object() {
+        return None;
+    }
+    let prompt_tokens = u32_field(usage, "prompt_tokens");
+    let completion_tokens = u32_field(usage, "completion_tokens");
+    if prompt_tokens == 0 && completion_tokens == 0 {
+        return None;
+    }
+    let mut cache_read_tokens = u32_field(usage, "prompt_cache_hit_tokens");
+    if cache_read_tokens == 0 {
+        if let Some(details) = usage.get("prompt_tokens_details") {
+            cache_read_tokens = u32_field(details, "cached_tokens");
+        }
+    }
+    Some(LlmUsage {
+        prompt_tokens,
+        completion_tokens,
+        cache_read_tokens,
+        cache_write_tokens: 0,
+    })
 }
 
 fn delta_parts(choice: &Value, key: &str) -> (String, String) {
@@ -233,6 +275,9 @@ async fn run_chat(app: &AppHandle, request: &LlmRequest) -> Result<LlmResult, St
             body["max_tokens"] = json!(m);
         }
     }
+    if stream {
+        body["stream_options"] = json!({ "include_usage": true });
+    }
 
     let client = crate::nai::http_client_no_redirect()?;
     let res = client
@@ -257,12 +302,13 @@ async fn run_chat(app: &AppHandle, request: &LlmRequest) -> Result<LlmResult, St
         let choice = data.get("choices").and_then(|c| c.get(0)).cloned().unwrap_or(Value::Null);
         let (content, reasoning) = delta_parts(&choice, "message");
         let finish_reason = str_at(&choice, &["finish_reason"]).to_string();
-        return Ok(LlmResult { content, reasoning, finish_reason });
+        return Ok(LlmResult { content, reasoning, finish_reason, usage: parse_usage(&data) });
     }
 
     let mut content = String::new();
     let mut reasoning = String::new();
     let mut finish_reason = String::new();
+    let mut usage: Option<LlmUsage> = None;
     let mut buf: Vec<u8> = Vec::new();
     let mut bytes = res.bytes_stream();
     'outer: while let Some(chunk) = bytes.next().await {
@@ -286,6 +332,9 @@ async fn run_chat(app: &AppHandle, request: &LlmRequest) -> Result<LlmResult, St
                 let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("未知错误");
                 return Err(format!("对话 API 返回错误：{msg}"));
             }
+            if let Some(next) = parse_usage(&v) {
+                usage = Some(next);
+            }
             let Some(choice) = v.get("choices").and_then(|c| c.get(0)) else { continue };
             let (c, r) = delta_parts(choice, "delta");
             let fr = str_at(choice, &["finish_reason"]);
@@ -303,7 +352,7 @@ async fn run_chat(app: &AppHandle, request: &LlmRequest) -> Result<LlmResult, St
             );
         }
     }
-    Ok(LlmResult { content, reasoning, finish_reason })
+    Ok(LlmResult { content, reasoning, finish_reason, usage })
 }
 
 #[tauri::command]

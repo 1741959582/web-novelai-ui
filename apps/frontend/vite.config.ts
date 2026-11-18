@@ -25,6 +25,26 @@ export default defineConfig({
     watch: {
       ignored: ["**/src-tauri/**"],
     },
+    proxy: {
+      "/aitag": {
+        target: "https://aitag.win",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/aitag/, ""),
+        headers: { Referer: "https://aitag.win/" },
+      },
+      "/pixiv": {
+        target: "https://i.pximg.net",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/pixiv/, ""),
+        headers: { Referer: "https://www.pixiv.net/" },
+      },
+      "/aiimg": {
+        target: "https://ai-img.10118899.xyz",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/aiimg/, ""),
+        headers: { Referer: "https://aitag.win/" },
+      },
+    },
   },
   envPrefix: ["VITE_", "TAURI_"],
   build: {

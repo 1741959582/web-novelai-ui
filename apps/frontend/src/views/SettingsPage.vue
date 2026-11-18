@@ -1,16 +1,19 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from "vue";
+import { onMounted, onUnmounted, ref, watch } from "vue";
+import { useRoute } from "vue-router";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { censorDownload, censorOpenDir, censorStatus, danbooruStatus, downloadDanbooru, openOutputDir, pickOutputDir, ruyiFirefoxDownload, ruyiFirefoxStatus, ruyiScriptCheck, ruyiScriptDownload, ruyiScriptStatus, type CensorEngineInfo, type FirefoxBrowserStatus, type ScriptPackageStatus } from "@/api/tauri";
 import { useAppStore } from "@/stores/app";
 import { useDeepseekStore } from "@/stores/deepseekChat";
 import ClTaggerPanel from "@/components/ClTaggerPanel.vue";
+import NaiAgentSettings from "@/components/NaiAgentSettings.vue";
 import NaiIcon from "@/components/NaiIcon.vue";
 
-type Tab = "api" | "storage" | "tags" | "tagger" | "censor" | "script" | "firefox" | "perf" | "stealth" | "deepseek" | "about";
+type Tab = "api" | "storage" | "tags" | "tagger" | "censor" | "script" | "firefox" | "perf" | "stealth" | "deepseek" | "agent" | "about";
 
 const store = useAppStore();
 const deepseek = useDeepseekStore();
+const route = useRoute();
 const tab = ref<Tab>("api");
 const tokenDraft = ref("");
 const reapiDraft = ref("");
@@ -34,7 +37,14 @@ let unlistenCensor: UnlistenFn | undefined;
 let unlistenScript: UnlistenFn | undefined;
 let unlistenFirefox: UnlistenFn | undefined;
 
+function syncTab() {
+  if (route.query.tab === "agent") tab.value = "agent";
+}
+
+watch(() => route.query.tab, syncTab);
+
 onMounted(async () => {
+  syncTab();
   unlistenCensor = await listen<{ percent: number; message: string }>("censor-download", (event) => {
     censorPct.value = Math.max(0, Math.min(100, Math.round(event.payload.percent)));
     censorProgress.value = event.payload.message;
@@ -267,6 +277,10 @@ async function save() {
         <NaiIcon name="sparkle" :size="16" />
         <span>DeepSeek</span>
       </button>
+      <button type="button" :class="{ on: tab === 'agent' }" @click="tab = 'agent'">
+        <NaiIcon name="sparkle" :size="16" />
+        <span>NAI Agent</span>
+      </button>
       <button type="button" :class="{ on: tab === 'about' }" @click="tab = 'about'">
         <NaiIcon name="globe" :size="16" />
         <span>关于与更新</span>
@@ -423,6 +437,8 @@ async function save() {
         </label>
         <p class="hint">示例图收成「点击显示」。生成过程和大图浏览也先收起，点一下才看到图。历史和批量队列里的缩略图同样要点一下才出现。</p>
       </div>
+
+      <NaiAgentSettings v-else-if="tab === 'agent'" />
 
       <div v-else-if="tab === 'deepseek'" class="card">
         <h2>后续关键词</h2>

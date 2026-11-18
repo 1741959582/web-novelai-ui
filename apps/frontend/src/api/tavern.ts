@@ -199,10 +199,18 @@ export interface LlmRequest {
   stream?: boolean;
 }
 
+export interface LlmUsage {
+  promptTokens: number;
+  completionTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+}
+
 export interface LlmResult {
   content: string;
   reasoning: string;
   finishReason: string;
+  usage?: LlmUsage | null;
 }
 
 export interface LlmDelta {

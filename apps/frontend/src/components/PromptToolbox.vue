@@ -34,7 +34,13 @@ const emit = defineEmits<{
 }>();
 
 type Panel = "" | "preset" | "weight" | "chunk";
+const toolsOpen = ref(false);
 const panel = ref<Panel>("");
+
+function toggleTools() {
+  toolsOpen.value = !toolsOpen.value;
+  if (!toolsOpen.value) panel.value = "";
+}
 const presets = ref(loadPresets());
 const chunks = ref(loadChunks());
 const translating = ref(false);
@@ -138,7 +144,11 @@ function removeChunk(id: string) {
 
 <template>
   <div class="tb">
-    <div class="tools">
+    <button type="button" class="reveal" :class="{ on: toolsOpen }" @click="toggleTools">
+      <NaiIcon name="sliders" :size="13" />
+      {{ toolsOpen ? "收起提示词工具" : "提示词工具" }}
+    </button>
+    <div v-if="toolsOpen" class="tools">
       <button type="button" :class="{ on: panel === 'preset' }" @click="toggle('preset')">
         <NaiIcon name="layers" :size="13" />正面预设
       </button>
@@ -158,7 +168,7 @@ function removeChunk(id: string) {
         <NaiIcon name="plus" :size="13" />自定义提词
       </button>
     </div>
-    <p class="hint">提词分「翻译」和「提示词库」两个页。点「标签」可多选或拖到另一个标签上合成；合成格式可选 {} 或 ::。</p>
+    <p v-if="toolsOpen" class="hint">提词分「翻译」和「提示词库」两个页。点「标签」可多选或拖到另一个标签上合成；合成格式可选 {} 或 ::。</p>
 
     <section v-if="panel === 'preset'" class="panel">
       <header>
@@ -223,7 +233,22 @@ function removeChunk(id: string) {
 
 <style scoped>
 .tb { margin-top: 8px; }
+.reveal {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 12px;
+  font-weight: 500;
+}
+.reveal:hover, .reveal.on { color: var(--heading); background: rgba(255, 255, 255, 0.06); }
 .tools {
+  margin-top: 6px;
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 6px;

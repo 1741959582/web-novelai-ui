@@ -55,6 +55,17 @@ const runStatusOptions = [
 
 const filters = reactive({ runStatus: "", keyword: "" });
 const orientation = ref<0 | 1>(1);
+const cardSize = ref(320);
+let cardObserver: ResizeObserver | null = null;
+
+function syncCardSize() {
+  const nav = document.querySelector(".shell > .rail, .shell > .panel:not(.overlay)");
+  const navW = nav instanceof HTMLElement ? nav.offsetWidth : 48;
+  const inner = Math.max(320, window.screen.availWidth - navW - 64);
+  const gap = 16;
+  const cols = Math.max(1, Math.floor((inner + gap) / (320 + gap)));
+  cardSize.value = Math.floor((inner - gap * (cols - 1)) / cols);
+}
 const site = ref<"x" | "pixiv">("x");
 const accounts = ref<TwitterAccount[]>([]);
 const status = ref<RuyiStatus | null>(null);
@@ -964,6 +975,13 @@ watch([insightDays, insightLikes, insightFollows, insightStart, insightEnd], () 
 });
 
 onMounted(async () => {
+  syncCardSize();
+  window.addEventListener("resize", syncCardSize);
+  const shell = document.querySelector(".shell");
+  if (shell) {
+    cardObserver = new ResizeObserver(syncCardSize);
+    cardObserver.observe(shell);
+  }
   document.addEventListener("pointerdown", onQueueOutside);
   try {
     status.value = await ruyiStatus();
@@ -1004,6 +1022,8 @@ onActivated(() => {
 });
 
 onUnmounted(() => {
+  window.removeEventListener("resize", syncCardSize);
+  cardObserver?.disconnect();
   document.removeEventListener("pointerdown", onQueueOutside);
   if (pollTimer) window.clearInterval(pollTimer);
   if (liveTimer) window.clearInterval(liveTimer);
@@ -1093,7 +1113,7 @@ onUnmounted(() => {
       </div>
       <p class="hint proxy-hint">{{ proxyHint }}</p>
 
-      <div class="grid" :class="{ tall: orientation === 1 }">
+      <div class="grid" :class="{ tall: orientation === 1 }" :style="{ '--card-size': `${cardSize}px` }">
         <p v-if="loading" class="empty">正在读取{{ site === "pixiv" ? " Pixiv " : "推特" }}账号</p>
         <p v-else-if="!visibleAccounts.length" class="empty">还没有{{ site === "pixiv" ? " Pixiv " : "推特" }}账号。点「添加/导入」创建。</p>
         <article v-for="row in visibleAccounts" :key="row.account_id" class="card" @click.stop>
@@ -1416,7 +1436,7 @@ input, select, textarea { min-width: 180px; background: var(--bg0); border: 1px 
 .orient button { border: 1px solid var(--bg3); background: transparent; border-radius: 8px; padding: 6px 10px; }
 .orient button.on { background: var(--heading); color: var(--bg0); border-color: var(--heading); }
 .sites { margin-left: 0; }
-.grid { flex: 1; overflow: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; align-content: start; padding: 16px; }
+.grid { flex: 1; overflow: auto; display: grid; grid-template-columns: repeat(auto-fill, var(--card-size, 320px)); gap: 16px; align-content: start; justify-content: start; padding: 16px; }
 .card { display: flex; flex-direction: column; gap: 12px; padding: 14px; border-radius: 22px; background: var(--bg2); border: 1px solid var(--bg3); position: relative; }
 .preview { position: relative; border-radius: 16px; overflow: hidden; background: #10111c; aspect-ratio: 16 / 9; }
 .preview.portrait { aspect-ratio: 9 / 16; max-height: 420px; }

@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, getCurrentInstance, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { NAI_MODELS, NAI_SAMPLERS, NAI_UC_PRESETS, isV4Plus, isV5, maxCharacterPrompts, supportsNAIPreciseReference, supportsNAIVibeTransfer } from "@/types/nai";
+import { NAI_MODELS, NAI_SAMPLERS, isV4Plus, maxCharacterPrompts, supportsNAIPreciseReference, supportsNAIVibeTransfer } from "@/types/nai";
 import { useAppStore } from "@/stores/app";
 import { fetchRemoteImage } from "@/api/tauri";
 import { quoteAnlas } from "@/utils/anlas";
-import { RESOLUTION_LABELS, applyResolution, inferResolution, type Orientation, type ResolutionFamily } from "@/utils/resolution";
+import { applyResolution, inferResolution, type Orientation, type ResolutionFamily } from "@/utils/resolution";
 import HistoryRail from "@/components/HistoryRail.vue";
 import NaiIcon from "@/components/NaiIcon.vue";
 import StarterGallery from "@/components/StarterGallery.vue";
@@ -20,16 +20,40 @@ import ReferencePanel from "@/components/ReferencePanel.vue";
 import PromptField from "@/components/PromptField.vue";
 import PromptToolbox from "@/components/PromptToolbox.vue";
 import DanbooruBubble from "@/components/DanbooruBubble.vue";
+import NaiAgentMark from "@/components/NaiAgentMark.vue";
+import NaiAgentPanel from "@/components/NaiAgentPanel.vue";
 import { loadAutoComplete } from "@/utils/promptTools";
 
 const store = useAppStore();
 const route = useRoute();
 const aiOpen = ref(false);
-const advanced = ref(false);
+const NOISE_SCHEDULES = [
+  { value: "native", label: "Native" },
+  { value: "karras", label: "Karras" },
+  { value: "exponential", label: "Exponential" },
+  { value: "polyexponential", label: "Polyexponential" },
+];
 const dropping = ref(false);
 const guideOpen = ref(false);
+const guideBtn = ref<HTMLButtonElement | null>(null);
+const guidePopStyle = ref<Record<string, string>>({});
 const previewCollapsed = ref(false);
 const promptTab = ref<"prompt" | "uc">("prompt");
+const agentOpen = ref(false);
+const charMenu = ref(false);
+const pageVm = getCurrentInstance() as { job?: () => void; update?: () => void } | null;
+function paintAgent() {
+  const run = pageVm?.job || pageVm?.update;
+  if (typeof run === "function") run();
+}
+function toggleAgent() {
+  agentOpen.value = !agentOpen.value;
+  paintAgent();
+}
+function closeAgent() {
+  agentOpen.value = false;
+  paintAgent();
+}
 const charTab = ref<Record<string, "prompt" | "uc">>({});
 const autoComplete = ref(loadAutoComplete());
 watch(
@@ -73,20 +97,10 @@ const orientation = computed({
 });
 
 const inpaintOn = computed(() => store.paintMode && Boolean(store.inpaintMask));
-const insetOn = computed(() => Boolean(isV5(store.params.model) && store.insetReference?.enabled && store.insetReference.previewUrl));
-const insetSize = computed(() =>
-  insetOn.value && store.insetReference
-    ? { width: store.insetReference.canvasWidth, height: store.insetReference.canvasHeight }
-    : null,
-);
-const actionKind = computed(() =>
-  insetSize.value ? "infill" : inpaintOn.value ? "infill" : store.i2iImage ? "img2img" : "generate",
-);
+const actionKind = computed(() => (inpaintOn.value ? "infill" : store.i2iImage ? "img2img" : "generate"));
 const anlas = computed(() =>
   quoteAnlas({
-    params: insetSize.value
-      ? { ...store.params, width: insetSize.value.width, height: insetSize.value.height }
-      : store.params,
+    params: store.params,
     account: store.account,
     batchCount: store.batchCount,
     action: actionKind.value,
@@ -97,8 +111,8 @@ const anlas = computed(() =>
 );
 const generateLabel = computed(() => {
   const n = store.batchCount;
-  if (inpaintOn.value) return n === 1 ? "Inpaint 1 Image" : `Inpaint ${n} Images`;
-  return n === 1 ? "Generate 1 Image" : `Generate ${n} Images`;
+  if (inpaintOn.value) return n === 1 ? "重绘 1 张图片" : `重绘 ${n} 张图片`;
+  return n === 1 ? "生成 1 张图片" : `生成 ${n} 张图片`;
 });
 const displayProgress = computed(() => Math.min(1, Math.max(0, store.genProgress)));
 const streamTitle = computed(() => {
@@ -113,6 +127,8 @@ const maxChars = computed(() => maxCharacterPrompts(store.params.model));
 const samplerLabel = computed(
   () => NAI_SAMPLERS.find((s) => s.value === store.params.sampler)?.short || store.params.sampler,
 );
+const cfgText = computed(() => store.params.cfgScale.toFixed(1));
+const rescaleText = computed(() => store.params.cfgRescale.toFixed(2));
 
 watch(
   () => store.params.model,
@@ -391,6 +407,46 @@ function onPaste(ev: ClipboardEvent) {
 }
 
 let unlistenTauri: (() => void) | undefined;
+function placeGuidePop() {
+  const btn = guideBtn.value;
+  if (!btn) return;
+  const rect = btn.getBoundingClientRect();
+  const width = 280;
+  const gap = 8;
+  const left = rect.right + gap;
+  if (left + width <= window.innerWidth - 8) {
+    guidePopStyle.value = {
+      left: `${left}px`,
+      bottom: `${Math.max(8, window.innerHeight - rect.bottom)}px`,
+    };
+    return;
+  }
+  guidePopStyle.value = {
+    right: `${Math.max(8, window.innerWidth - rect.right)}px`,
+    bottom: `${window.innerHeight - rect.top + gap}px`,
+  };
+}
+
+function toggleGuide() {
+  guideOpen.value = !guideOpen.value;
+  if (guideOpen.value) void nextTick(placeGuidePop);
+}
+
+function closeCharMenu(ev: Event) {
+  const el = ev.target as HTMLElement | null;
+  if (!el?.closest(".add-wrap")) charMenu.value = false;
+  if (!el?.closest(".guide-btn") && !el?.closest(".guide-pop")) guideOpen.value = false;
+}
+
+function addCharacterKind(prompt: string) {
+  if (store.addCharacter(prompt)) charMenu.value = false;
+}
+
+function clearAllCharacters() {
+  store.clearCharacters();
+  charMenu.value = false;
+}
+
 function onPosKey(ev: KeyboardEvent) {
   if (ev.key === "Escape" && store.positionEditorOpen) {
     ev.preventDefault();
@@ -399,54 +455,60 @@ function onPosKey(ev: KeyboardEvent) {
 }
 
 onMounted(() => {
+  window.addEventListener("pointerdown", closeCharMenu);
   window.addEventListener("keydown", onPosKey);
   window.addEventListener("paste", onPaste);
   window.addEventListener("dragenter", onWinDragEnter, true);
   window.addEventListener("dragover", onWinDragOver, true);
   window.addEventListener("dragleave", onWinDragLeave, true);
   window.addEventListener("drop", onWinDrop, true);
-  void getCurrentWebview()
-    .onDragDropEvent((event) => {
-      const kind = event.payload.type;
-      if (kind === "enter" || kind === "over") {
-        dropping.value = true;
-        return;
-      }
-      if (kind === "leave") {
-        dropping.value = false;
-        return;
-      }
-      if (kind === "drop") {
-        dropping.value = false;
-        const paths = event.payload.paths ?? [];
-        const raw = paths.find((item) => {
-          const value = item.trim();
-          return Boolean(value) && (isHttpUrl(value) || isLocalPath(value) || /^file:/i.test(value));
-        });
-        if (!raw) return;
-        tauriDropHandled = true;
-        window.setTimeout(() => {
-          tauriDropHandled = false;
-        }, 800);
-        const path = /^file:/i.test(raw) ? fileUrlToPath(raw) || raw : raw;
-        const pos = "position" in event.payload ? event.payload.position : undefined;
-        const dpr = window.devicePixelRatio || 1;
-        const refKind = pos ? refKindAtPoint(pos.x / dpr, pos.y / dpr) : undefined;
-        if (isHttpUrl(path)) {
-          void importDropped(refKind, undefined, path);
+  try {
+    void getCurrentWebview()
+      .onDragDropEvent((event) => {
+        const kind = event.payload.type;
+        if (kind === "enter" || kind === "over") {
+          dropping.value = true;
           return;
         }
-        void importDropped(refKind, undefined, undefined, path);
-      }
-    })
-    .then((fn) => {
-      unlistenTauri = fn;
-    })
-    .catch(() => {
-      /* browser preview without Tauri */
-    });
+        if (kind === "leave") {
+          dropping.value = false;
+          return;
+        }
+        if (kind === "drop") {
+          dropping.value = false;
+          const paths = event.payload.paths ?? [];
+          const raw = paths.find((item) => {
+            const value = item.trim();
+            return Boolean(value) && (isHttpUrl(value) || isLocalPath(value) || /^file:/i.test(value));
+          });
+          if (!raw) return;
+          tauriDropHandled = true;
+          window.setTimeout(() => {
+            tauriDropHandled = false;
+          }, 800);
+          const path = /^file:/i.test(raw) ? fileUrlToPath(raw) || raw : raw;
+          const pos = "position" in event.payload ? event.payload.position : undefined;
+          const dpr = window.devicePixelRatio || 1;
+          const refKind = pos ? refKindAtPoint(pos.x / dpr, pos.y / dpr) : undefined;
+          if (isHttpUrl(path)) {
+            void importDropped(refKind, undefined, path);
+            return;
+          }
+          void importDropped(refKind, undefined, undefined, path);
+        }
+      })
+      .then((fn) => {
+        unlistenTauri = fn;
+      })
+      .catch(() => {
+        /* browser preview without Tauri */
+      });
+  } catch {
+    /* getCurrentWebview throws synchronously outside the desktop webview */
+  }
 });
 onUnmounted(() => {
+  window.removeEventListener("pointerdown", closeCharMenu);
   window.removeEventListener("keydown", onPosKey);
   window.removeEventListener("paste", onPaste);
   window.removeEventListener("dragenter", onWinDragEnter, true);
@@ -474,12 +536,20 @@ watch(
   { immediate: true },
 );
 
-function resetAi() {
-  store.params.steps = 28;
-  store.params.cfgScale = 5;
-  store.params.cfgRescale = 0;
-  store.params.sampler = "k_euler_ancestral";
-  store.clearSeed();
+function modelShort(value: string) {
+  if (value.includes("5-full")) return "V5 Full";
+  if (value.includes("5-curated")) return "V5 Curated";
+  if (value.includes("4-5-full")) return "V4.5 Full";
+  if (value.includes("4-5-curated")) return "V4.5 Curated";
+  if (value.includes("4-full")) return "V4 Full";
+  if (value.includes("4-curated")) return "V4 Curated";
+  if (value.includes("furry")) return "Furry V3";
+  return "V3";
+}
+
+function toggleSeedPin() {
+  if (store.params.seedMode === "fixed" && store.params.seed > 0) store.clearSeed();
+  else store.rollSeed();
 }
 </script>
 
@@ -492,34 +562,17 @@ function resetAi() {
     </div>
     <section class="left">
       <div class="left-scroll">
-      <select class="model" v-model="store.params.model">
-        <option v-for="m in NAI_MODELS" :key="m.value" :value="m.value">{{ m.label }}</option>
-      </select>
-
-      <div class="chips">
-        <button
-          type="button"
-          class="chip"
-          :class="{ on: store.params.transparentBackground }"
-          @click="store.params.transparentBackground = !store.params.transparentBackground"
-        >
-          <NaiIcon v-if="store.params.transparentBackground" name="x" :size="12" />
-          Transparent BG
-        </button>
-        <label class="chip select">
-          Quality Tags:
-          <select v-model="store.params.qualityPreset">
-            <option value="standard">Standard</option>
-            <option value="light">Light</option>
-            <option value="none">None</option>
-          </select>
-        </label>
+      <div class="model-row">
+        <select class="model" v-model="store.params.model">
+          <option v-for="m in NAI_MODELS" :key="m.value" :value="m.value">{{ modelShort(m.value) }}</option>
+        </select>
       </div>
 
       <section class="block">
         <div class="text-tabs">
-          <button type="button" :class="{ on: promptTab === 'prompt' }" @click="promptTab = 'prompt'">Prompt</button>
-          <button type="button" :class="{ on: promptTab === 'uc' }" @click="promptTab = 'uc'">Undesired Content</button>
+          <button type="button" :class="{ on: promptTab === 'prompt' }" @click="promptTab = 'prompt'">基础提示词</button>
+          <button type="button" :class="{ on: promptTab === 'uc' }" @click="promptTab = 'uc'">负面</button>
+          <NaiAgentMark class="agent-slot" :expanded="agentOpen" @toggle="toggleAgent" />
         </div>
         <PromptField
           v-model="promptValue"
@@ -540,29 +593,33 @@ function resetAi() {
           @update:positive-prompt="store.params.positivePrompt = $event"
           @notice="store.status = $event"
         />
+        <div class="quality-row">
+          <button
+            type="button"
+            class="ghost-text"
+            :class="{ on: store.params.transparentBackground }"
+            @click="store.params.transparentBackground = !store.params.transparentBackground"
+          >
+            透明背景
+          </button>
+          <label class="quality">
+            质量词预设
+            <select v-model="store.params.qualityPreset">
+              <option value="standard">标准</option>
+              <option value="light">轻量</option>
+              <option value="none">不使用</option>
+            </select>
+          </label>
+        </div>
       </section>
 
       <section class="block">
-        <header class="head">
-          <div>
-            <h2>Character Prompts</h2>
-            <p>Create a separate prompt for characters in your scene.</p>
-          </div>
-          <button
-            class="icon-sq"
-            type="button"
-            :disabled="!canCharacters || store.characters.length >= maxChars"
-            @click="store.addCharacter()"
-          >
-            <NaiIcon name="plus" :size="18" />
-          </button>
-        </header>
-
-        <div class="pos">
-          <span>Position</span>
+        <header class="head char-tools">
+          <h2>角色提示词 <em>{{ store.characters.length }}</em></h2>
+          <span class="pos-label">定位</span>
           <div class="seg">
-            <button type="button" :class="{ on: !store.customPositions }" @click="store.setPositionMode(false)">AI’s Choice</button>
-            <button type="button" :class="{ on: store.customPositions }" @click="store.setPositionMode(true)">Custom</button>
+            <button type="button" :class="{ on: !store.customPositions }" @click="store.setPositionMode(false)">AI 选择</button>
+            <button type="button" :class="{ on: store.customPositions }" @click="store.setPositionMode(true)">自定义</button>
           </div>
           <button
             class="pos-edit"
@@ -573,12 +630,38 @@ function resetAi() {
           >
             <NaiIcon name="grid" :size="14" />
           </button>
-        </div>
+          <div class="add-wrap">
+            <button
+              class="icon-sq"
+              type="button"
+              :disabled="!canCharacters"
+              title="添加角色"
+              @click.stop="charMenu = !charMenu"
+            >
+              <NaiIcon name="plus" :size="16" />
+            </button>
+            <div v-if="charMenu" class="char-menu" @click.stop>
+              <button type="button" :disabled="store.characters.length >= maxChars" @click="addCharacterKind('girl, ')">
+                <NaiIcon name="female" :size="15" /> 添加女性
+              </button>
+              <button type="button" :disabled="store.characters.length >= maxChars" @click="addCharacterKind('boy, ')">
+                <NaiIcon name="male" :size="15" /> 添加男性
+              </button>
+              <button type="button" :disabled="store.characters.length >= maxChars" @click="addCharacterKind('')">
+                <NaiIcon name="user" :size="15" /> 添加其他
+              </button>
+              <hr />
+              <button class="danger" type="button" :disabled="!store.characters.length" @click="clearAllCharacters">
+                <NaiIcon name="trash" :size="15" /> 清空全部
+              </button>
+            </div>
+          </div>
+        </header>
 
         <article v-for="(c, i) in store.characters" :key="c.id" class="char" :class="{ off: !c.enabled }">
           <div class="char-head">
             <NaiIcon name="pin" :size="14" />
-            <strong>Character {{ i + 1 }}</strong>
+            <strong>角色 {{ i + 1 }}</strong>
             <span class="grow" />
             <button class="ghost" type="button" @click="store.moveCharacter(c.id, -1)"><NaiIcon name="up" :size="14" /></button>
             <button class="ghost" type="button" @click="store.moveCharacter(c.id, 1)"><NaiIcon name="down" :size="14" /></button>
@@ -589,8 +672,8 @@ function resetAi() {
             <NaiIcon name="drag" :size="14" />
           </div>
           <div class="text-tabs">
-            <button type="button" :class="{ on: (charTab[c.id] || 'prompt') === 'prompt' }" @click="charTab[c.id] = 'prompt'">Prompt</button>
-            <button type="button" :class="{ on: charTab[c.id] === 'uc' }" @click="charTab[c.id] = 'uc'">Undesired Content</button>
+            <button type="button" :class="{ on: (charTab[c.id] || 'prompt') === 'prompt' }" @click="charTab[c.id] = 'prompt'">正面</button>
+            <button type="button" :class="{ on: charTab[c.id] === 'uc' }" @click="charTab[c.id] = 'uc'">负面</button>
           </div>
           <PromptField
             v-if="(charTab[c.id] || 'prompt') === 'prompt'"
@@ -618,144 +701,121 @@ function resetAi() {
 
       <ReferencePanel :on-pick="onPickRef" />
 
-      <section class="image-set">
-        <h2>Image Settings</h2>
-        <div class="res-label">
-          <span>Resolution</span>
-          <em>{{ store.params.width }} × {{ store.params.height }}</em>
-        </div>
-        <div class="res-row">
+      <section class="block image-set">
+        <h2>图像</h2>
+        <div class="size-row">
           <select class="family" v-model="family">
-            <option v-for="r in RESOLUTION_LABELS" :key="r.id" :value="r.id">{{ r.label }}</option>
+            <option value="small">小图</option>
+            <option value="normal">常规</option>
+            <option value="large">大图</option>
+            <option value="wallpaper">壁纸</option>
           </select>
-          <div class="orient">
-            <button type="button" :class="{ on: orientation === 'landscape' }" @click="orientation = 'landscape'">
+          <div class="ori">
+            <button type="button" :class="{ on: orientation === 'landscape' }" title="横图" @click="orientation = 'landscape'">
               <NaiIcon name="landscape" :size="14" />
             </button>
-            <button type="button" :class="{ on: orientation === 'portrait' }" @click="orientation = 'portrait'">
-              <NaiIcon name="portrait" :size="14" />
-            </button>
-            <button type="button" :class="{ on: orientation === 'square' }" @click="orientation = 'square'">
+            <button type="button" :class="{ on: orientation === 'square' }" title="方图" @click="orientation = 'square'">
               <NaiIcon name="square" :size="14" />
             </button>
+            <button type="button" :class="{ on: orientation === 'portrait' }" title="竖图" @click="orientation = 'portrait'">
+              <NaiIcon name="portrait" :size="14" />
+            </button>
           </div>
+          <input class="px" type="number" :value="store.params.width" @change="store.params.width = Number(($event.target as HTMLInputElement).value) || store.params.width" />
+          <span class="times">×</span>
+          <input class="px" type="number" :value="store.params.height" @change="store.params.height = Number(($event.target as HTMLInputElement).value) || store.params.height" />
         </div>
-        <div class="count-label">Number of Images</div>
-        <div class="count">
-          <button v-for="n in 4" :key="n" type="button" :class="{ on: store.batchCount === n }" @click="store.batchCount = n">{{ n }}</button>
+        <div class="count-line">
+          <span>张数</span>
+          <div class="count">
+            <button v-for="n in 4" :key="n" type="button" :class="{ on: store.batchCount === n }" @click="store.batchCount = n">{{ n }}</button>
+          </div>
         </div>
       </section>
       </div>
 
       <div class="dock">
-      <section class="ai">
-        <header v-if="aiOpen" class="head">
-          <h2>AI Settings</h2>
-          <div class="ai-acts">
-            <button class="ghost" type="button" @click="resetAi"><NaiIcon name="reset" :size="14" /></button>
-            <button class="ghost" type="button" @click="aiOpen = false"><NaiIcon name="down" :size="14" /></button>
-          </div>
-        </header>
-
-        <div v-if="!aiOpen" class="compact" @click="aiOpen = true">
-          <div class="cell">
-            <small>Steps</small>
-            <b>{{ store.params.steps }}</b>
-          </div>
-          <div class="cell">
-            <small>Guidance</small>
-            <b>{{ store.params.cfgScale }}</b>
-          </div>
-          <div class="cell seed-cell">
-            <small>Seed</small>
-            <b v-if="seedDisplay()">{{ seedDisplay() }}</b>
-            <NaiIcon v-else name="dice" :size="13" />
-          </div>
-          <div class="cell grow">
-            <small>Sampler</small>
-            <b>{{ samplerLabel }}</b>
-          </div>
-          <button class="play" type="button" title="展开 AI Settings" @mousedown.stop @click.stop.prevent="aiOpen = true">
-            <NaiIcon name="play" :size="13" />
-          </button>
-        </div>
-
-        <template v-else>
-          <label class="slide">
-            <span>Steps</span><b>{{ store.params.steps }}</b>
-            <input v-model.number="store.params.steps" type="range" min="1" max="50" />
-          </label>
-          <label class="slide">
-            <span>Prompt Guidance</span><b>{{ store.params.cfgScale }}</b>
-            <input v-model.number="store.params.cfgScale" type="range" min="0" max="10" step="0.1" />
-          </label>
-          <div class="seed-row">
-            <div>
-              <span>Seed</span>
-              <div class="seed-box">
-                <input :value="seedDisplay()" placeholder="Enter a seed" @input="onSeedInput" />
-                <button class="ghost" type="button" @click="store.rollSeed()"><NaiIcon name="dice" :size="16" /></button>
-              </div>
+        <section v-if="aiOpen" class="drawer">
+          <header>
+            <h2>生成参数</h2>
+            <button type="button" title="收起" @click="aiOpen = false"><NaiIcon name="down" :size="15" /></button>
+          </header>
+          <div class="drawer-body">
+            <div class="pair">
+              <label>
+                种子
+                <span class="seed-box">
+                  <input :value="seedDisplay()" placeholder="随机" @input="onSeedInput" />
+                  <button type="button" title="改为随机" @click="store.clearSeed()"><NaiIcon name="dice" :size="14" /></button>
+                  <button type="button" title="固定种子" :class="{ on: store.params.seedMode === 'fixed' }" @click="toggleSeedPin">
+                    <NaiIcon :name="store.params.seedMode === 'fixed' ? 'lock' : 'unlock'" :size="14" />
+                  </button>
+                </span>
+              </label>
+              <label>
+                采样器
+                <select v-model="store.params.sampler">
+                  <option v-for="s in NAI_SAMPLERS" :key="s.value" :value="s.value">{{ s.short }}</option>
+                </select>
+              </label>
             </div>
-            <div>
-              <span>Sampler</span>
-              <select v-model="store.params.sampler">
-                <option v-for="s in NAI_SAMPLERS" :key="s.value" :value="s.value">{{ s.short }}</option>
-              </select>
-            </div>
-          </div>
-          <button class="adv" type="button" @click="advanced = !advanced">Advanced Settings</button>
-          <label v-if="advanced" class="slide">
-            <span>Prompt Guidance Rescale</span><b>{{ store.params.cfgRescale }}</b>
-            <input v-model.number="store.params.cfgRescale" type="range" min="0" max="1" step="0.01" />
-          </label>
-          <div v-if="advanced" class="extra">
-            <label>UC Preset
-              <select v-model.number="store.params.ucPreset">
-                <option v-for="u in NAI_UC_PRESETS" :key="u.value" :value="u.value">{{ u.label }}</option>
+            <label>
+              噪声调度
+              <select v-model="store.params.noiseSchedule">
+                <option v-for="item in NOISE_SCHEDULES" :key="item.value" :value="item.value">{{ item.label }}</option>
               </select>
             </label>
-          </div>
-        </template>
-
-        <OpusUsageBar />
-        <div class="gen-row">
-          <button class="generate" type="button" :disabled="store.busy" @click="runGenerate">
-            <span>{{ store.busy ? "Generating…" : generateLabel }}</span>
-            <span class="cost"><NaiIcon name="anlas" :size="13" />{{ anlas }}</span>
-          </button>
-          <div class="guide-wrap">
-            <button
-              class="guide-btn"
-              type="button"
-              :class="{ on: guideOpen || store.overlayGuide !== 'none' }"
-              title="构图网格"
-              @click="guideOpen = !guideOpen"
-            >
-              <NaiIcon name="grid" :size="16" />
+            <label class="dslide">
+              <span>步数</span>
+              <input v-model.number="store.params.steps" type="range" min="1" max="50" />
+              <b>{{ store.params.steps }}</b>
+            </label>
+            <label class="dslide">
+              <span>引导</span>
+              <input v-model.number="store.params.cfgScale" type="range" min="0" max="10" step="0.1" />
+              <b>{{ cfgText }}</b>
+            </label>
+            <label class="dslide">
+              <span>引导重缩放</span>
+              <input v-model.number="store.params.cfgRescale" type="range" min="0" max="1" step="0.01" />
+              <b>{{ rescaleText }}</b>
+            </label>
+            <button class="chip" type="button" :class="{ on: store.params.variety }" @click="store.params.variety = !store.params.variety">
+              <NaiIcon v-if="store.params.variety" name="check" :size="12" />
+              Variety+
             </button>
-            <div v-if="guideOpen" class="guide-pop">
-              <div class="guide-modes">
-                <button type="button" :class="{ on: store.overlayGuide === 'none' }" @click="store.overlayGuide = 'none'">None</button>
-                <button type="button" :class="{ on: store.overlayGuide === 'thirds' }" @click="store.overlayGuide = 'thirds'">Thirds</button>
-                <button type="button" :class="{ on: store.overlayGuide === 'phi' }" @click="store.overlayGuide = 'phi'">Phi</button>
-                <button type="button" :class="{ on: store.overlayGuide === 'grid' }" @click="store.overlayGuide = 'grid'">Grid</button>
-              </div>
-              <div v-if="store.overlayGuide === 'grid'" class="guide-size">
-                <button type="button" @click="bumpGuide('cols', -1)">−</button>
-                <b>{{ store.overlayCols }}</b>
-                <button type="button" @click="bumpGuide('cols', 1)">+</button>
-                <span>×</span>
-                <button type="button" @click="bumpGuide('rows', -1)">−</button>
-                <b>{{ store.overlayRows }}</b>
-                <button type="button" @click="bumpGuide('rows', 1)">+</button>
-              </div>
-            </div>
           </div>
+        </section>
+        <div class="strip">
+          <button class="cell" type="button" @click="aiOpen = !aiOpen">
+            <small>步数</small>
+            <b>{{ store.params.steps }}</b>
+          </button>
+          <button class="cell" type="button" @click="aiOpen = !aiOpen">
+            <small>引导</small>
+            <b>{{ cfgText }}</b>
+          </button>
+          <button class="cell" type="button" @click="toggleSeedPin">
+            <small>种子</small>
+            <b>{{ seedDisplay() || "随机" }}</b>
+          </button>
+          <button class="cell grow" type="button" @click="aiOpen = true">
+            <small>采样器</small>
+            <b>{{ samplerLabel }}</b>
+          </button>
+          <button class="chev-btn" :class="{ open: aiOpen }" type="button" title="生成参数" @click="aiOpen = !aiOpen">
+            <NaiIcon name="up" :size="15" />
+          </button>
         </div>
-      </section>
+        <OpusUsageBar />
+        <button class="generate" type="button" :disabled="store.busy" @click="runGenerate">
+          <span>{{ store.busy ? "正在生成…" : generateLabel }}</span>
+          <span class="cost"><NaiIcon name="anlas" :size="13" />{{ anlas }}</span>
+        </button>
       </div>
     </section>
+
+    <NaiAgentPanel v-if="agentOpen" class="agent-dock" @close="closeAgent" />
 
     <section class="center">
       <div class="canvas-bar">
@@ -771,6 +831,35 @@ function resetAi() {
           流式预览
           <span class="knob" aria-hidden="true"><i /></span>
         </button>
+        <button
+          ref="guideBtn"
+          class="guide-btn"
+          type="button"
+          :class="{ on: guideOpen || store.overlayGuide !== 'none' }"
+          title="构图网格"
+          @click.stop="toggleGuide"
+        >
+          <NaiIcon name="grid" :size="16" />
+        </button>
+        <Teleport to="body">
+          <div v-if="guideOpen" class="guide-pop" :style="guidePopStyle">
+            <div class="guide-modes">
+              <button type="button" :class="{ on: store.overlayGuide === 'none' }" @click="store.overlayGuide = 'none'">None</button>
+              <button type="button" :class="{ on: store.overlayGuide === 'thirds' }" @click="store.overlayGuide = 'thirds'">Thirds</button>
+              <button type="button" :class="{ on: store.overlayGuide === 'phi' }" @click="store.overlayGuide = 'phi'">Phi</button>
+              <button type="button" :class="{ on: store.overlayGuide === 'grid' }" @click="store.overlayGuide = 'grid'">Grid</button>
+            </div>
+            <div v-if="store.overlayGuide === 'grid'" class="guide-size">
+              <button type="button" @click="bumpGuide('cols', -1)">−</button>
+              <b>{{ store.overlayCols }}</b>
+              <button type="button" @click="bumpGuide('cols', 1)">+</button>
+              <span>×</span>
+              <button type="button" @click="bumpGuide('rows', -1)">−</button>
+              <b>{{ store.overlayRows }}</b>
+              <button type="button" @click="bumpGuide('rows', 1)">+</button>
+            </div>
+          </div>
+        </Teleport>
       </div>
       <div v-if="store.busy || store.streamReplaying" class="stream-stage" :class="{ live: store.genPreview && !store.settings.stealthMode }">
         <img v-if="store.genPreview && !store.settings.stealthMode" :src="store.genPreview" alt="" />
@@ -869,21 +958,21 @@ function resetAi() {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 8px 14px 12px;
+  padding: 10px 12px 12px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 10px;
 }
 .dock {
   flex: none;
-  max-height: 58%;
+  max-height: 70%;
   overflow: auto;
-  padding: 10px 14px 14px;
+  padding: 0 12px 12px;
   background: var(--bg1);
   border-top: 1px solid var(--bg3);
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
 }
 .center {
   position: relative;
@@ -1099,7 +1188,17 @@ function resetAi() {
   padding: 8px 10px;
   color: #fff;
 }
-.model { width: 100%; }
+.model-row { display: flex; }
+.model {
+  width: auto;
+  max-width: 168px;
+  height: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  font-weight: 700;
+}
 .chips { display: flex; gap: 8px; flex-wrap: wrap; }
 .chip {
   display: inline-flex;
@@ -1115,9 +1214,78 @@ function resetAi() {
 .chip.on { background: var(--chip); color: var(--bg0); }
 .chip.select { padding-right: 6px; }
 .chip select { background: transparent; border: 0; padding: 0 4px; color: inherit; }
-.block { padding-top: 4px; }
-.head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
-.block h2 { font-size: 20px; margin: 0; }
+.block {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  padding: 10px 12px 12px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.head { display: flex; justify-content: space-between; align-items: center; gap: 6px; }
+.char-tools { flex-wrap: nowrap; }
+.char-tools h2 { display: flex; align-items: center; gap: 6px; margin-right: 4px; font-size: 14px; font-family: inherit; letter-spacing: 0; font-weight: 650; white-space: nowrap; }
+.char-tools h2 em {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--muted);
+  font-style: normal;
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+}
+.pos-label { color: var(--muted); font-size: 12px; }
+.quality-row { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 4px; }
+.ghost-text {
+  margin-right: auto;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 0;
+}
+.ghost-text.on { color: var(--heading); }
+.quality { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12px; }
+.quality select { height: auto; border: 0; background: transparent; padding: 0; color: #fff; font-weight: 600; }
+.quality select option,
+.model option,
+.family option,
+select option { color: #1a1c2e; background: #fff; }
+.add-wrap { position: relative; }
+.char-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 30;
+  min-width: 168px;
+  padding: 6px;
+  background: #1c2038;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  display: grid;
+  gap: 2px;
+}
+.char-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #f4f6ff;
+  font-size: 13px;
+  text-align: left;
+}
+.char-menu button:hover:not(:disabled) { background: rgba(255, 255, 255, 0.08); }
+.char-menu button:disabled { opacity: 0.4; }
+.char-menu hr { border: 0; border-top: 1px solid rgba(255, 255, 255, 0.1); margin: 4px 2px; }
+.char-menu .danger { color: #ff6b6b; }
+.block h2, .image-set h2 { font-size: 14px; margin: 0 0 8px; font-family: inherit; letter-spacing: 0; font-weight: 650; }
 .block p { margin: 2px 0 10px; color: var(--muted); font-size: 12px; font-weight: 400; }
 .icon-sq {
   width: 34px; height: 34px; display: grid; place-items: center;
@@ -1129,22 +1297,25 @@ function resetAi() {
 .pos { display: flex; align-items: center; gap: 8px; margin: 8px 0; font-size: 13px; color: var(--muted); }
 .seg {
   display: flex;
-  margin-left: auto;
-  background: var(--bg2);
-  border: 1px solid var(--bg3);
-  border-radius: 999px;
-  padding: 2px;
+  margin-left: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  padding: 0;
+  gap: 2px;
 }
 .seg button {
   background: transparent;
   border: 0;
-  border-radius: 999px;
-  color: #fff;
-  padding: 6px 12px;
+  border-radius: 8px;
+  color: var(--muted);
+  padding: 4px 8px;
+  font-size: 12px;
+  font-weight: 600;
 }
 .seg button.on {
-  background: #fff;
-  color: #1a1c2e;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
 }
 .pos-edit {
   width: 32px;
@@ -1157,83 +1328,78 @@ function resetAi() {
   color: rgba(255,255,255,0.72);
 }
 .pos-edit.on, .pos-edit:hover { color: #fff; background: var(--bg2); }
-.char { margin-top: 8px; }
+.char {
+  margin-top: 10px;
+  padding: 8px 8px 4px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+}
 .char.off { opacity: 0.5; }
 .char-head { display: flex; align-items: center; gap: 6px; color: #fff; font-size: 13px; }
 .grow { flex: 1; }
 .ghost {
   background: transparent; border: 0; color: rgba(255,255,255,0.7); padding: 2px; display: grid; place-items: center;
 }
-.text-tabs { display: flex; gap: 12px; margin: 8px 0 6px; }
+.text-tabs { display: flex; align-items: center; gap: 12px; margin: 8px 0 6px; }
 .text-tabs button {
-  background: none; border: 0; padding: 0; color: var(--muted); font-size: 13px;
+  background: none; border: 0; padding: 4px 8px; color: var(--muted); font-size: 13px; border-radius: 8px; font-weight: 600;
 }
-.text-tabs button.on { color: var(--heading); }
+.text-tabs button.on { color: #fff; background: rgba(255, 255, 255, 0.1); }
+.text-tabs .agent-slot {
+  margin-left: auto;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: transparent;
+}
+.text-tabs .agent-slot:hover { background: rgba(47, 123, 255, 0.16); }
+.agent-dock { width: 400px; min-width: 340px; flex: none; min-height: 0; }
 .block textarea {
   width: 100%; min-height: 88px; resize: vertical; background: var(--bg0); border: 0; border-radius: 6px; padding: 10px;
 }
-.image-set h2 { font-size: 18px; margin: 0 0 8px; }
-.ai { display: flex; flex-direction: column; }
-.res-label {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  color: #fff;
-  font-size: 14px;
-  margin-bottom: 8px;
-}
-.res-label em {
-  font-style: normal;
-  font-size: 12px;
-  color: rgba(255,255,255,0.78);
-  background: var(--bg0);
-  border-radius: 8px;
-  padding: 5px 10px;
-  font-variant-numeric: tabular-nums;
-}
-.res-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
+.image-set h2 { margin-bottom: 10px; }
+.size-row { display: flex; align-items: center; gap: 6px; }
 .family {
-  width: 118px;
-  height: 36px;
-  padding: 0 10px;
+  width: 84px;
+  height: 32px;
+  padding: 0 8px;
+  border: 0;
   border-radius: 8px;
-  background: var(--bg0);
-  border: 1px solid var(--bg3);
+  background: rgba(255, 255, 255, 0.06);
 }
-.orient {
-  display: flex;
-  flex: 1;
-  height: 36px;
-  background: var(--bg0);
-  border: 1px solid var(--bg3);
-  border-radius: 8px;
-  overflow: hidden;
-}
-.orient button {
-  flex: 1;
+.ori { display: flex; gap: 4px; }
+.ori button {
+  width: 32px;
+  height: 32px;
   display: grid;
   place-items: center;
-  background: transparent;
   border: 0;
-  color: rgba(255,255,255,0.55);
-  border-right: 1px solid var(--bg3);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.62);
 }
-.orient button:last-child { border-right: 0; }
-.orient button.on {
-  background: #e8e4f0;
-  color: var(--bg0);
+.ori button.on { background: rgba(255, 255, 255, 0.16); color: #fff; }
+.px {
+  width: 58px;
+  height: 32px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
 }
-.count-label { color: #fff; font-size: 14px; margin: 12px 0 8px; }
+.times { color: var(--muted); font-size: 12px; }
+.count-line { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+.count-line > span { color: var(--muted); font-size: 12px; flex: none; }
+.ai { display: flex; flex-direction: column; }
 .count {
+  flex: 1;
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  height: 36px;
-  background: var(--bg0);
-  border: 1px solid var(--bg3);
+  height: 32px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 0;
   border-radius: 8px;
   overflow: hidden;
 }
@@ -1265,81 +1431,163 @@ function resetAi() {
 .seed-box input { flex: 1; }
 .adv { background: none; border: 0; color: var(--muted); padding: 6px 0; text-align: left; }
 .extra label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
-.compact {
+.drawer {
+  margin: 0 -12px;
+  background: #16182e;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-bottom: 0;
+  border-radius: 10px 10px 0 0;
+  box-shadow: 0 -10px 24px rgba(0, 0, 0, 0.35);
+}
+.drawer header {
+  height: 40px;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px 12px;
-  background: var(--bg0);
-  border: 1px solid var(--bg3);
-  border-radius: 12px;
-  cursor: pointer;
+  justify-content: space-between;
+  padding: 0 6px 0 14px;
 }
-.compact .cell { min-width: 48px; }
-.compact .cell.grow { flex: 1; min-width: 92px; }
-.compact .seed-cell { min-width: 36px; }
-.compact small {
-  display: block;
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 600;
-  margin-bottom: 2px;
-}
-.compact b {
-  display: block;
-  font-size: 15px;
-  font-weight: 700;
-  line-height: 1.15;
-  font-variant-numeric: tabular-nums;
-}
-.compact .seed-cell :deep(.nai-icon) { color: rgba(255,255,255,0.7); }
-.play {
-  margin-left: auto;
-  width: 22px;
-  height: 22px;
+.drawer h2 { margin: 0; font-size: 13px; font-weight: 700; font-family: inherit; letter-spacing: 0; }
+.drawer header button, .seed-box button, .chev-btn {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
   border: 0;
-  border-radius: 4px;
-  background: #191b31;
-  color: #fff;
-  display: grid;
-  place-items: center;
-  flex: none;
-  cursor: pointer;
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.72);
 }
-.gen-row {
+.drawer header button:hover, .seed-box button:hover, .chev-btn:hover { background: rgba(255, 255, 255, 0.08); }
+.seed-box button.on { color: #8eb7ff; }
+.drawer-body { display: flex; flex-direction: column; gap: 12px; padding: 2px 14px 14px; }
+.drawer-body > label, .pair label {
   display: flex;
-  align-items: stretch;
-  gap: 8px;
-  margin-top: 8px;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
 }
-.generate {
-  flex: 1; display: flex; align-items: center; justify-content: space-between;
-  background: #f5f3c2; color: var(--bg0); border: 0; border-radius: 8px; padding: 10px 10px 10px 14px; font-weight: 700;
+.pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.seed-box, .drawer-body select {
+  height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 2px 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #fff;
 }
-.guide-wrap { position: relative; flex: none; }
-.guide-btn {
-  width: 42px;
+.drawer-body select { width: 100%; padding-right: 8px; }
+.seed-box input {
+  flex: 1;
+  min-width: 0;
   height: 100%;
-  min-height: 42px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #fff;
+}
+.dslide {
+  display: grid;
+  grid-template-columns: 72px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  color: #fff;
+  font-size: 13px;
+}
+.dslide input { width: 100%; }
+.dslide b {
+  min-width: 42px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+}
+.chip {
+  align-self: flex-start;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.82);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+.chip.on { background: rgba(255, 255, 255, 0.1); color: #fff; }
+.strip {
+  display: flex;
+  align-items: center;
+  min-height: 46px;
+  margin: 0 -4px;
+}
+.strip .cell {
+  min-width: 52px;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #fff;
+  text-align: left;
+}
+.strip .cell.grow { flex: 1; min-width: 0; }
+.strip .cell:hover { background: rgba(255, 255, 255, 0.06); }
+.strip small {
+  display: block;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+.strip b {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+.chev-btn { flex: none; margin-right: 6px; border: 1px solid rgba(255, 255, 255, 0.14); background: rgba(255, 255, 255, 0.04); }
+.chev-btn.open { transform: rotate(180deg); }
+.generate {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #f5f3c2;
+  color: var(--bg0);
+  border: 0;
+  border-radius: 8px;
+  padding: 10px 10px 10px 14px;
+  font-weight: 700;
+}
+.guide-btn {
+  width: 32px;
+  height: 32px;
   display: grid;
   place-items: center;
-  background: var(--bg2);
-  border: 1px solid var(--bg3);
+  background: #1a1c34;
+  border: 1px solid #2b2e4a;
   border-radius: 8px;
   color: rgba(255,255,255,0.78);
 }
 .guide-btn.on { color: var(--heading); border-color: var(--heading); }
 .guide-pop {
-  position: absolute;
-  right: 0;
-  bottom: calc(100% + 8px);
+  position: fixed;
   min-width: 260px;
   padding: 10px;
   border-radius: 12px;
   background: #151728;
   border: 1px solid #2a2d48;
   box-shadow: 0 12px 28px rgba(0,0,0,0.4);
-  z-index: 8;
+  z-index: 40;
 }
 .guide-modes {
   display: flex;
