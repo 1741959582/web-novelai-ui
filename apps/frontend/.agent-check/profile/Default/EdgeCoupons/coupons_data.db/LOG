@@ -1,0 +1,5 @@
+2026/11/17-11:11:19.001 b618 Creating DB D:\project\web-novelai-ui\apps\frontend\.agent-check\profile\Default\EdgeCoupons/coupons_data.db since it was missing.
+2026/11/17-11:11:19.006 b618 Reusing MANIFEST D:\project\web-novelai-ui\apps\frontend\.agent-check\profile\Default\EdgeCoupons/coupons_data.db/MANIFEST-000001
+2026/11/17-11:11:38.975 d2f4 Level-0 table #5: started
+2026/11/17-11:11:38.979 d2f4 Level-0 table #5: 683273 bytes OK
+2026/11/17-11:11:38.980 d2f4 Delete type=0 #3
