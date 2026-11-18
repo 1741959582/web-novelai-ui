@@ -61,3 +61,6 @@ ruyipage/**/.env.*
 bundle/
 models/
 src-tauri/resources/*.dll
+# 本地检查用的浏览器配置、缓存和发布产物
+apps/frontend/.agent-check/
+release-out/
