@@ -40,6 +40,11 @@ const guidePopStyle = ref<Record<string, string>>({});
 const previewCollapsed = ref(false);
 const promptTab = ref<"prompt" | "uc">("prompt");
 const agentOpen = ref(false);
+const agentRight = ref(localStorage.getItem("nai-agent-dock") === "right");
+function setAgentDock(right: boolean) {
+  agentRight.value = right;
+  localStorage.setItem("nai-agent-dock", right ? "right" : "here");
+}
 const charMenu = ref(false);
 const pageVm = getCurrentInstance() as { job?: () => void; update?: () => void } | null;
 function paintAgent() {
@@ -402,6 +407,12 @@ function onWinDrop(ev: DragEvent) {
 function onPaste(ev: ClipboardEvent) {
   const file = imageFromEvent(ev);
   if (!file) return;
+  const target = ev.target instanceof Element ? ev.target : null;
+  if (agentOpen.value || target?.closest(".agent-dock")) {
+    ev.preventDefault();
+    window.dispatchEvent(new CustomEvent("nai-agent-paste-image", { detail: file }));
+    return;
+  }
   ev.preventDefault();
   void store.openImportFromFile(file);
 }
@@ -435,6 +446,7 @@ function toggleGuide() {
 function closeCharMenu(ev: Event) {
   const el = ev.target as HTMLElement | null;
   if (!el?.closest(".add-wrap")) charMenu.value = false;
+  if (!el?.closest(".model-pick")) modelOpen.value = false;
   if (!el?.closest(".guide-btn") && !el?.closest(".guide-pop")) guideOpen.value = false;
 }
 
@@ -536,13 +548,20 @@ watch(
   { immediate: true },
 );
 
+const showModelMode = computed(() => isV4Plus(store.params.model));
+const modelOpen = ref(false);
+
+function toggleModelMode() {
+  store.params.modelMode = store.params.modelMode === "furry" ? "anime" : "furry";
+}
+
 function modelShort(value: string) {
-  if (value.includes("5-full")) return "V5 Full";
-  if (value.includes("5-curated")) return "V5 Curated";
-  if (value.includes("4-5-full")) return "V4.5 Full";
-  if (value.includes("4-5-curated")) return "V4.5 Curated";
-  if (value.includes("4-full")) return "V4 Full";
-  if (value.includes("4-curated")) return "V4 Curated";
+  if (value.endsWith("4-5-full")) return "V4.5 Full";
+  if (value.endsWith("4-5-curated")) return "V4.5 Curated";
+  if (value.endsWith("5-full")) return "V5 Full";
+  if (value.endsWith("5-curated")) return "V5 Curated";
+  if (value.endsWith("4-full")) return "V4 Full";
+  if (value.endsWith("4-curated")) return "V4 Curated";
   if (value.includes("furry")) return "Furry V3";
   return "V3";
 }
@@ -554,7 +573,7 @@ function toggleSeedPin() {
 </script>
 
 <template>
-  <div class="page">
+  <div class="page" :class="{ 'agent-right': agentOpen && agentRight }">
     <div v-if="dropping" class="drop-mask">
       <div class="drop-card">
         <NaiIcon name="upload" :size="40" />
@@ -563,9 +582,31 @@ function toggleSeedPin() {
     <section class="left">
       <div class="left-scroll">
       <div class="model-row">
-        <select class="model" v-model="store.params.model">
-          <option v-for="m in NAI_MODELS" :key="m.value" :value="m.value">{{ modelShort(m.value) }}</option>
-        </select>
+        <div class="model-capsule">
+          <span>Model</span>
+          <div class="model-pick">
+            <button type="button" class="model" @click.stop="modelOpen = !modelOpen">
+              {{ modelShort(store.params.model) }}
+              <NaiIcon name="down" :size="12" />
+            </button>
+            <div v-if="modelOpen" class="model-menu">
+              <button
+                v-for="m in NAI_MODELS"
+                :key="m.value"
+                type="button"
+                :class="{ on: store.params.model === m.value }"
+                @click="store.params.model = m.value; modelOpen = false"
+              >{{ modelShort(m.value) }}</button>
+            </div>
+          </div>
+          <template v-if="showModelMode">
+            <i class="split"></i>
+            <button type="button" class="mode" :title="store.params.modelMode === 'furry' ? 'Furry' : 'Anime'" @click="toggleModelMode">
+              <NaiIcon :name="store.params.modelMode === 'furry' ? 'furry' : 'sparkle'" :size="14" />
+              {{ store.params.modelMode === "furry" ? "Furry" : "Anime" }}
+            </button>
+          </template>
+        </div>
       </div>
 
       <section class="block">
@@ -815,7 +856,7 @@ function toggleSeedPin() {
       </div>
     </section>
 
-    <NaiAgentPanel v-if="agentOpen" class="agent-dock" @close="closeAgent" />
+    <NaiAgentPanel v-if="agentOpen" class="agent-dock" :dock-right="agentRight" @close="closeAgent" @dock="setAgentDock" />
 
     <section class="center">
       <div class="canvas-bar">
@@ -1189,16 +1230,98 @@ function toggleSeedPin() {
   color: #fff;
 }
 .model-row { display: flex; }
-.model {
-  width: auto;
-  max-width: 168px;
+.model-capsule {
+  display: inline-flex;
+  align-items: center;
   height: 32px;
-  padding: 0 10px;
-  border: 0;
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.06);
-  font-weight: 700;
 }
+.model-capsule > span {
+  padding-left: 10px;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 12px;
+}
+.model-capsule .split {
+  width: 1px;
+  height: 16px;
+  background: rgba(255, 255, 255, 0.18);
+}
+.model-capsule .mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 32px;
+  padding: 0 10px 0 8px;
+  border: 0;
+  outline: none;
+  box-shadow: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.86);
+  font-weight: 650;
+  cursor: pointer;
+}
+.model-capsule .mode:hover,
+.model-capsule .model:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+.model-capsule .mode:focus,
+.model-capsule .mode:focus-visible,
+.model-capsule .model:focus,
+.model-capsule .model:focus-visible {
+  outline: none;
+  border: 0;
+  box-shadow: none;
+}
+.model-pick { position: relative; display: flex; align-self: stretch; }
+.model-capsule .model {
+  width: auto;
+  max-width: none;
+  height: 32px;
+  padding: 0 8px 0 10px;
+  border: 0;
+  border-radius: 0;
+  outline: none;
+  box-shadow: none;
+  background: transparent;
+  color: #fff;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+.model-menu {
+  position: absolute;
+  z-index: 40;
+  top: 100%;
+  left: 0;
+  min-width: 148px;
+  margin: 0;
+  padding: 4px;
+  background: var(--bg1);
+  border: 0;
+  outline: none;
+  border-radius: 0 0 8px 8px;
+  box-shadow: 0 14px 28px rgba(0, 0, 0, 0.28);
+  overflow: hidden;
+}
+.model-menu button {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 30px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.86);
+  text-align: left;
+  cursor: pointer;
+}
+.model-menu button:hover { background: rgba(255, 255, 255, 0.08); color: #fff; }
+.model-menu button.on { background: rgba(255, 255, 255, 0.12); color: #fff; }
 .chips { display: flex; gap: 8px; flex-wrap: wrap; }
 .chip {
   display: inline-flex;
@@ -1354,6 +1477,9 @@ select option { color: #1a1c2e; background: #fff; }
 }
 .text-tabs .agent-slot:hover { background: rgba(47, 123, 255, 0.16); }
 .agent-dock { width: 400px; min-width: 340px; flex: none; min-height: 0; }
+.page.agent-right .center { order: 1; }
+.page.agent-right .agent-dock { order: 2; }
+.page.agent-right :deep(.rail) { right: 400px; }
 .block textarea {
   width: 100%; min-height: 88px; resize: vertical; background: var(--bg0); border: 0; border-radius: 6px; padding: 10px;
 }

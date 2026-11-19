@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { RouterLink } from "vue-router";
 import NaiIcon from "@/components/NaiIcon.vue";
 import NaiAgentMark from "@/components/NaiAgentMark.vue";
@@ -9,10 +9,11 @@ import { agentNext, agentTags, agentVisibleText, composeAgentSystem, estimateTok
 import { renderMarkdown } from "@/utils/markdown";
 import { splitPromptTags } from "@/utils/promptWeight";
 import { readImageDataUrl } from "@/api/tauri";
-import type { HistoryItem } from "@/types/nai";
+import { isV4Plus, type HistoryItem } from "@/types/nai";
 import { appendPromptChunk } from "@/utils/textUtils";
 
-const emit = defineEmits<{ close: [] }>();
+const props = defineProps<{ dockRight?: boolean }>();
+const emit = defineEmits<{ close: []; dock: [right: boolean] }>();
 
 type Tab = "chat" | "shelf" | "memory";
 type Pop = "" | "chats" | "more" | "attach" | "mention" | "mode" | "model" | "usage" | "quick";
@@ -63,9 +64,27 @@ function scrollToEnd() {
   });
 }
 
+function takePastedImage(file: File) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    pendingImage.value = String(reader.result || "");
+  };
+  reader.readAsDataURL(file);
+}
+
+function onExternalPaste(ev: Event) {
+  const file = (ev as CustomEvent<File>).detail;
+  if (file) takePastedImage(file);
+}
+
 onMounted(async () => {
+  window.addEventListener("nai-agent-paste-image", onExternalPaste);
   await store.load();
   scrollToEnd();
+});
+
+onUnmounted(() => {
+  window.removeEventListener("nai-agent-paste-image", onExternalPaste);
 });
 
 const hour = new Date().getHours();
@@ -215,17 +234,37 @@ watch(() => store.busy, (busy, was) => {
   writeSelected(true);
 });
 
+function tagLines(text: string) {
+  const tags = splitPromptTags(text);
+  if (!tags.length) return "（无）";
+  return tags.map((tag, index) => `${index + 1}. ${tag}`).join("\n");
+}
+
 function scene() {
   const params = app.params;
   const characters = app.characters
-    .map((item, index) => `${index + 1}. ${item.enabled ? "" : "（关闭）"}${item.prompt.trim() || "（空）"}`)
-    .join("\n");
+    .map((item, index) => {
+      const prompt = item.prompt.trim();
+      const negative = item.negativePrompt.trim();
+      return [
+        `${index + 1}. ${item.enabled ? "" : "（关闭）"}`,
+        `原文：${prompt || "（空）"}`,
+        `标签：\n${tagLines(prompt)}`,
+        negative ? `负面原文：${negative}\n负面标签：\n${tagLines(negative)}` : "",
+      ].filter(Boolean).join("\n");
+    })
+    .join("\n\n");
+  const style = params.stylePrompt.trim();
   return [
     `模型：${params.model}`,
-    `质量词预设：${params.qualityPreset}`,
+    isV4Plus(params.model) ? `模式：${params.modelMode === "furry" ? "Furry" : "Anime"}` : "",
+    `质量词预设：${params.qualityPreset}（生成时自动附加，不是草稿里的词）`,
     `尺寸：${params.width}×${params.height}`,
-    `基础提示词：${params.positivePrompt.trim() || "（空）"}`,
-    `负面：${params.negativePrompt.trim() || "（空）"}`,
+    style ? `画风原文：${style}\n画风标签：\n${tagLines(style)}` : "",
+    `基础提示词原文：${params.positivePrompt.trim() || "（空）"}`,
+    `基础提示词标签：\n${tagLines(params.positivePrompt)}`,
+    `负面原文：${params.negativePrompt.trim() || "（空）"}`,
+    `负面标签：\n${tagLines(params.negativePrompt)}`,
     `角色：\n${characters || "（无）"}`,
     `参考图：${referenceCount.value}`,
     variantBase.value
@@ -616,6 +655,20 @@ function toggleThink(id: string, index: number) {
             {{ armedChatId === store.activeId ? "再点一次删除" : "删除对话" }}
           </button>
         </template>
+      </div>
+      <div class="dock-switch" role="group" aria-label="面板位置">
+        <button type="button" :class="{ on: !props.dockRight }" title="放在现在的位置" @click="emit('dock', false)">
+          <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+            <rect x="1.2" y="2.2" width="13.6" height="11.6" rx="1.3" fill="none" stroke="currentColor" stroke-width="1.2" />
+            <path d="M6 2.2v11.6" stroke="currentColor" stroke-width="1.2" />
+          </svg>
+        </button>
+        <button type="button" :class="{ on: props.dockRight }" title="放到最右边" @click="emit('dock', true)">
+          <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+            <rect x="1.2" y="2.2" width="13.6" height="11.6" rx="1.3" fill="none" stroke="currentColor" stroke-width="1.2" />
+            <path d="M10 2.2v11.6" stroke="currentColor" stroke-width="1.2" />
+          </svg>
+        </button>
       </div>
       <button type="button" title="收起" @click="emit('close')">
         <NaiIcon name="close" :size="15" />
@@ -1024,6 +1077,25 @@ header > button {
 }
 header > button.on, header > button:hover { background: rgba(255, 255, 255, 0.06); color: #fff; }
 header > button:disabled { opacity: 0.4; }
+.dock-switch {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  margin-left: 2px;
+}
+.dock-switch button {
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.55);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+.dock-switch button.on,
+.dock-switch button:hover { background: rgba(255, 255, 255, 0.08); color: #fff; }
 nav {
   position: relative;
   height: 36px;

@@ -2,6 +2,15 @@
 
 从新到旧。安装包在 [最新发行版](https://github.com/caiweida/web-novelai-ui/releases/latest)。已安装的程序启动后会读到新版本，顶栏可以点「立即更新」。
 
+## [1.0.11](https://github.com/caiweida/web-novelai-ui/releases/tag/v1.0.11)
+
+- 生成页可以打开 Agent，按当前草稿改提示词。面板可以留在提示词旁边，也可以收到窗口最右边。
+- Agent 打开时，Ctrl+V 的图片会进对话。
+- V4 及以上可以在模型旁边切换 Anime 和 Furry。模型列表改成深色，底部带圆角。
+- 导入图片后可以直接局部重绘。
+- 在线画廊可以换来源、时间和页码，一次能看更多图，并且能上下滚动。
+- 左侧增加块库、风格库和精准参考库。
+
 ## [1.0.10](https://github.com/caiweida/web-novelai-ui/releases/tag/v1.0.10)
 
 - 历史里的图可以拖动换顺序。勾选多张后一起拖，滚轮也能滚动列表。

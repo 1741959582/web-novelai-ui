@@ -33,10 +33,17 @@ const opts = reactive({
   clean: true,
 });
 
-function useAs(kind: "i2i" | "vibe" | "precise" | "inset") {
+function useAs(kind: "i2i" | "inpaint" | "vibe" | "precise" | "inset") {
   if (kind === "vibe" && !vibeOk.value) return;
   if (kind === "precise" && !preciseOk.value) return;
   if (kind === "inset" && !insetOk.value) return;
+  if (kind === "inpaint") {
+    store.i2iImage = props.preview;
+    store.inpaintMask = "";
+    store.startInpaint();
+    emit("close");
+    return;
+  }
   if (kind === "i2i") store.i2iImage = props.preview;
   if (kind === "vibe") store.addVibeFromDataUrl(props.preview);
   if (kind === "precise") store.addPreciseFromDataUrl(props.preview);
@@ -67,6 +74,9 @@ function importMeta() {
       <div class="actions">
         <button type="button" class="cream" @click="useAs('i2i')">
           <NaiIcon name="i2i" :size="16" /> Image2Image
+        </button>
+        <button type="button" class="cream" @click="useAs('inpaint')">
+          <NaiIcon name="brush" :size="16" /> 局部重绘
         </button>
         <button type="button" class="cream" :disabled="!vibeOk" :title="vibeOk ? '' : 'Vibe Transfer 需要 V3 / V4 / V4.5'" @click="useAs('vibe')">
           <NaiIcon name="vibe" :size="16" /> Vibe Transfer

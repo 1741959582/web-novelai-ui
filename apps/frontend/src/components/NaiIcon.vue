@@ -116,6 +116,9 @@ defineProps<{ name: string; size?: number }>();
     <template v-else-if="name === 'sparkle'">
       <path d="M12 3l1.4 6.1L20 10.5l-6.1 1.4L12 18l-1.4-6.1L4 10.5l6.6-1.4L12 3Z" fill="currentColor" stroke="none" />
     </template>
+    <template v-else-if="name === 'furry'">
+      <path fill="currentColor" stroke="none" d="M7.2 10.2a1.7 1.7 0 1 0 0-3.4 1.7 1.7 0 0 0 0 3.4Zm3.6-2.2a1.8 1.8 0 1 0 0-3.6 1.8 1.8 0 0 0 0 3.6Zm4.3 1.2a1.7 1.7 0 1 0 0-3.4 1.7 1.7 0 0 0 0 3.4Zm3.2 2.3a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3ZM8 15.2c0-1.4 1.5-2.6 4-2.6s4 1.2 4 2.6-1.5 2.3-4 2.3-4-.9-4-2.3Z" />
+    </template>
     <template v-else-if="name === 'diamond'">
       <path d="M12 3 16 12 12 21 8 12 12 3Z" fill="currentColor" stroke="none" />
     </template>
