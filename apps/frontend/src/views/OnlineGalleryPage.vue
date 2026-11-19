@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import { useAppStore } from "@/stores/app";
+import { maxCharacterPrompts, newCharacter } from "@/types/nai";
 import NaiIcon from "@/components/NaiIcon.vue";
 
 type SourceId = "aiTag" | "danbooru" | "safebooru" | "gelbooru";
@@ -22,11 +23,24 @@ interface WorkCard {
   model: string;
 }
 
-interface WorkDetail {
+interface PromptCharacter {
   prompt: string;
   negative: string;
+  x: number | null;
+  y: number | null;
+}
+
+interface DetailImage {
+  url: string;
+  thumb: string;
+  prompt: string;
+  negative: string;
+  characters: PromptCharacter[];
   model: string;
-  image: string;
+}
+
+interface WorkDetail {
+  images: DetailImage[];
 }
 
 const SOURCES: { id: SourceId; name: string; hint: string }[] = [
@@ -59,6 +73,9 @@ const loading = ref(false);
 const error = ref("");
 const selected = ref<WorkCard | null>(null);
 const detail = ref<WorkDetail | null>(null);
+const detailLoading = ref(false);
+const imageIndex = ref(0);
+const copyNote = ref("");
 const pageInput = ref("1");
 const favorites = ref<WorkCard[]>(readFavs());
 const wallRef = ref<HTMLElement | null>(null);
@@ -107,7 +124,7 @@ function isNai(value: string) {
   return text === "nai" || text === "nai_x" || text === "naix" || text === "nai x";
 }
 
-function pixivPaths(originals: unknown) {
+function pixivEntries(originals: unknown) {
   const raw = typeof originals === "string" ? originals : JSON.stringify(originals || []);
   let list: string[] = [];
   try {
@@ -116,20 +133,95 @@ function pixivPaths(originals: unknown) {
   } catch {
     list = [];
   }
-  const url = list[0] || "";
-  const marker = "/img-original/img/";
-  const index = url.indexOf(marker);
-  if (index < 0) return { thumb: "", fallback: "" };
-  const path = url.slice(index + marker.length);
-  const slash = path.lastIndexOf("/");
-  const file = slash >= 0 ? path.slice(slash + 1) : path;
-  const dir = slash >= 0 ? path.slice(0, slash) : "";
-  const dot = file.lastIndexOf(".");
-  const stem = dot > 0 ? file.slice(0, dot) : file;
-  const prefix = dir ? `${dir}/` : "";
+  return list.map((url) => {
+    const marker = "/img-original/img/";
+    const index = url.indexOf(marker);
+    if (index < 0) return { thumb: "", fallback: "" };
+    const path = url.slice(index + marker.length);
+    const slash = path.lastIndexOf("/");
+    const file = slash >= 0 ? path.slice(slash + 1) : path;
+    const dir = slash >= 0 ? path.slice(0, slash) : "";
+    const dot = file.lastIndexOf(".");
+    const stem = dot > 0 ? file.slice(0, dot) : file;
+    const prefix = dir ? `${dir}/` : "";
+    return {
+      thumb: `/pixiv/img-master/img/${prefix}${stem}_master1200.jpg`,
+      fallback: `/pixiv/img-original/img/${prefix}${file}`,
+    };
+  });
+}
+
+function pixivPaths(originals: unknown) {
+  return pixivEntries(originals)[0] || { thumb: "", fallback: "" };
+}
+
+function asObject(value: unknown): Record<string, unknown> | null {
+  if (!value) return null;
+  if (typeof value === "string") {
+    try {
+      return asObject(JSON.parse(value));
+    } catch {
+      return null;
+    }
+  }
+  if (typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>;
+  return null;
+}
+
+function textOf(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function novelComment(aiJson: unknown) {
+  const root = asObject(aiJson);
+  if (!root) return null;
+  return asObject(root.Comment) || asObject(root.comment) || root;
+}
+
+function baseCaption(block: unknown) {
+  const caption = asObject(asObject(block)?.caption);
+  return textOf(caption?.base_caption) || textOf(caption?.main_caption);
+}
+
+function charCaptions(block: unknown) {
+  const caption = asObject(asObject(block)?.caption);
+  const list = caption?.char_captions;
+  if (!Array.isArray(list)) return [] as { prompt: string; x: number | null; y: number | null }[];
+  return list.map((entry) => {
+    const row = asObject(entry) || {};
+    const centers = Array.isArray(row.centers) ? row.centers : [];
+    const center = asObject(centers[0]);
+    const x = Number(center?.x);
+    const y = Number(center?.y);
+    return {
+      prompt: textOf(row.char_caption || row.caption || row.prompt),
+      x: Number.isFinite(x) ? x : null,
+      y: Number.isFinite(y) ? y : null,
+    };
+  });
+}
+
+function parseDetailImage(raw: unknown, picture: { thumb: string; fallback: string } | undefined, card: WorkCard): DetailImage {
+  const image = asObject(raw) || {};
+  const comment = novelComment(image.ai_json);
+  const positive = charCaptions(comment?.v4_prompt);
+  const negativeChars = charCaptions(comment?.v4_negative_prompt);
+  const count = Math.max(positive.length, negativeChars.length);
+  const characters = Array.from({ length: count }, (_, index) => ({
+    prompt: positive[index]?.prompt || "",
+    negative: negativeChars[index]?.prompt || "",
+    x: positive[index]?.x ?? negativeChars[index]?.x ?? null,
+    y: positive[index]?.y ?? negativeChars[index]?.y ?? null,
+  })).filter((item) => item.prompt || item.negative);
+  const path = textOf(image.image_path).replace(/^\/+/, "");
+  const url = path ? `/aiimg/${path}` : picture?.fallback || picture?.thumb || card.large || card.thumb;
   return {
-    thumb: `/pixiv/img-master/img/${prefix}${stem}_master1200.jpg`,
-    fallback: `/pixiv/img-original/img/${prefix}${file}`,
+    url,
+    thumb: picture?.thumb || url,
+    prompt: baseCaption(comment?.v4_prompt) || textOf(comment?.prompt) || textOf(image.prompt_text) || card.prompt,
+    negative: baseCaption(comment?.v4_negative_prompt) || textOf(comment?.uc) || textOf(comment?.negative_prompt),
+    characters,
+    model: textOf(image.model) || textOf(comment?.Source) || card.model,
   };
 }
 
@@ -385,55 +477,108 @@ function fallbackThumb(card: WorkCard, event: Event) {
   img.src = card.fallback;
 }
 
+const activeImage = computed(() => detail.value?.images[imageIndex.value] || detail.value?.images[0] || null);
+
 async function openCard(card: WorkCard) {
   selected.value = card;
+  imageIndex.value = 0;
+  copyNote.value = "";
   const token = ++detailId;
   if (card.source !== "aiTag") {
+    detailLoading.value = false;
     detail.value = {
-      prompt: card.prompt,
-      negative: "",
-      model: card.model,
-      image: card.large || card.thumb,
+      images: [{
+        url: card.large || card.thumb,
+        thumb: card.thumb || card.large,
+        prompt: card.prompt,
+        negative: "",
+        characters: [],
+        model: card.model,
+      }],
     };
     return;
   }
   detail.value = null;
+  detailLoading.value = true;
   try {
     const response = await fetch(`/aitag/api/work/${card.id}`, { headers: { Accept: "application/json" } });
     if (!response.ok) throw new Error(`作品 ${response.status}`);
     const data = await response.json();
     if (token !== detailId) return;
-    const image = (data.images || [])[0] || {};
-    const path = String(image.image_path || "");
-    detail.value = {
-      prompt: String(image.prompt_text || ""),
-      negative: "",
-      model: String(image.model || ""),
-      image: path ? `/aiimg/${path.replace(/^\/+/, "")}` : card.large || card.thumb,
-    };
-    const raw = image.ai_json;
-    if (typeof raw === "string" && raw.includes("uc")) {
-      try {
-        const parsed = JSON.parse(raw);
-        detail.value.negative = String(parsed.uc || parsed.negative_prompt || "");
-        if (!detail.value.prompt) detail.value.prompt = String(parsed.prompt || "");
-      } catch {
-        /* prompt_text is enough */
-      }
-    }
+    const work = asObject(data.work) || {};
+    const pictures = pixivEntries(work.original_urls);
+    const rows = Array.isArray(data.images) ? data.images : [];
+    const images = (rows.length ? rows : [{}]).map((row, index) => parseDetailImage(row, pictures[index], card));
+    detail.value = { images };
   } catch (reason) {
     if (token === detailId) error.value = reason instanceof Error ? reason.message : String(reason);
+  } finally {
+    if (token === detailId) detailLoading.value = false;
   }
 }
 
 function send() {
-  const prompt = detail.value?.prompt || selected.value?.prompt || "";
-  const negative = detail.value?.negative || "";
-  if (!prompt && !negative) return;
+  const image = activeImage.value;
+  const prompt = image?.prompt || selected.value?.prompt || "";
+  const negative = image?.negative || "";
+  const characters = image?.characters || [];
+  if (!prompt && !negative && !characters.length) return;
   if (prompt) app.params.positivePrompt = prompt;
   if (negative) app.params.negativePrompt = negative;
+  if (selected.value?.source === "aiTag") {
+    const room = maxCharacterPrompts(app.params.model);
+    const filled = characters.filter((item) => item.prompt || item.negative);
+    const next = (room > 0 ? filled.slice(0, room) : filled)
+      .map((item) => ({
+        ...newCharacter(item.x != null && item.y != null),
+        prompt: item.prompt,
+        negativePrompt: item.negative,
+        useCoords: item.x != null && item.y != null,
+        x: item.x ?? 0.5,
+        y: item.y ?? 0.5,
+        enabled: true,
+      }));
+    app.characters = next.length ? next : [newCharacter()];
+  }
   app.status = "已把作品提示词发到生图";
   void router.push("/");
+}
+
+async function copyText(value: string) {
+  const text = value.trim();
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    copyNote.value = "已复制这段提示词";
+  } catch {
+    copyNote.value = "复制失败";
+  }
+}
+
+async function copyOriginal() {
+  const url = activeImage.value?.url || selected.value?.large || selected.value?.thumb || "";
+  if (!url) return;
+  copyNote.value = "正在复制原图…";
+  try {
+    const blob = await (await fetch(url)).blob();
+    const png = blob.type === "image/png" ? blob : await blobToPng(blob);
+    await navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
+    copyNote.value = "已复制原图";
+  } catch {
+    copyNote.value = "复制原图失败";
+  }
+}
+
+async function blobToPng(blob: Blob) {
+  const bitmap = await createImageBitmap(blob);
+  const canvas = document.createElement("canvas");
+  canvas.width = bitmap.width;
+  canvas.height = bitmap.height;
+  canvas.getContext("2d")?.drawImage(bitmap, 0, 0);
+  bitmap.close();
+  const png = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+  if (!png) throw new Error("无法编码图片");
+  return png;
 }
 
 function favored(card: WorkCard) {
@@ -559,23 +704,69 @@ onBeforeUnmount(() => wallObserver?.disconnect());
       <header><strong>作品</strong></header>
       <div v-if="!selected" class="blank">单击一张卡片，在这里看 Prompt 和生成参数</div>
       <div v-else class="detail">
-        <img v-if="detail?.image || selected.thumb" :src="detail?.image || selected.large || selected.thumb" alt="" />
+        <div class="preview">
+          <img :src="activeImage?.url || selected.large || selected.thumb" alt="" />
+          <template v-if="(detail?.images.length || 0) > 1">
+            <button type="button" class="edge prev" :disabled="imageIndex === 0" @click="imageIndex -= 1">‹</button>
+            <button type="button" class="edge next" :disabled="imageIndex >= (detail?.images.length || 1) - 1" @click="imageIndex += 1">›</button>
+            <span class="pager">{{ imageIndex + 1 }} / {{ detail?.images.length }}</span>
+          </template>
+        </div>
+        <div v-if="(detail?.images.length || 0) > 1" class="film">
+          <button
+            v-for="(image, index) in detail?.images"
+            :key="`${selected.id}-${index}`"
+            type="button"
+            :class="{ on: index === imageIndex }"
+            @click="imageIndex = index"
+          >
+            <img :src="image.thumb || image.url" alt="" loading="lazy" />
+          </button>
+        </div>
         <h3>{{ selected.title }}</h3>
         <p>{{ selected.author }}</p>
-        <small>{{ detail?.model || selected.aiType }}</small>
-        <textarea readonly :value="detail?.prompt || selected.prompt || '正在读取提示词…'" rows="8" />
-        <textarea v-if="detail?.negative" readonly :value="detail.negative" rows="4" />
+        <small>{{ activeImage?.model || selected.aiType }}</small>
+        <p v-if="detailLoading" class="wait">正在读取提示词…</p>
+        <template v-else-if="activeImage">
+          <section class="prompt-block">
+            <header>
+              <b>正面</b>
+              <button type="button" :disabled="!activeImage.prompt" @click="copyText(activeImage.prompt)">复制</button>
+            </header>
+            <textarea readonly :value="activeImage.prompt || '这张图没有正面提示词'" rows="8" />
+          </section>
+          <section class="prompt-block">
+            <header>
+              <b>负面</b>
+              <button type="button" :disabled="!activeImage.negative" @click="copyText(activeImage.negative)">复制</button>
+            </header>
+            <textarea readonly :value="activeImage.negative || '这张图没有负面提示词'" rows="4" />
+          </section>
+          <section v-if="activeImage.characters.length" class="prompt-block">
+            <header><b>子关键词</b></header>
+            <div v-for="(item, index) in activeImage.characters" :key="index" class="sub">
+              <header>
+                <b>角色 {{ index + 1 }}</b>
+                <button type="button" :disabled="!item.prompt && !item.negative" @click="copyText([item.prompt, item.negative].filter(Boolean).join('\n'))">复制</button>
+              </header>
+              <textarea readonly :value="item.prompt || '没有正面'" rows="3" />
+              <textarea v-if="item.negative" readonly :value="item.negative" rows="2" />
+            </div>
+          </section>
+        </template>
         <div class="acts">
-          <button class="primary" type="button" :disabled="!(detail?.prompt || selected.prompt)" @click="send">发到生图</button>
+          <button class="primary" type="button" :disabled="detailLoading || !(activeImage?.prompt || activeImage?.negative || activeImage?.characters.length || selected.prompt)" @click="send">发到生图</button>
+          <button type="button" :disabled="!(activeImage?.url || selected.large || selected.thumb)" @click="copyOriginal">复制原图</button>
           <button type="button" @click="toggleFav(selected)">{{ favored(selected) ? "已收藏" : "收藏" }}</button>
         </div>
+        <p v-if="copyNote" class="wait">{{ copyNote }}</p>
       </div>
     </aside>
   </div>
 </template>
 
 <style scoped>
-.lib { height: 100%; min-height: 0; overflow: hidden; display: grid; grid-template-columns: 220px minmax(0, 1fr) 280px; background: #12141f; color: #fff; }
+.lib { height: 100%; min-height: 0; overflow: hidden; display: grid; grid-template-columns: 220px minmax(0, 1fr) 320px; background: #12141f; color: #fff; }
 aside { min-height: 0; display: flex; flex-direction: column; gap: 2px; padding: 8px; background: #16182c; border-right: 1px solid rgba(255,255,255,.08); overflow: auto; }
 .inspector { border-right: 0; border-left: 1px solid rgba(255,255,255,.08); }
 header { display: flex; align-items: center; height: 40px; padding: 0 8px; flex: 0 0 auto; }
@@ -619,9 +810,40 @@ section { min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-dir
 .blank { flex: 1; display: grid; place-items: center; padding: 24px; text-align: center; line-height: 1.5; }
 .detail { padding: 16px; min-height: 0; overflow: auto; }
 .detail { display: flex; flex-direction: column; gap: 8px; }
-.detail img { width: 100%; border-radius: 8px; background: #10111c; }
+.preview { position: relative; }
+.preview > img, .detail img { width: 100%; border-radius: 8px; background: #10111c; }
+.edge {
+  position: absolute; top: 50%; width: 28px; height: 28px; margin-top: -14px; border: 0; border-radius: 50%;
+  background: rgba(255,255,255,.92); color: #111; font-size: 18px; line-height: 1;
+}
+.edge.prev { left: 8px; }
+.edge.next { right: 8px; }
+.edge:disabled { opacity: 0.35; }
+.pager {
+  position: absolute; top: 8px; right: 8px; padding: 2px 7px; border-radius: 6px;
+  background: rgba(0,0,0,.55); font-size: 12px;
+}
+.film { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; }
+.film button {
+  width: 44px; height: 44px; flex: none; padding: 0; border-radius: 7px; overflow: hidden;
+  border: 1px solid transparent; background: #10111c;
+}
+.film button.on { border-color: #60a5fa; }
+.film img { width: 100%; height: 100%; object-fit: cover; border-radius: 0; }
+.prompt-block { display: flex; flex-direction: column; gap: 6px; }
+.prompt-block header, .sub header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.prompt-block b, .sub b { color: rgba(255,255,255,.62); font-size: 12px; font-weight: 650; }
+.prompt-block header button, .sub header button {
+  height: 24px; padding: 0 8px; border: 0; border-radius: 6px; background: rgba(255,255,255,.08); color: #fff; font-size: 12px;
+}
+.prompt-block textarea, .sub textarea {
+  width: 100%; resize: vertical; border: 0; border-radius: 8px; background: #10111c; color: #fff; padding: 8px;
+}
+.sub { display: flex; flex-direction: column; gap: 4px; padding: 8px; border-radius: 8px; background: rgba(255,255,255,.04); }
+.wait { margin: 0; color: rgba(255,255,255,.55); }
 h3 { margin: 0; font-size: 16px; font-family: inherit; }
-.acts { display: flex; gap: 8px; }
+.acts { display: flex; flex-wrap: wrap; gap: 8px; }
 .primary { border: 0; border-radius: 8px; background: #3b82f6; color: #fff; height: 32px; padding: 0 12px; }
 .acts button { height: 32px; padding: 0 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,.12); background: transparent; color: #fff; }
+.acts .primary { border: 0; background: #3b82f6; }
 </style>

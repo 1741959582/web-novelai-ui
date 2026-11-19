@@ -219,6 +219,7 @@ function savePrecise() {
               <NaiIcon name="folder" :size="13" /> 从精准参考库
             </button>
             <button type="button" @click="openSketch"><NaiIcon name="brush" :size="13" /> 画草图</button>
+            <button type="button" @click="setI2iTab('inpaint')"><NaiIcon name="brush" :size="13" /> 局部重绘</button>
           </span>
         </div>
         <template v-else>
