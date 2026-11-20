@@ -2,6 +2,11 @@
 
 从新到旧。安装包在 [最新发行版](https://github.com/caiweida/web-novelai-ui/releases/latest)。已安装的程序启动后会读到新版本，顶栏可以点「立即更新」。
 
+## [1.0.12](https://github.com/caiweida/web-novelai-ui/releases/tag/v1.0.12)
+
+- 在线画廊选中作品后可以切换里面的每一张图，正面、负面和子关键词分开显示，并能复制原图。
+- 图生图还没放图时也可以直接点局部重绘。
+
 ## [1.0.11](https://github.com/caiweida/web-novelai-ui/releases/tag/v1.0.11)
 
 - 生成页可以打开 Agent，按当前草稿改提示词。面板可以留在提示词旁边，也可以收到窗口最右边。
