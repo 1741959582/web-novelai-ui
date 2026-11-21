@@ -13,10 +13,12 @@ const props = withDefaults(defineProps<{
   modelValue: string;
   enabled?: boolean;
   placeholder?: string;
+  targets?: { id: string; label: string }[];
+  targetId?: string;
 }>(), {
   enabled: true,
 });
-const emit = defineEmits<{ "update:modelValue": [string] }>();
+const emit = defineEmits<{ "update:modelValue": [string]; place: [id: string, tag: string] }>();
 
 type AcTab = "tran" | "lib";
 const ta = ref<HTMLTextAreaElement | null>(null);
@@ -278,7 +280,14 @@ onBeforeUnmount(() => {
       </button>
     </div>
     <p v-if="note" class="note">{{ note }}</p>
-    <TagExplorer v-if="showExplorer" @insert="insertExplored" @close="showExplorer = false" />
+    <TagExplorer
+      v-if="showExplorer"
+      :targets="targets"
+      :target-id="targetId"
+      @insert="insertExplored"
+      @place="(id, tag) => emit('place', id, tag)"
+      @close="showExplorer = false"
+    />
     <TagWeightList
       v-if="showTags && chips.length"
       class="wgts"

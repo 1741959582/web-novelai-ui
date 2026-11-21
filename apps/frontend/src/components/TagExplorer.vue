@@ -12,7 +12,11 @@ import {
 import { DANBOORU_CAT } from "@/utils/tagSuggest";
 import { chunkForTranslate, fmtCount, hasCjkText } from "@/utils/textUtils";
 
-const emit = defineEmits<{ insert: [string]; close: [] }>();
+const props = defineProps<{
+  targets?: { id: string; label: string }[];
+  targetId?: string;
+}>();
+const emit = defineEmits<{ insert: [string]; close: []; place: [id: string, tag: string] }>();
 
 const query = ref("");
 const localOnly = ref(true);
@@ -23,6 +27,8 @@ const zh = ref<Record<string, string>>({});
 const wikiBody = ref("");
 const wikiZh = ref("");
 const wikiFound = ref(false);
+const dest = ref(props.targetId || props.targets?.[0]?.id || "");
+const placed = ref("");
 const error = ref("");
 const searching = ref(false);
 const detailBusy = ref(false);
@@ -175,7 +181,25 @@ watch(localOnly, () => {
   if (query.value.trim()) void searchNow();
 });
 
+watch(() => props.targetId, (id) => {
+  if (id) dest.value = id;
+});
+
+watch(() => props.targets, (list) => {
+  if (!list?.some((item) => item.id === dest.value)) dest.value = list?.[0]?.id || "";
+});
+
+const destLabel = computed(() => props.targets?.find((item) => item.id === dest.value)?.label || "");
+
+function insertInto() {
+  const tag = active.value.trim();
+  if (!tag || !dest.value) return;
+  emit("place", dest.value, tag);
+  placed.value = destLabel.value ? `已加入${destLabel.value}` : "已加入";
+}
+
 function pick(name: string) {
+  placed.value = "";
   void openTag(name);
 }
 
@@ -249,6 +273,14 @@ function wikiHref(name: string) {
           <strong>关联标签</strong>
           <span v-if="active">{{ active }}</span>
         </header>
+        <div v-if="active && props.targets?.length" class="into" @click.stop>
+          <span>加入到</span>
+          <select v-model="dest">
+            <option v-for="item in props.targets" :key="item.id" :value="item.id">{{ item.label }}</option>
+          </select>
+          <button type="button" @click="insertInto">加入</button>
+          <em v-if="placed">{{ placed }}</em>
+        </div>
         <p v-if="!active" class="empty">选一个标签后显示经常一起出现的词</p>
         <p v-else-if="detailBusy && !related.length" class="empty">读取中…</p>
         <p v-else-if="active && !related.length" class="empty">没有关联标签</p>
@@ -370,6 +402,36 @@ input {
   padding: 4px;
   border-radius: 10px;
   background: #0e1020;
+}
+.into {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px 8px;
+}
+.into span, .into em {
+  flex: none;
+  color: rgba(255,255,255,0.55);
+  font-size: 12px;
+  font-style: normal;
+}
+.into select {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 6px;
+  border-radius: 6px;
+  background: #191b31;
+  color: #fff;
+}
+.into button {
+  flex: none;
+  height: 28px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: #3b82f6;
+  color: #fff;
 }
 .side header span, .wiki header span {
   color: rgba(255,255,255,0.5);

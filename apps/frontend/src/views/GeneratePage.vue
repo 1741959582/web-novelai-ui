@@ -23,6 +23,7 @@ import DanbooruBubble from "@/components/DanbooruBubble.vue";
 import NaiAgentMark from "@/components/NaiAgentMark.vue";
 import NaiAgentPanel from "@/components/NaiAgentPanel.vue";
 import { loadAutoComplete } from "@/utils/promptTools";
+import { appendPromptChunk } from "@/utils/textUtils";
 
 const store = useAppStore();
 const route = useRoute();
@@ -74,6 +75,32 @@ watch(
   },
   { immediate: true },
 );
+const tagTargets = computed(() => [
+  { id: "positive", label: "基础提示词" },
+  { id: "negative", label: "负面" },
+  ...store.characters.flatMap((character, index) => [
+    { id: `char:${character.id}:prompt`, label: `角色 ${index + 1} 正面` },
+    { id: `char:${character.id}:uc`, label: `角色 ${index + 1} 负面` },
+  ]),
+]);
+
+function placeTag(id: string, tag: string) {
+  if (id === "positive") {
+    store.params.positivePrompt = appendPromptChunk(store.params.positivePrompt, tag);
+    return;
+  }
+  if (id === "negative") {
+    store.params.negativePrompt = appendPromptChunk(store.params.negativePrompt, tag);
+    return;
+  }
+  const match = /^char:(.+):(prompt|uc)$/.exec(id);
+  if (!match) return;
+  const character = store.characters.find((item) => item.id === match[1]);
+  if (!character) return;
+  if (match[2] === "prompt") store.updateCharacter(character.id, { prompt: appendPromptChunk(character.prompt, tag) });
+  else store.updateCharacter(character.id, { negativePrompt: appendPromptChunk(character.negativePrompt, tag) });
+}
+
 const promptValue = computed({
   get: () => (promptTab.value === "prompt" ? store.params.positivePrompt : store.params.negativePrompt),
   set: (next: string) => {
@@ -618,7 +645,10 @@ function toggleSeedPin() {
         <PromptField
           v-model="promptValue"
           :enabled="autoComplete"
+          :targets="tagTargets"
+          :target-id="promptTab === 'prompt' ? 'positive' : 'negative'"
           :placeholder="promptTab === 'prompt' ? 'Enter your prompt here...' : 'lowres, worst quality...'"
+          @place="placeTag"
         >
           <template v-if="promptTab === 'prompt'" #tools>
             <DanbooruBubble
@@ -720,8 +750,11 @@ function toggleSeedPin() {
             v-if="(charTab[c.id] || 'prompt') === 'prompt'"
             :model-value="c.prompt"
             :enabled="autoComplete"
+            :targets="tagTargets"
+            :target-id="`char:${c.id}:prompt`"
             placeholder="Character prompt..."
             @update:model-value="store.updateCharacter(c.id, { prompt: $event })"
+            @place="placeTag"
           >
             <template #tools>
               <DanbooruBubble
@@ -734,8 +767,11 @@ function toggleSeedPin() {
             v-else
             :model-value="c.negativePrompt"
             :enabled="autoComplete"
+            :targets="tagTargets"
+            :target-id="`char:${c.id}:uc`"
             placeholder="lowres, extra fingers..."
             @update:model-value="store.updateCharacter(c.id, { negativePrompt: $event })"
+            @place="placeTag"
           />
         </article>
       </section>
