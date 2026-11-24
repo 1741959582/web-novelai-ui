@@ -55,17 +55,6 @@ const runStatusOptions = [
 
 const filters = reactive({ runStatus: "", keyword: "" });
 const orientation = ref<0 | 1>(1);
-const cardSize = ref(320);
-let cardObserver: ResizeObserver | null = null;
-
-function syncCardSize() {
-  const nav = document.querySelector(".shell > .rail, .shell > .panel:not(.overlay)");
-  const navW = nav instanceof HTMLElement ? nav.offsetWidth : 48;
-  const inner = Math.max(320, window.screen.availWidth - navW - 64);
-  const gap = 16;
-  const cols = Math.max(1, Math.floor((inner + gap) / (320 + gap)));
-  cardSize.value = Math.floor((inner - gap * (cols - 1)) / cols);
-}
 const site = ref<"x" | "pixiv">("x");
 const accounts = ref<TwitterAccount[]>([]);
 const status = ref<RuyiStatus | null>(null);
@@ -975,13 +964,6 @@ watch([insightDays, insightLikes, insightFollows, insightStart, insightEnd], () 
 });
 
 onMounted(async () => {
-  syncCardSize();
-  window.addEventListener("resize", syncCardSize);
-  const shell = document.querySelector(".shell");
-  if (shell) {
-    cardObserver = new ResizeObserver(syncCardSize);
-    cardObserver.observe(shell);
-  }
   document.addEventListener("pointerdown", onQueueOutside);
   try {
     status.value = await ruyiStatus();
@@ -1022,8 +1004,6 @@ onActivated(() => {
 });
 
 onUnmounted(() => {
-  window.removeEventListener("resize", syncCardSize);
-  cardObserver?.disconnect();
   document.removeEventListener("pointerdown", onQueueOutside);
   if (pollTimer) window.clearInterval(pollTimer);
   if (liveTimer) window.clearInterval(liveTimer);
@@ -1113,7 +1093,7 @@ onUnmounted(() => {
       </div>
       <p class="hint proxy-hint">{{ proxyHint }}</p>
 
-      <div class="grid" :class="{ tall: orientation === 1 }" :style="{ '--card-size': `${cardSize}px` }">
+      <div class="grid" :class="{ tall: orientation === 1 }">
         <p v-if="loading" class="empty">正在读取{{ site === "pixiv" ? " Pixiv " : "推特" }}账号</p>
         <p v-else-if="!visibleAccounts.length" class="empty">还没有{{ site === "pixiv" ? " Pixiv " : "推特" }}账号。点「添加/导入」创建。</p>
         <article v-for="row in visibleAccounts" :key="row.account_id" class="card" @click.stop>
@@ -1382,7 +1362,7 @@ onUnmounted(() => {
 .bar, .panel { background: var(--bg1); border: 1px solid var(--bg3); border-radius: 12px; }
 .bar { padding: 14px 16px; flex-wrap: wrap; }
 .panel { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
-.toolbar { justify-content: space-between; gap: 12px; padding: 14px 16px; flex-wrap: nowrap; border-bottom: 1px solid var(--bg3); }
+.toolbar { justify-content: space-between; gap: 12px; padding: 14px 16px; flex-wrap: wrap; border-bottom: 1px solid var(--bg3); }
 .toolbar:has(+ .proxy-choice) { border-bottom: 0; }
 .orient { margin-left: auto; flex-shrink: 0; }
 .proxy-choice { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 0 16px 8px; }
@@ -1391,8 +1371,8 @@ onUnmounted(() => {
 .proxy-choice button.on { background: var(--heading); color: var(--bg0); border-color: var(--heading); }
 .proxy-choice button:disabled { opacity: 0.45; }
 .proxy-hint { margin: 0; padding: 0 16px 12px; border-bottom: 1px solid var(--bg3); }
-.text select { min-width: 0; max-width: 180px; padding: 4px 6px; }
-.ip-line { display: flex; align-items: center; gap: 8px; color: var(--heading); font-size: 12px; }
+.text select { width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; padding: 0.25em 0.4em; font-size: 1em; }
+.ip-line { display: flex; align-items: center; gap: 0.4em; color: var(--heading); font-size: 0.86em; }
 .ip-line button { border: 0; background: transparent; color: var(--heading); padding: 0; text-decoration: underline; }
 .tools { flex-wrap: wrap; }
 .queue-host { position: relative; z-index: 8; flex-shrink: 0; }
@@ -1436,29 +1416,33 @@ input, select, textarea { min-width: 180px; background: var(--bg0); border: 1px 
 .orient button { border: 1px solid var(--bg3); background: transparent; border-radius: 8px; padding: 6px 10px; }
 .orient button.on { background: var(--heading); color: var(--bg0); border-color: var(--heading); }
 .sites { margin-left: 0; }
-.grid { flex: 1; overflow: auto; display: grid; grid-template-columns: repeat(auto-fill, var(--card-size, 320px)); gap: 16px; align-content: start; justify-content: start; padding: 16px; }
-.card { display: flex; flex-direction: column; gap: 12px; padding: 14px; border-radius: 22px; background: var(--bg2); border: 1px solid var(--bg3); position: relative; }
-.preview { position: relative; border-radius: 16px; overflow: hidden; background: #10111c; aspect-ratio: 16 / 9; }
-.preview.portrait { aspect-ratio: 9 / 16; max-height: 420px; }
+.grid { container-type: size; flex: 1; min-height: 0; overflow: auto; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 16px; align-content: start; padding: 16px; }
+.card { container-type: inline-size; min-width: 0; display: flex; flex-direction: column; gap: clamp(6px, 3cqi, 12px); padding: clamp(8px, 4cqi, 14px); border-radius: clamp(12px, 6cqi, 22px); background: var(--bg2); border: 1px solid var(--bg3); position: relative; font-size: clamp(11px, 5.4cqi, 14px); }
+.preview { position: relative; width: 100%; aspect-ratio: 16 / 9; max-height: 46cqh; border-radius: clamp(8px, 4cqi, 16px); overflow: hidden; background: #10111c; }
+.preview.portrait { aspect-ratio: 9 / 16; max-height: none; }
 .preview img { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; object-fit: contain; background: #10111c; }
 .placeholder { width: 100%; height: 100%; }
-.placeholder { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--muted); }
-.placeholder b { font-size: 28px; color: var(--heading); }
-.live { position: absolute; top: 8px; left: 8px; z-index: 2; display: flex; align-items: center; gap: 6px; font-style: normal; font-size: 10px; font-weight: 700; letter-spacing: 0.08em; padding: 4px 8px; border-radius: 4px; background: rgba(0,0,0,0.6); color: #ef4444; }
+.placeholder { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.4em; color: var(--muted); font-size: 0.92em; text-align: center; padding: 0 0.6em; }
+.placeholder b { font-size: clamp(16px, 12cqi, 28px); color: var(--heading); }
+.live { position: absolute; top: 0.5em; left: 0.5em; z-index: 2; display: flex; align-items: center; gap: 0.4em; font-style: normal; font-size: 0.75em; font-weight: 700; letter-spacing: 0.08em; padding: 0.25em 0.5em; border-radius: 4px; background: rgba(0,0,0,0.6); color: #ef4444; }
 .live s { width: 6px; height: 6px; border-radius: 99px; background: #ef4444; text-decoration: none; }
 .live.on { color: var(--ok); }
 .live.on s { background: var(--ok); }
 .busy { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(8, 9, 18, 0.55); }
-.info { align-items: flex-start; }
-.avatar { width: 40px; height: 40px; border-radius: 10px; display: grid; place-items: center; background: var(--bg0); color: var(--heading); font-weight: 700; }
-.text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.card .info, .card .actions { gap: clamp(4px, 2.4cqi, 10px); min-width: 0; }
+.info { align-items: flex-start; min-width: 0; }
+.avatar { width: clamp(22px, 14cqi, 40px); height: clamp(22px, 14cqi, 40px); border-radius: 0.4em; display: grid; place-items: center; background: var(--bg0); color: var(--heading); font-weight: 700; font-size: 1em; flex: none; }
+.text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.25em; }
 .text strong, .text span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.text strong { font-size: 1em; }
 .text span, .hint, .empty, .note { color: var(--muted); }
-em { font-style: normal; font-size: 12px; }
+.card em { font-style: normal; font-size: 0.86em; flex: none; }
 em.logged_in { color: var(--ok); }
 em.banned { color: var(--danger); }
 em.waiting_login { color: var(--heading); }
 .actions { position: relative; }
+.card .btn { min-width: 0; padding: 0.45em 0.55em; font-size: 1em; border-radius: 0.3em; }
+.card .btn.more { flex: none; padding-inline: 0.45em; }
 .alert-host { position: relative; }
 .alert-dot { position: absolute; top: -3px; right: -3px; width: 8px; height: 8px; border-radius: 50%; background: #ef4444; box-shadow: 0 0 0 2px var(--bg1); }
 .actions .btn.primary { flex: 1; }
