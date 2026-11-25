@@ -179,7 +179,77 @@ export interface SessionRecord {
 export const MAX_VIBE_IMAGES = 16;
 export const MAX_PRECISE_REFS = 6;
 
-export type PreciseReferenceType = "character" | "style" | "character&style";
+export type PreciseReferenceType =
+  | "character&style"
+  | "character&style_anyoutfit"
+  | "character"
+  | "character_mainoutfit"
+  | "style"
+  | "costume";
+
+export type PreciseReferenceGroup = "character&style" | "character" | "style" | "costume";
+
+export const PRECISE_TYPE_OPTIONS: { value: PreciseReferenceGroup; label: string }[] = [
+  { value: "character&style", label: "角色和风格" },
+  { value: "character", label: "角色" },
+  { value: "style", label: "风格" },
+  { value: "costume", label: "服装" },
+];
+
+const PRECISE_TYPES: PreciseReferenceType[] = [
+  "character&style",
+  "character&style_anyoutfit",
+  "character",
+  "character_mainoutfit",
+  "style",
+  "costume",
+];
+
+export function normalizePreciseType(value?: string | null): PreciseReferenceType {
+  return PRECISE_TYPES.includes(value as PreciseReferenceType) ? (value as PreciseReferenceType) : "character&style";
+}
+
+export function preciseTypeGroup(type: string): PreciseReferenceGroup {
+  switch (normalizePreciseType(type)) {
+    case "character":
+    case "character_mainoutfit":
+      return "character";
+    case "style":
+      return "style";
+    case "costume":
+      return "costume";
+    default:
+      return "character&style";
+  }
+}
+
+export function preciseTypeLabel(type: string) {
+  return PRECISE_TYPE_OPTIONS.find((item) => item.value === preciseTypeGroup(type))?.label || "角色和风格";
+}
+
+export function preciseSupportsOutfitToggle(type: string) {
+  const group = preciseTypeGroup(type);
+  return group === "character" || group === "character&style";
+}
+
+export function precisePrefersSameOutfit(type: string) {
+  const normalized = normalizePreciseType(type);
+  return normalized === "character&style" || normalized === "character_mainoutfit";
+}
+
+export function preciseTypeForGroup(group: PreciseReferenceGroup): PreciseReferenceType {
+  if (group === "character") return "character";
+  if (group === "style") return "style";
+  if (group === "costume") return "costume";
+  return "character&style";
+}
+
+export function preciseTypeWithOutfitPreference(type: string, preferSameOutfit: boolean): PreciseReferenceType {
+  const group = preciseTypeGroup(type);
+  if (group === "character&style") return preferSameOutfit ? "character&style" : "character&style_anyoutfit";
+  if (group === "character") return preferSameOutfit ? "character_mainoutfit" : "character";
+  return preciseTypeForGroup(group);
+}
 
 export interface VibeImage {
   id: string;
@@ -283,9 +353,21 @@ export function supportsNAIVibeTransfer(model: string) {
   return !isV5(model);
 }
 
-/** Desktop-app capability map: Precise/Director Reference is V4.5 only. */
+/** Official image gen: Precise Reference is V4.5 and V5. V5 adds Outfit and drops the fidelity slider. */
 export function supportsNAIPreciseReference(model: string) {
-  return model.startsWith("nai-diffusion-4-5-");
+  return model.startsWith("nai-diffusion-4-5-") || model.startsWith("nai-diffusion-5-");
+}
+
+export function supportsNAIPreciseOutfit(model: string) {
+  return isV5(model);
+}
+
+export function preciseStrengthMax(model: string) {
+  return isV5(model) ? 5 : 1;
+}
+
+export function preciseShowsFidelity(model: string) {
+  return !isV5(model);
 }
 
 export function emptyMetadataReport(): MetadataReport {

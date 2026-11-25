@@ -47,6 +47,8 @@ pub fn run() {
             store::pick_output_dir,
             store::open_output_dir,
             store::read_image_data_url,
+            store::library_save_image,
+            store::library_delete_image,
             store::sessions_list,
             store::session_upsert,
             store::session_load,

@@ -586,6 +586,19 @@ fn encode_rgba_png(img: &image::RgbaImage) -> Result<Vec<u8>, String> {
 }
 
 const DIRECTOR_CANVASES: [(u32, u32); 3] = [(1024, 1536), (1536, 1024), (1472, 1472)];
+const DIRECTOR_BUCKETS: [(u32, u32); 11] = [
+    (768, 512),
+    (512, 768),
+    (640, 640),
+    (1216, 832),
+    (832, 1216),
+    (1024, 1024),
+    (1536, 1024),
+    (1024, 1536),
+    (1472, 1472),
+    (1920, 1088),
+    (1088, 1920),
+];
 
 fn fit_within(sw: u32, sh: u32, tw: u32, th: u32) -> (u32, u32) {
     if sw == 0 || sh == 0 {
@@ -627,15 +640,89 @@ fn fit_on_canvas(src: &image::RgbaImage, tw: u32, th: u32) -> image::RgbaImage {
     canvas
 }
 
-fn prepare_director_png(bytes: &[u8]) -> Result<Vec<u8>, String> {
-    let src = image::load_from_memory(bytes)
+fn director_bucket(width: u32, height: u32) -> (u32, u32) {
+    let src_ratio = f64::from(width) / f64::from(height.max(1));
+    let src_area = u64::from(width) * u64::from(height);
+    DIRECTOR_BUCKETS
+        .into_iter()
+        .min_by(|a, b| {
+            let da = (f64::from(a.0) / f64::from(a.1) - src_ratio).abs();
+            let db = (f64::from(b.0) / f64::from(b.1) - src_ratio).abs();
+            da.partial_cmp(&db)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    let aa = (u64::from(a.0) * u64::from(a.1)).abs_diff(src_area);
+                    let bb = (u64::from(b.0) * u64::from(b.1)).abs_diff(src_area);
+                    aa.cmp(&bb)
+                })
+        })
+        .unwrap_or((1024, 1536))
+}
+
+fn cover_on_canvas(src: &image::RgbaImage, tw: u32, th: u32) -> image::RgbaImage {
+    let (sw, sh) = src.dimensions();
+    if sw == 0 || sh == 0 {
+        return image::RgbaImage::from_pixel(tw, th, image::Rgba([0, 0, 0, 255]));
+    }
+    let scale = (f64::from(tw) / f64::from(sw)).max(f64::from(th) / f64::from(sh));
+    let rw = ((f64::from(sw) * scale).round() as u32).max(tw);
+    let rh = ((f64::from(sh) * scale).round() as u32).max(th);
+    let resized = if (rw, rh) == (sw, sh) {
+        src.clone()
+    } else {
+        image::imageops::resize(src, rw, rh, image::imageops::FilterType::CatmullRom)
+    };
+    let left = rw.saturating_sub(tw) / 2;
+    let top = rh.saturating_sub(th) / 2;
+    image::imageops::crop_imm(&resized, left, top, tw, th).to_image()
+}
+
+fn load_director_rgba(bytes: &[u8]) -> Result<image::RgbaImage, String> {
+    image::load_from_memory(bytes)
         .map(|img| img.to_rgba8())
-        .map_err(|e| format!("角色参考图片无法读取：{e}"))?;
+        .map_err(|e| format!("角色参考图片无法读取：{e}"))
+}
+
+fn prepare_director_png(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let src = load_director_rgba(bytes)?;
     let (tw, th) = director_canvas(src.width(), src.height());
     if src.dimensions() == (tw, th) && bytes.starts_with(&[0x89, 0x50, 0x4e, 0x47]) {
         return Ok(bytes.to_vec());
     }
     encode_rgba_png(&fit_on_canvas(&src, tw, th))
+}
+
+fn prepare_director_bucket_png(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let src = load_director_rgba(bytes)?;
+    let (tw, th) = director_bucket(src.width(), src.height());
+    if src.dimensions() == (tw, th) && bytes.starts_with(&[0x89, 0x50, 0x4e, 0x47]) {
+        return Ok(bytes.to_vec());
+    }
+    encode_rgba_png(&cover_on_canvas(&src, tw, th))
+}
+
+fn supports_precise(model: &str) -> bool {
+    let model = normalize_model(model);
+    model.starts_with("nai-diffusion-4-5-") || model.starts_with("nai-diffusion-5-")
+}
+
+fn precise_caption(kind: &str, v5: bool) -> Option<String> {
+    let kind = kind.trim();
+    let kind = if kind.is_empty() { "character&style" } else { kind };
+    if v5 {
+        return match kind {
+            "character" | "style" | "costume" | "character&style" | "character&style_anyoutfit"
+            | "character_mainoutfit" => Some(kind.to_string()),
+            _ => Some("character&style".to_string()),
+        };
+    }
+    match kind {
+        "costume" => None,
+        "character_mainoutfit" => Some("character".to_string()),
+        "character&style_anyoutfit" => Some("character&style".to_string()),
+        "character" | "style" | "character&style" => Some(kind.to_string()),
+        _ => Some("character&style".to_string()),
+    }
 }
 
 fn prepare_vibe_png(bytes: &[u8]) -> Result<Vec<u8>, String> {
@@ -1167,12 +1254,23 @@ fn build_payload(req: &GenerateRequest, seed: u32, action: &str) -> Value {
         parameters["noise"] = json!(0.0);
         parameters["extra_noise_seed"] = json!(seed.saturating_sub(1));
     }
-    let mut precise = req.precise_references.clone().unwrap_or_default();
-    if !normalize_model(&model).starts_with("nai-diffusion-4-5-") {
-        precise.clear();
-    }
+    let v5 = is_v5(&model);
+    let precise = if supports_precise(&model) && !(v5 && action == "infill") {
+        req.precise_references
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|mut reference| {
+                reference.kind = precise_caption(&reference.kind, v5)?;
+                Some(reference)
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let strength_max = if v5 { 5.0 } else { 1.0 };
     let mut vibes = req.vibe_images.clone().unwrap_or_default();
-    if is_v5(&model) || !precise.is_empty() {
+    if v5 || !precise.is_empty() {
         vibes.clear();
     }
     if !vibes.is_empty() {
@@ -1200,25 +1298,21 @@ fn build_payload(req: &GenerateRequest, seed: u32, action: &str) -> Value {
         parameters["normalize_reference_strength_multiple"] = json!(true);
         parameters["director_reference_descriptions"] = json!(precise
             .iter()
-            .map(|r| {
-                let kind = if r.kind.trim().is_empty() {
-                    "character&style"
-                } else {
-                    r.kind.as_str()
-                };
-                json!({
-                    "caption": { "base_caption": kind, "char_captions": [] },
-                    "legacy_uc": false
-                })
-            })
+            .map(|r| json!({
+                "caption": { "base_caption": r.kind, "char_captions": [] },
+                "legacy_uc": false
+            }))
             .collect::<Vec<_>>());
         parameters["director_reference_strength_values"] = json!(precise
             .iter()
-            .map(|r| (r.strength.clamp(0.0, 1.0) * 100.0).round() / 100.0)
+            .map(|r| (r.strength.clamp(0.0, strength_max) * 100.0).round() / 100.0)
             .collect::<Vec<_>>());
         parameters["director_reference_secondary_strength_values"] = json!(precise
             .iter()
-            .map(|r| (((1.0 - r.fidelity.clamp(0.0, 1.0)) * 100.0).round()) / 100.0)
+            .map(|r| {
+                let fidelity = if v5 { 1.0 } else { r.fidelity.clamp(0.0, 1.0) };
+                ((1.0 - fidelity) * 100.0).round() / 100.0
+            })
             .collect::<Vec<_>>());
         parameters["director_reference_information_extracted"] =
             json!(precise.iter().map(|_| 1.0).collect::<Vec<_>>());
@@ -1317,21 +1411,23 @@ async fn encode_vibe_image(
 }
 
 async fn prepare_request(req: &GenerateRequest, base: &str, token: &str) -> Result<GenerateRequest, String> {
-    if is_v5(&req.model) {
-        return Ok(req.clone());
-    }
     let mut next = req.clone();
     let precise_on = next
         .precise_references
         .as_ref()
         .is_some_and(|refs| !refs.is_empty())
-        && normalize_model(&req.model).starts_with("nai-diffusion-4-5-");
+        && supports_precise(&req.model);
     if precise_on {
+        let v5 = is_v5(&req.model);
         let refs = next.precise_references.clone().unwrap_or_default();
         let mut prepared = Vec::with_capacity(refs.len());
         for reference in refs {
             let raw = decode_b64(&reference.base64).map_err(|e| format!("角色参考图片无效：{e}"))?;
-            let png = prepare_director_png(&raw)?;
+            let png = if v5 {
+                prepare_director_bucket_png(&raw)?
+            } else {
+                prepare_director_png(&raw)?
+            };
             prepared.push(PreciseRefIn {
                 base64: encode_b64(&png),
                 ..reference
@@ -1339,6 +1435,9 @@ async fn prepare_request(req: &GenerateRequest, base: &str, token: &str) -> Resu
         }
         next.precise_references = Some(prepared);
         next.vibe_images = None;
+        return Ok(next);
+    }
+    if is_v5(&req.model) {
         return Ok(next);
     }
     let Some(vibes) = next.vibe_images.clone() else {
@@ -2051,7 +2150,7 @@ pub async fn translate_text(text: String, langpair: Option<String>) -> Result<St
 mod tests {
     use super::{
         build_payload, encode_b64, encode_rgba_png, normalize_proxy_server, parse_windows_internet_proxy,
-        prepare_director_png, GenerateRequest, PreciseRefIn, VibeImageIn,
+        prepare_director_bucket_png, prepare_director_png, GenerateRequest, PreciseRefIn, VibeImageIn,
     };
 
     fn request(model: &str) -> GenerateRequest {
@@ -2122,6 +2221,84 @@ mod tests {
         assert!(params.get("reference_image_multiple").is_none());
         assert_eq!(params["director_reference_descriptions"][0]["caption"]["base_caption"], "character");
         assert_eq!(params["director_reference_secondary_strength_values"][0], 0.6);
+    }
+
+    #[test]
+    fn v5_precise_reference_keeps_outfit_and_drops_fidelity() {
+        let png = encode_rgba_png(&image::RgbaImage::from_pixel(8, 8, image::Rgba([1, 2, 3, 255]))).unwrap();
+        let mut req = request("nai-diffusion-5-full");
+        req.precise_references = Some(vec![
+            PreciseRefIn {
+                base64: encode_b64(&png),
+                kind: "costume".into(),
+                strength: 6.0,
+                fidelity: 0.2,
+            },
+            PreciseRefIn {
+                base64: encode_b64(&png),
+                kind: "character_mainoutfit".into(),
+                strength: 2.5,
+                fidelity: 0.2,
+            },
+        ]);
+        let params = build_payload(&req, 1, "generate")["parameters"].clone();
+        assert_eq!(params["director_reference_descriptions"][0]["caption"]["base_caption"], "costume");
+        assert_eq!(params["director_reference_descriptions"][1]["caption"]["base_caption"], "character_mainoutfit");
+        assert_eq!(params["director_reference_strength_values"][0], 5.0);
+        assert_eq!(params["director_reference_strength_values"][1], 2.5);
+        assert_eq!(params["director_reference_secondary_strength_values"][0], 0.0);
+        assert!(params.get("reference_image_multiple").is_none());
+    }
+
+    #[test]
+    fn v45_precise_reference_rewrites_v5_only_captions() {
+        let png = encode_rgba_png(&image::RgbaImage::from_pixel(8, 8, image::Rgba([1, 2, 3, 255]))).unwrap();
+        let mut req = request("nai-diffusion-4-5-full");
+        req.precise_references = Some(vec![
+            PreciseRefIn {
+                base64: encode_b64(&png),
+                kind: "costume".into(),
+                strength: 1.0,
+                fidelity: 1.0,
+            },
+            PreciseRefIn {
+                base64: encode_b64(&png),
+                kind: "character&style_anyoutfit".into(),
+                strength: 1.4,
+                fidelity: 0.25,
+            },
+        ]);
+        let params = build_payload(&req, 1, "generate")["parameters"].clone();
+        assert_eq!(params["director_reference_descriptions"].as_array().unwrap().len(), 1);
+        assert_eq!(params["director_reference_descriptions"][0]["caption"]["base_caption"], "character&style");
+        assert_eq!(params["director_reference_strength_values"][0], 1.0);
+        assert_eq!(params["director_reference_secondary_strength_values"][0], 0.75);
+    }
+
+    #[test]
+    fn v5_inpaint_omits_precise_reference() {
+        let png = encode_rgba_png(&image::RgbaImage::from_pixel(8, 8, image::Rgba([1, 2, 3, 255]))).unwrap();
+        let mut req = request("nai-diffusion-5-full");
+        req.precise_references = Some(vec![PreciseRefIn {
+            base64: encode_b64(&png),
+            kind: "character".into(),
+            strength: 1.0,
+            fidelity: 1.0,
+        }]);
+        req.mask_base64 = Some(encode_b64(&png));
+        let params = build_payload(&req, 1, "infill")["parameters"].clone();
+        assert!(params.get("director_reference_descriptions").is_none());
+    }
+
+    #[test]
+    fn v5_director_bucket_keeps_normal_portrait() {
+        let portrait = encode_rgba_png(&image::RgbaImage::from_pixel(832, 1216, image::Rgba([0, 0, 255, 255]))).unwrap();
+        let fitted = image::load_from_memory(&prepare_director_bucket_png(&portrait).unwrap()).unwrap();
+        assert_eq!((fitted.width(), fitted.height()), (832, 1216));
+
+        let square = encode_rgba_png(&image::RgbaImage::from_pixel(64, 64, image::Rgba([255, 0, 0, 255]))).unwrap();
+        let fitted = image::load_from_memory(&prepare_director_bucket_png(&square).unwrap()).unwrap();
+        assert_eq!((fitted.width(), fitted.height()), (640, 640));
     }
 
     #[test]

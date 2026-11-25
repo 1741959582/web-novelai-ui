@@ -3,6 +3,7 @@ import { computed, reactive, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useAppStore } from "@/stores/app";
 import { useMaterialLibrary } from "@/stores/materialLibrary";
+import { preciseTypeLabel } from "@/types/nai";
 import { appendPromptChunk } from "@/utils/textUtils";
 import NaiIcon from "@/components/NaiIcon.vue";
 
@@ -19,7 +20,7 @@ const title = computed(() => (kind.value === "blocks" ? "提示词块" : kind.va
 const hint = computed(() => {
   if (kind.value === "blocks") return "把常用的一段提示词存成一块，点一下就加进当前草稿。";
   if (kind.value === "vibes") return "存下风格参考图。生成页的风格迁移可以从这里加回去。";
-  return forI2i.value ? "选一张图，把它设成图生图底图。" : "存下角色或风格参考。生成页的精准参考可以从这里加回去。";
+  return forI2i.value ? "选一张图，把它设成图生图底图。" : "存下角色、风格或服装参考。生成页的精准参考可以从这里加回去。";
 });
 
 function readFile(file: File, done: (url: string) => void) {
@@ -54,33 +55,45 @@ function onUpload(event: Event) {
   if (!file) return;
   readFile(file, (url) => {
     const name = file.name.replace(/\.[^.]+$/, "");
-    if (kind.value === "vibes") lib.addVibe({ name, previewUrl: url, infoExtracted: 0.7, strength: 0.6 });
-    else lib.addPrecise({ name, previewUrl: url, type: "character&style", strength: 1, fidelity: 1 });
+    void (kind.value === "vibes"
+      ? lib.addVibe({ name, previewUrl: url, infoExtracted: 0.7, strength: 0.6 })
+      : lib.addPrecise({ name, previewUrl: url, type: "character&style", strength: 1, fidelity: 1 })
+    ).then((saved) => {
+      if (!saved) app.status = lib.error || "这张图没有存进去";
+    });
   });
   (event.target as HTMLInputElement).value = "";
 }
 
-function saveCurrent() {
+async function saveCurrent() {
   if (kind.value === "vibes") {
     for (const vibe of app.vibeImages) {
-      lib.addVibe({
+      const saved = await lib.addVibe({
         name: "当前风格",
         previewUrl: vibe.previewUrl,
         infoExtracted: vibe.infoExtracted,
         strength: vibe.strength,
       });
+      if (!saved) {
+        app.status = lib.error || "没有存进去";
+        return;
+      }
     }
     app.status = app.vibeImages.length ? "已把当前风格迁移存进库" : "当前没有风格迁移图";
     return;
   }
   for (const item of app.preciseReferences) {
-    lib.addPrecise({
+    const saved = await lib.addPrecise({
       name: "当前精准参考",
       previewUrl: item.previewUrl,
       type: item.type,
       strength: item.strength,
       fidelity: item.fidelity,
     });
+    if (!saved) {
+      app.status = lib.error || "没有存进去";
+      return;
+    }
   }
   app.status = app.preciseReferences.length ? "已把当前精准参考存进库" : "当前没有精准参考";
 }
@@ -162,7 +175,7 @@ function usePrecise(id: string) {
       <article v-for="item in lib.precise" :key="item.id">
         <img :src="item.previewUrl" alt="" />
         <strong>{{ item.name }}</strong>
-        <small>{{ item.type }} · 强度 {{ item.strength.toFixed(2) }}</small>
+        <small>{{ preciseTypeLabel(item.type) }} · 强度 {{ item.strength.toFixed(2) }}</small>
         <div>
           <button class="btn primary" type="button" @click="usePrecise(item.id)">
             {{ forI2i ? "用作图生图" : "加入精准参考" }}

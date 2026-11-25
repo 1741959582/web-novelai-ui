@@ -48,6 +48,7 @@ import {
   newCharacter,
   newInsetReference,
   newPreciseReference,
+  isV5,
   newVibeImage,
   supportsNAIPreciseReference,
   supportsNAIVibeTransfer,
@@ -879,7 +880,10 @@ export const useAppStore = defineStore("app", () => {
       return empty;
     }
     const vibeOn = supportsNAIVibeTransfer(params.value.model) && vibeImages.value.some((v) => v.enabled && v.base64);
-    const preciseOn = supportsNAIPreciseReference(params.value.model) && preciseReferences.value.some((p) => p.enabled && p.base64);
+    const preciseOn =
+      supportsNAIPreciseReference(params.value.model) &&
+      !(isV5(params.value.model) && hasMask) &&
+      preciseReferences.value.some((p) => p.enabled && p.base64);
     busy.value = true;
     genProgress.value = 0.04;
     genStep.value = 0;
@@ -902,7 +906,7 @@ export const useAppStore = defineStore("app", () => {
               base64: stripDataUrl(p.base64),
               type: p.type,
               strength: p.strength,
-              fidelity: p.fidelity,
+              fidelity: isV5(params.value.model) ? 1 : p.fidelity,
             }))
         : [],
       normalizeVibe: normalizeVibe.value,

@@ -2,7 +2,23 @@
 import { computed, nextTick, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { fetchRemoteImage } from "@/api/tauri";
-import { MAX_PRECISE_REFS, MAX_VIBE_IMAGES, supportsNAIPreciseReference, supportsNAIVibeTransfer, type PreciseReferenceType } from "@/types/nai";
+import {
+  MAX_PRECISE_REFS,
+  MAX_VIBE_IMAGES,
+  PRECISE_TYPE_OPTIONS,
+  isV5,
+  precisePrefersSameOutfit,
+  preciseShowsFidelity,
+  preciseStrengthMax,
+  preciseSupportsOutfitToggle,
+  preciseTypeForGroup,
+  preciseTypeGroup,
+  preciseTypeWithOutfitPreference,
+  supportsNAIPreciseOutfit,
+  supportsNAIPreciseReference,
+  supportsNAIVibeTransfer,
+  type PreciseReferenceGroup,
+} from "@/types/nai";
 import { useAppStore } from "@/stores/app";
 import { useMaterialLibrary } from "@/stores/materialLibrary";
 import NaiIcon from "@/components/NaiIcon.vue";
@@ -22,18 +38,36 @@ const sketchOpen = ref(false);
 const sketchCanvas = ref<HTMLCanvasElement | null>(null);
 const vibeOk = computed(() => supportsNAIVibeTransfer(store.params.model));
 const preciseOk = computed(() => supportsNAIPreciseReference(store.params.model));
+const outfitOk = computed(() => supportsNAIPreciseOutfit(store.params.model));
+const showFidelity = computed(() => preciseShowsFidelity(store.params.model));
+const strengthMax = computed(() => preciseStrengthMax(store.params.model));
+const v5Inpaint = computed(() => isV5(store.params.model) && store.paintMode && Boolean(store.inpaintMask));
 const vibeOn = computed(() => store.vibeImages.some((item) => item.enabled));
 const preciseOn = computed(() => store.preciseReferences.some((item) => item.enabled));
-const PRECISE_TYPES: { value: PreciseReferenceType; label: string }[] = [
-  { value: "character&style", label: "角色和风格" },
-  { value: "character", label: "角色" },
-  { value: "style", label: "风格" },
-];
+const preciseTypes = computed(() => PRECISE_TYPE_OPTIONS.filter((item) => outfitOk.value || item.value !== "costume"));
 
-function switchToV45() {
-  store.params.model = store.params.model.includes("curated")
-    ? "nai-diffusion-4-5-curated"
-    : "nai-diffusion-4-5-full";
+function switchToPreciseModel() {
+  store.params.model = store.params.model.includes("curated") ? "nai-diffusion-5-curated" : "nai-diffusion-5-full";
+}
+
+function setPreciseGroup(id: string, group: PreciseReferenceGroup) {
+  store.updatePreciseReference(id, { type: preciseTypeForGroup(group) });
+}
+
+function setPreferOutfit(id: string, type: string, prefer: boolean) {
+  store.updatePreciseReference(id, { type: preciseTypeWithOutfitPreference(type, prefer) });
+}
+
+function setPreciseStrength(id: string, input: HTMLInputElement) {
+  const value = Number(input.value);
+  if (!Number.isFinite(value)) {
+    const current = store.preciseReferences.find((item) => item.id === id);
+    input.value = (current?.strength ?? 1).toFixed(2);
+    return;
+  }
+  const strength = Math.min(strengthMax.value, Math.max(0, Math.round(value * 100) / 100));
+  input.value = strength.toFixed(2);
+  store.updatePreciseReference(id, { strength });
 }
 
 function pick(kind: "i2i" | "vibe" | "precise") {
@@ -170,29 +204,37 @@ function useSketch() {
   sketchOpen.value = false;
 }
 
-function saveVibes() {
+async function saveVibes() {
   for (const vibe of store.vibeImages) {
-    library.addVibe({
+    const saved = await library.addVibe({
       name: "Vibe",
       previewUrl: vibe.previewUrl,
       infoExtracted: vibe.infoExtracted,
       strength: vibe.strength,
     });
+    if (!saved) {
+      store.status = library.error || "没有存进去";
+      return;
+    }
   }
-  store.status = library.error || "已保存到 Vibe 库";
+  store.status = store.vibeImages.length ? "已保存到 Vibe 库" : "当前没有风格迁移图";
 }
 
-function savePrecise() {
+async function savePrecise() {
   for (const item of store.preciseReferences) {
-    library.addPrecise({
+    const saved = await library.addPrecise({
       name: "精准参考",
       previewUrl: item.previewUrl,
       type: item.type,
       strength: item.strength,
       fidelity: item.fidelity,
     });
+    if (!saved) {
+      store.status = library.error || "没有存进去";
+      return;
+    }
   }
-  store.status = library.error || "已保存到精准参考库";
+  store.status = store.preciseReferences.length ? "已保存到精准参考库" : "当前没有精准参考";
 }
 </script>
 
@@ -332,7 +374,7 @@ function savePrecise() {
         <NaiIcon name="precise" :size="18" />
         <b>精准参考</b>
         <em v-if="store.preciseReferences.length">{{ store.preciseReferences.length }}</em>
-        <span>将生成绑定到角色或风格参考</span>
+        <span>将生成绑定到角色、风格或服装参考</span>
         <button class="icon" type="button" title="保存到精准参考库" :disabled="!store.preciseReferences.length" @click.stop="savePrecise">
           <NaiIcon name="folder" :size="14" />
         </button>
@@ -343,9 +385,10 @@ function savePrecise() {
       </div>
       <div v-if="preciseOpen" class="body">
         <p v-if="!preciseOk" class="banner">
-          精准参考仅 V4.5 可用
-          <button type="button" @click="switchToV45">切换到 V4.5</button>
+          精准参考仅 V4.5 和 V5 可用
+          <button type="button" @click="switchToPreciseModel">切换到 V5</button>
         </p>
+        <p v-else-if="v5Inpaint" class="banner">V5 局部重绘暂不支持精准参考，生成时会跳过这些图</p>
         <div v-if="!store.preciseReferences.length" class="drop">
           <span class="drop-hint"><NaiIcon name="upload" :size="15" /> 拖角色或风格参考图进来，或者</span>
           <span class="drop-acts">
@@ -358,23 +401,41 @@ function savePrecise() {
             <img class="tall" :src="item.previewUrl" alt="" />
             <div class="item-main">
               <select
-                :value="item.type"
-                @change="store.updatePreciseReference(item.id, { type: ($event.target as HTMLSelectElement).value as PreciseReferenceType })"
+                :value="preciseTypeGroup(item.type)"
+                @change="setPreciseGroup(item.id, ($event.target as HTMLSelectElement).value as PreciseReferenceGroup)"
               >
-                <option v-for="opt in PRECISE_TYPES" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+                <option v-for="opt in preciseTypes" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+                <option v-if="!outfitOk && preciseTypeGroup(item.type) === 'costume'" value="costume">服装（此模型会跳过）</option>
               </select>
+              <label v-if="outfitOk && preciseSupportsOutfitToggle(item.type)" class="check inline">
+                优先相同服装
+                <input
+                  type="checkbox"
+                  :checked="precisePrefersSameOutfit(item.type)"
+                  @change="setPreferOutfit(item.id, item.type, ($event.target as HTMLInputElement).checked)"
+                />
+              </label>
               <label class="slide compact">
-                <span>强度</span><b>{{ item.strength.toFixed(2) }}</b>
+                <span>强度</span>
+                <input
+                  class="num"
+                  type="number"
+                  :value="item.strength"
+                  min="0"
+                  :max="strengthMax"
+                  step="0.01"
+                  @change="setPreciseStrength(item.id, $event.target as HTMLInputElement)"
+                />
                 <input
                   :value="item.strength"
                   type="range"
                   min="0"
-                  max="1"
-                  step="0.01"
+                  :max="strengthMax"
+                  :step="showFidelity ? 0.01 : 0.05"
                   @input="store.updatePreciseReference(item.id, { strength: Number(($event.target as HTMLInputElement).value) })"
                 />
               </label>
-              <label class="slide compact">
+              <label v-if="showFidelity" class="slide compact">
                 <span>保真</span><b>{{ item.fidelity.toFixed(2) }}</b>
                 <input
                   :value="item.fidelity"
@@ -511,10 +572,23 @@ function savePrecise() {
 .slide { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; color: #fff; font-size: 12px; }
 .slide.compact { gap: 0 8px; color: var(--muted); font-size: 11px; }
 .slide input { grid-column: 1 / -1; }
+.slide input.num {
+  grid-column: auto;
+  width: 72px;
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.28);
+  color: #fff;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
 .slide b { font-variant-numeric: tabular-nums; color: #fff; }
 .foot { display: flex; align-items: center; gap: 6px; }
 .foot .grow { flex: 1; }
 .check { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; color: var(--muted); font-size: 12px; }
+.check.inline { margin-left: 0; font-size: 11px; }
 .check input { width: 14px; height: 14px; min-width: 0; }
 .banner {
   margin: 0;

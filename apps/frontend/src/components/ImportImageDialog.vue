@@ -81,7 +81,7 @@ function importMeta() {
         <button type="button" class="cream" :disabled="!vibeOk" :title="vibeOk ? '' : 'Vibe Transfer 需要 V3 / V4 / V4.5'" @click="useAs('vibe')">
           <NaiIcon name="vibe" :size="16" /> Vibe Transfer
         </button>
-        <button type="button" class="cream" :disabled="!preciseOk" :title="preciseOk ? '' : 'Precise Reference 仅 V4.5'" @click="useAs('precise')">
+        <button type="button" class="cream" :disabled="!preciseOk" :title="preciseOk ? '' : '精准参考仅 V4.5 和 V5'" @click="useAs('precise')">
           <NaiIcon name="precise" :size="16" /> Precise Reference
         </button>
         <button type="button" class="cream" :disabled="!insetOk" :title="insetOk ? '' : '参考插条只用于 NAI5'" @click="useAs('inset')">

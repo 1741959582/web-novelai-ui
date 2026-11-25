@@ -114,6 +114,14 @@ export function readImageDataUrl(path: string) {
   return invoke<string>("read_image_data_url", { path });
 }
 
+export function librarySaveImage(id: string, dataUrl: string) {
+  return invoke<string>("library_save_image", { id, dataUrl });
+}
+
+export function libraryDeleteImage(path: string) {
+  return invoke<void>("library_delete_image", { path });
+}
+
 export function fetchRemoteImage(url: string) {
   return invoke<string>("fetch_remote_image", { url });
 }

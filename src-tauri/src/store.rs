@@ -1,3 +1,4 @@
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
@@ -1186,6 +1187,66 @@ fn read_image_bytes_retry(path: &str) -> Result<Vec<u8>, String> {
         std::thread::sleep(std::time::Duration::from_millis(70 * (attempt + 1)));
     }
     Err(last)
+}
+
+fn library_dir() -> Result<PathBuf, String> {
+    let dir = data_dir()?.join("library");
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+fn decode_library_data_url(value: &str) -> Result<(&'static str, Vec<u8>), String> {
+    let rest = value.strip_prefix("data:").ok_or("不是图片数据")?;
+    let (meta, data) = rest.split_once(',').ok_or("图片数据不完整")?;
+    let ext = if meta.contains("jpeg") || meta.contains("jpg") {
+        "jpg"
+    } else if meta.contains("webp") {
+        "webp"
+    } else if meta.contains("gif") {
+        "gif"
+    } else if meta.contains("bmp") {
+        "bmp"
+    } else {
+        "png"
+    };
+    if !meta.contains(";base64") {
+        return Err("图片编码无法识别".into());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data.trim())
+        .map_err(|e| e.to_string())?;
+    if bytes.len() > 40 * 1024 * 1024 {
+        return Err("图片超过 40MB，无法存入库。".into());
+    }
+    if bytes.is_empty() {
+        return Err("图片是空的".into());
+    }
+    Ok((ext, bytes))
+}
+
+#[tauri::command]
+pub fn library_save_image(id: String, data_url: String) -> Result<String, String> {
+    let id: String = id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    if id.is_empty() {
+        return Err("无效的图片编号".into());
+    }
+    let (ext, bytes) = decode_library_data_url(&data_url)?;
+    let path = library_dir()?.join(format!("{id}.{ext}"));
+    fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub fn library_delete_image(path: String) -> Result<(), String> {
+    let dir = library_dir()?;
+    let path = PathBuf::from(&path);
+    if path.starts_with(&dir) {
+        let _ = fs::remove_file(path);
+    }
+    Ok(())
 }
 
 #[tauri::command]
