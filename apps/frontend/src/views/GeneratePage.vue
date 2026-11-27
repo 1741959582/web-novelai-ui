@@ -4,6 +4,8 @@ import { useRoute } from "vue-router";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { NAI_MODELS, NAI_SAMPLERS, isV4Plus, maxCharacterPrompts, supportsNAIPreciseReference, supportsNAIVibeTransfer } from "@/types/nai";
 import { useAppStore } from "@/stores/app";
+import { useMaterialLibrary } from "@/stores/materialLibrary";
+import { promptBlockName } from "@/utils/artistString";
 import { fetchRemoteImage } from "@/api/tauri";
 import { quoteAnlas } from "@/utils/anlas";
 import { applyResolution, inferResolution, type Orientation, type ResolutionFamily } from "@/utils/resolution";
@@ -26,6 +28,7 @@ import { loadAutoComplete } from "@/utils/promptTools";
 import { appendPromptChunk } from "@/utils/textUtils";
 
 const store = useAppStore();
+const materials = useMaterialLibrary();
 const route = useRoute();
 const aiOpen = ref(false);
 const NOISE_SCHEDULES = [
@@ -578,6 +581,21 @@ watch(
 const showModelMode = computed(() => isV4Plus(store.params.model));
 const modelOpen = ref(false);
 
+function saveArtistBlock() {
+  const positive = store.params.positivePrompt.trim();
+  const negative = store.params.negativePrompt.trim();
+  if (!positive && !negative) {
+    store.status = "基础提示词和负面都是空的";
+    return;
+  }
+  if (materials.blocks.some((block) => block.positive === positive && block.negative === negative)) {
+    store.status = "这组基础提示词和负面已经在块库里";
+    return;
+  }
+  const block = materials.addBlock({ name: promptBlockName(positive), positive, negative });
+  store.status = `已把基础提示词和负面一起存成「${block.name}」`;
+}
+
 function toggleModelMode() {
   store.params.modelMode = store.params.modelMode === "furry" ? "anime" : "furry";
 }
@@ -665,6 +683,7 @@ function toggleSeedPin() {
           @notice="store.status = $event"
         />
         <div class="quality-row">
+          <button type="button" class="ghost-text" @click="saveArtistBlock">存画师串</button>
           <button
             type="button"
             class="ghost-text"

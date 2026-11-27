@@ -2,6 +2,8 @@
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useAppStore } from "@/stores/app";
+import { useMaterialLibrary } from "@/stores/materialLibrary";
+import { promptBlockName } from "@/utils/artistString";
 import { useDeepseekStore } from "@/stores/deepseekChat";
 import { useApngStore, type ApngTab } from "@/stores/apng";
 import { useBatchStore } from "@/stores/batch";
@@ -10,6 +12,7 @@ import NaiIcon from "@/components/NaiIcon.vue";
 import type { HistoryItem } from "@/types/nai";
 
 const store = useAppStore();
+const library = useMaterialLibrary();
 const deepseek = useDeepseekStore();
 const apng = useApngStore();
 const batch = useBatchStore();
@@ -373,6 +376,32 @@ async function importFolder() {
   }
 }
 
+function saveArtist(items: HistoryItem[]) {
+  let saved = 0;
+  let skipped = 0;
+  for (const item of items) {
+    const positive = item.prompt.trim();
+    const negative = item.negativePrompt.trim();
+    if ((!positive && !negative) || library.blocks.some((block) => block.positive === positive && block.negative === negative)) {
+      skipped += 1;
+      continue;
+    }
+    library.addBlock({ name: promptBlockName(positive), positive, negative });
+    saved += 1;
+  }
+  store.status = saved
+    ? `已把 ${saved} 条基础提示词和负面存进块库${skipped ? `，${skipped} 条已经在库里` : ""}`
+    : "这些记录没有新的提示词可存";
+  return saved;
+}
+
+async function sendToEnhance() {
+  const chosen = items.value.filter((item) => picked.value.includes(item.id));
+  if (!chosen.length || sending.value) return;
+  sessionStorage.setItem("nai-dlssnr-ids", JSON.stringify(chosen.map((item) => item.id)));
+  await router.push("/enhance");
+}
+
 async function sendToBatch() {
   const chosen = items.value.filter((item) => picked.value.includes(item.id));
   if (!chosen.length || sending.value) return;
@@ -495,6 +524,8 @@ async function deleteItem(item: HistoryItem) {
               {{ target.label }}
             </button>
             <button type="button" :disabled="!picked.length || sending" @click="sendToBatch">导入批量</button>
+            <button type="button" :disabled="!picked.length || sending" @click="sendToEnhance">DLSSNR 增强</button>
+            <button type="button" :disabled="!picked.length || sending" @click="saveArtist(items.filter((item) => picked.includes(item.id)))">存画师串</button>
           </template>
         </div>
       </div>
@@ -553,6 +584,7 @@ async function deleteItem(item: HistoryItem) {
           <div class="acts">
             <button class="import" type="button" :disabled="busyId === item.id" @click.stop="sendFollow(item)">后续</button>
             <button class="import" type="button" @click.stop="store.importFromHistory(item)">导入元数据</button>
+            <button class="import artist" type="button" title="把这张图的基础提示词和负面一起存进块库" @click.stop="saveArtist([item])">存画师串</button>
             <div class="icon-row">
             <button class="icon" type="button" title="添加到 APNG" @click.stop="addApng(item)">
               <NaiIcon name="layers" :size="12" />
@@ -773,6 +805,7 @@ header { display: flex; justify-content: space-between; align-items: center; mar
   gap: 4px;
   margin-top: 6px;
 }
+.import.artist { grid-column: 1 / -1; }
 .icon-row {
   grid-column: 1 / -1;
   display: flex;

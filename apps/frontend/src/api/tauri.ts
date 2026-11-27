@@ -114,6 +114,43 @@ export function readImageDataUrl(path: string) {
   return invoke<string>("read_image_data_url", { path });
 }
 
+export interface DlssStatus {
+  installed: boolean;
+  windows: boolean;
+  tag: string;
+  message: string;
+}
+
+export interface DlssEnhanceRequest {
+  sourcePath: string;
+  scale: number;
+  style: number;
+  intensity: number;
+  localStructure: number;
+  localTone: number;
+  detail: number;
+  color: number;
+  skin: number;
+  autoMask: boolean;
+  prompt?: string;
+  negativePrompt?: string;
+  seed?: number;
+  model?: string;
+  groupId?: string;
+}
+
+export function dlssnrStatus() {
+  return invoke<DlssStatus>("dlssnr_status");
+}
+
+export function dlssnrInstall() {
+  return invoke<DlssStatus>("dlssnr_install");
+}
+
+export function dlssnrEnhance(request: DlssEnhanceRequest) {
+  return invoke<HistoryItem>("dlssnr_enhance", { request });
+}
+
 export function librarySaveImage(id: string, dataUrl: string) {
   return invoke<string>("library_save_image", { id, dataUrl });
 }

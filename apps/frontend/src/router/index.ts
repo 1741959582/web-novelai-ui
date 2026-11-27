@@ -23,6 +23,7 @@ export default createRouter({
     { path: "/tavern", name: "tavern", component: () => import("@/views/TavernPage.vue"), meta: { title: "酒馆 AI 生图" } },
     { path: "/deepseek", name: "deepseek", component: () => import("@/views/DeepSeekPage.vue"), meta: { title: "DeepSeek" } },
     { path: "/records", name: "records", component: () => import("@/views/RecordsPage.vue") },
+    { path: "/enhance", name: "enhance", component: () => import("@/views/EnhancePage.vue"), meta: { title: "DLSSNR" } },
     { path: "/settings", name: "settings", component: () => import("@/views/SettingsPage.vue") },
   ],
 });

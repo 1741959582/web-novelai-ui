@@ -3,6 +3,7 @@ mod batch_lists;
 mod censor;
 mod cl_tagger_local;
 mod danbooru;
+mod dlssnr;
 mod gpu;
 mod nai;
 mod nai_stream;
@@ -72,6 +73,9 @@ pub fn run() {
             wd_tagger::wd_tag_image,
             wd_tagger::wd_tag_cancel,
             gpu::gpu_detect,
+            dlssnr::dlssnr_status,
+            dlssnr::dlssnr_install,
+            dlssnr::dlssnr_enhance,
             cl_tagger_local::cl_tagger_status,
             cl_tagger_local::cl_tagger_download,
             cl_tagger_local::cl_tagger_open_dir,

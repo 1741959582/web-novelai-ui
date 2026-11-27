@@ -44,6 +44,7 @@ const groups: { label: string; items: NavItem[] }[] = [
     items: [
       { path: "/reverse", label: "反推", icon: "bulb" },
       { path: "/metadata", label: "原数据", icon: "file" },
+      { path: "/enhance", label: "DLSSNR", icon: "upscale" },
       { path: "/postprocess", label: "后期", icon: "upscale" },
       { path: "/apng", label: "APNG", icon: "film" },
       { path: "/fingerprint", label: "指纹", icon: "eye" },
